@@ -14,5 +14,6 @@ links:
 выбор — один файл. Формат — по `kb-curate`, тип `decision`.
 
 - [zone-split.md](zone-split.md) — движок вынесен в отдельную зону от финансовых данных
+- [request-channel.md](request-channel.md) — заявки из финансовой зоны идут в `inbox/`, а не правятся в коде
 - [library-not-database.md](library-not-database.md) — ядро — библиотека, а не база данных
 - [unknown-is-not-zero.md](unknown-is-not-zero.md) — неизвестное значение даёт `None`, а не ноль
