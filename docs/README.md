@@ -24,6 +24,7 @@ Markdown — источник правды. Всё производное — п
 ## Decisions
 
 - [zone-split.md](decisions/zone-split.md) — почему движок вынесен в отдельную зону от финансовых данных
+- [request-channel.md](decisions/request-channel.md) — почему заявки из финансовой зоны идут в `inbox/`, а не правятся в коде на месте
 - [library-not-database.md](decisions/library-not-database.md) — почему ядро — библиотека, а не база данных
 - [unknown-is-not-zero.md](decisions/unknown-is-not-zero.md) — почему неизвестное значение даёт `None`, а не ноль
 

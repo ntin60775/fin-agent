@@ -19,6 +19,7 @@
   rules/     kb-source-of-truth, kb-first, ship-gate, acceptance-rounds
 finance_core/  движок: касса (solver) и долги (debt) + README
 tests/         синтетические тесты движка — без личных данных
+inbox/         заявки из финансовой зоны (сырьё: потребность, а не решение)
 docs/          база знаний (это KB): reference, decisions, plans
 CONTEXT.md     доменные термины
 AGENTS.md      этот файл — читается первым
@@ -27,6 +28,7 @@ AGENTS.md      этот файл — читается первым
 ## С чего начать
 
 - **Как работать с двумя зонами** → [docs/reference/how-to-work.md](docs/reference/how-to-work.md)
+- **Заявки из финансовой зоны** → [inbox/](inbox/) — вход в работу: разобрать прежде чем начинать своё
 - **Устройство движка** → [finance_core/README.md](finance_core/README.md)
 - **База знаний** → [docs/README.md](docs/README.md)
 - **Модель знаний** (типы, свойства, ссылки) → [docs/ontology.md](docs/ontology.md)
