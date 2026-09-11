@@ -17,6 +17,7 @@ Markdown — источник правды. Всё производное — п
 
 ## Reference
 
+- [how-to-work.md](reference/how-to-work.md) — **как работать с двумя зонами: где открывать агента, кто что меняет**
 - [commands.md](reference/commands.md) — реестр команд и навыков (генерируемая часть — `gitmark inventory`)
 - [../CONTEXT.md](../CONTEXT.md) — доменные термины ядра: как называть вещи, чтобы не расходиться
 
