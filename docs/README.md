@@ -28,6 +28,10 @@ Markdown — источник правды. Всё производное — п
 - [library-not-database.md](decisions/library-not-database.md) — почему ядро — библиотека, а не база данных
 - [unknown-is-not-zero.md](decisions/unknown-is-not-zero.md) — почему неизвестное значение даёт `None`, а не ноль
 
+## Ops
+
+- [перенос-на-другую-машину.md](ops/перенос-на-другую-машину.md) — что копировать, что нужно на новой машине, как проверить
+
 ## Движок
 
 - [finance_core/README.md](../finance_core/README.md) — устройство, API, инварианты
