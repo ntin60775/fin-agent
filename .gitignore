@@ -1,0 +1,11 @@
+# Производное KB
+.gitmark/
+*-map.html
+
+# Эфемерное сессионное
+.scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
