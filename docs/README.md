@@ -27,6 +27,15 @@ Markdown — источник правды. Всё производное — п
 - [request-channel.md](decisions/request-channel.md) — почему заявки из финансовой зоны идут в `inbox/`, а не правятся в коде на месте
 - [library-not-database.md](decisions/library-not-database.md) — почему ядро — библиотека, а не база данных
 - [unknown-is-not-zero.md](decisions/unknown-is-not-zero.md) — почему неизвестное значение даёт `None`, а не ноль
+- [counterparty-model.md](decisions/counterparty-model.md) — почему кредитор уходит, а роли выводятся из истории
+- [derived-balances.md](decisions/derived-balances.md) — почему остаток и сальдо считаются, а не хранятся
+- [schedule-to-cash.md](decisions/schedule-to-cash.md) — почему связка двусторонняя: расписание туда, бюджет досрочек обратно
+- [card-schemas.md](decisions/card-schemas.md) — почему схема карточки — frontmatter и линтер, а не JSON Schema
+- [what-means-out.md](decisions/what-means-out.md) — почему «выбрался» — это покрытые расходы, а не закрытые долги
+
+## Планы
+
+- [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [obligations/](plans/obligations/README.md)
 
 ## Ops
 
