@@ -29,11 +29,19 @@ class Income:
 
 @dataclass
 class Payment:
-    """Платёж кредитору, финансируемый конкретным счётом."""
+    """Платёж контрагенту, финансируемый конкретным счётом.
+
+    `creditor` — строковое имя (старая форма, живёт до переезда зоны),
+    `counterparty` — уид контрагента и `purpose` — назначение (новая форма).
+    Платёж ссылается хотя бы на одного из них: платёж без контрагента не бывает.
+    Счёт обязателен — правило счёта живёт в модели, а не в комментарии.
+    """
     date: date
     amount: Decimal
-    creditor: str
-    account: str
+    creditor: str | None = None
+    account: str | None = None
+    counterparty: str | None = None
+    purpose: str | None = None
 
 
 @dataclass

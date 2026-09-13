@@ -2,8 +2,8 @@
 node_type: ticket
 title: Модель взаиморасчётов — контрагент, сделка, движение
 service: _platform
-status: draft
-updated: 2026-09-13
+status: active
+updated: 2026-09-14
 links:
   part_of: [README.md]
 ---
