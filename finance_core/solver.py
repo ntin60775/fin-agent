@@ -67,17 +67,26 @@ def _days_to_next_income(scenario: Scenario, day: date) -> int | None:
 
 
 def _validate(scenario: Scenario, main: str) -> None:
-    """Явная ошибка вместо KeyError при опечатке в имени счёта."""
+    """Явная ошибка вместо KeyError при опечатке в имени счёта.
+
+    Платёж обязан ссылаться на контрагента: уидом (новая форма) или строкой
+    имени (старая, живёт до переезда зоны).
+    """
     known = {a.name for a in scenario.accounts}
     refs = [(main, "основной счёт")]
     refs += [(i.account, "приход") for i in scenario.income]
-    refs += [(p.account, f"платёж {p.creditor!r}") for p in scenario.payments]
+    refs += [(p.account, f"платёж {p.counterparty or p.creditor!r}")
+             for p in scenario.payments]
     refs += [(t.from_account, "перевод (откуда)") for t in scenario.transfers]
     refs += [(t.to_account, "перевод (куда)") for t in scenario.transfers]
     for name, what in refs:
         if name not in known:
             raise ValueError(
                 f"{what}: неизвестный счёт {name!r}; объявлены: {sorted(known)}")
+    for p in scenario.payments:
+        if p.counterparty is None and p.creditor is None:
+            raise ValueError("платёж без контрагента: нужен уид контрагента "
+                             "или строковое имя кредитора")
 
 
 def run(scenario: Scenario, main: str) -> Result:

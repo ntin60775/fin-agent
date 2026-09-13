@@ -3,9 +3,10 @@ node_type: decision
 title: Остаток и сальдо считаются, а не хранятся
 service: _platform
 status: active
-updated: 2026-09-13
+updated: 2026-09-14
 links:
   depends_on: [library-not-database.md]
+  implemented_by: [../../finance_core/settlements.py]
   relates_to: [counterparty-model.md]
 ---
 

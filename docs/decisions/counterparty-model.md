@@ -3,8 +3,9 @@ node_type: decision
 title: Кредитор уходит — остаётся контрагент, а роли выводятся из истории
 service: _platform
 status: active
-updated: 2026-09-13
+updated: 2026-09-14
 links:
+  implemented_by: [../../finance_core/settlements.py]
   relates_to: [derived-balances.md, card-schemas.md]
 ---
 
