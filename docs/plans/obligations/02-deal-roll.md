@@ -2,8 +2,8 @@
 node_type: ticket
 title: Прокат сделок — график, вхождения со статусами, копилка
 service: _platform
-status: draft
-updated: 2026-09-13
+status: archived
+updated: 2026-09-14
 links:
   part_of: [README.md]
   depends_on: [01-settlements.md]
