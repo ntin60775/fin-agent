@@ -6,9 +6,10 @@ from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (Account, ConvergenceError, Counterparty, Deal,
-                            Income, Payment, Scenario, Settlements, Wallet,
-                            roll_cash, roll_deals, roll_months)
+from finance_core import (KIND_PREPAID, Account, ConvergenceError, Counterparty,
+                            Deal, Income, Payment, Scenario, Settlements,
+                            TransferHint, Wallet, roll_cash, roll_deals,
+                            roll_months, run)
 
 START = date(2026, 1, 1)
 
@@ -59,7 +60,7 @@ def test_roll_cash_one_month():
     assert len(months) == 1
     assert months[0].balances["main"] == D("1300")
     assert months[0].free == D("1300")
-    assert months[0].hole is None
+    assert months[0].hole == D("0")
 
 
 def test_roll_cash_multi_month_balances_carry():
@@ -99,16 +100,81 @@ def test_roll_cash_unavailable_wallet_cannot_pay():
         roll_cash(s, START, max_months=1)
 
 
-def test_roll_cash_hole_on_non_credit():
-    """Дыра: уход некредитного счёта в минус."""
+def test_roll_cash_does_not_pay_without_money():
+    """Платёж, которому не хватило кошелька, не проходит и в прокате месяцев.
+
+    Правило одно на оба пути: иначе ложь осталась бы ровно там, где зона смотрит.
+    """
     s = Scenario(
-        accounts=[Account("main", D("100"))],
-        payments=[Payment(date(2026, 1, 10), D("200"), account="main",
+        accounts=[Account("деньги", D("0")), Account("пустой", D("0"))],
+        income=[Income(date(2026, 1, 1), D("500"), "деньги")],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="пустой",
                           counterparty="c")],
     )
+    months = roll_cash(s, START, max_months=1, main="деньги")
+    assert months[0].balances == {"деньги": D("500"), "пустой": D("0")}
+    assert months[0].hole == D("0")                 # деньги есть — дыры нет
+    assert months[0].unsecured_total == D("500")
+    assert months[0].unsecured[0].hint == TransferHint("деньги", D("500"))
+    assert months[0].free == D("0")                 # эти деньги уже обещаны платежу
+
+
+def test_roll_cash_budget_counts_all_wallets():
+    """Бюджет досрочек считается по всем кошелькам, а не по кошельку сделки."""
+    s = Scenario(accounts=[Account("пустой", D("0")), Account("деньги", D("300"))])
+    months = roll_cash(s, START, max_months=1, main="деньги")
+    assert months[0].free == D("300")               # деньги лежат не там, где платит сделка
+
+
+def test_roll_cash_free_money_excludes_what_did_not_pass():
+    """Свободные деньги не считают обещанное: непрошедшее обязательство не отменено."""
+    s = Scenario(
+        accounts=[Account("деньги", D("500")), Account("пустой", D("0"))],
+        payments=[Payment(date(2026, 1, 10), D("300"), account="пустой",
+                          counterparty="c")],
+    )
+    months = roll_cash(s, START, max_months=1, main="деньги")
+    assert months[0].unsecured_total == D("300")
+    assert months[0].free == D("200")               # 500 на руках, 300 из них обещаны
+
+
+def test_roll_cash_hole_is_a_shortage_across_wallets():
+    """Дыра — нехватка суммарно по кошелькам; минус приходит снаружи."""
+    s = Scenario(accounts=[Account("main", D("-100")), Account("второй", D("0"))])
     months = roll_cash(s, START, max_months=1, main="main")
     assert months[0].hole == D("100")
-    assert months[0].hole_date == date(2026, 1, 10)
+    assert months[0].hole_date == START
+    assert months[0].unsecured == []
+
+
+def test_roll_cash_prepayment_takes_what_the_wallet_has():
+    """Досрочка проходит в границах кошелька, а не целиком."""
+    s = Scenario(
+        accounts=[Account("main", D("100"))],
+        payments=[Payment(date(2026, 4, 30), D("400"), account="main",
+                          counterparty="c", prepaid=True)],
+    )
+    months = roll_cash(s, date(2026, 4, 1), max_months=1, main="main")
+    assert months[0].balances["main"] == D("0")     # ушло ровно сто
+    assert months[0].unsecured_total == D("300")
+    assert months[0].unsecured[0].kind == KIND_PREPAID
+
+
+def test_both_paths_agree_on_the_guard():
+    """Касса и прокат месяцев считают предохранитель одинаково."""
+    s = Scenario(
+        accounts=[Account("деньги", D("100")), Account("пустой", D("0"))],
+        income=[Income(date(2026, 1, 5), D("500"), "деньги")],
+        payments=[Payment(date(2026, 1, 10), D("400"), account="пустой",
+                          counterparty="c"),
+                  Payment(date(2026, 1, 20), D("200"), account="деньги",
+                          counterparty="c")],
+    )
+    r = run(s, main="деньги")
+    months = roll_cash(s, START, max_months=1, main="деньги")
+    assert months[0].balances == r.balances
+    assert months[0].hole == r.hole
+    assert months[0].unsecured_total == r.unsecured_total
 
 
 def test_roll_cash_hole_on_starting_negative_balance():
@@ -129,7 +195,7 @@ def test_roll_cash_credit_negative_is_not_hole():
                           counterparty="c")],
     )
     months = roll_cash(s, START, max_months=1, main="card")
-    assert months[0].hole is None
+    assert months[0].hole == D("0")
 
 
 def test_roll_cash_living_floor_reduces_free():
@@ -177,18 +243,38 @@ def test_roll_months_converges():
 
 
 def test_roll_months_assumed_after_hole():
-    """Месяцы после дыры помечаются как посчитанные на допущении."""
+    """Месяцы после дыры помечаются как посчитанные на допущении.
+
+    Дыра приходит снаружи: движок её не создаёт, поэтому нехватка стоит на старте.
+    """
     deal = _deal(amount=D("1000"), schedule=_rule(start=START, payment=D("100")))
     book = _book(deal)
-    wallets = [_wallet("main", D("0"))]
-    # No income → hole in first month
+    wallets = [_wallet("main", D("-100"))]
     result = roll_months(
         book, START, wallets, [], [],
         living_floor=D("0"), max_months=3,
     )
-    assert result.cash_months[0].hole is not None
+    assert result.cash_months[0].hole == D("100")
     # All months from the first hole onward are assumed
     assert result.assumed == [1, 2, 3]
+
+
+def test_roll_months_marks_the_forecast_as_conditional():
+    """Прокат месяцев показывает, что прогноз долгов держится на переводе.
+
+    Кошелёк сделки пуст, деньги лежат на другом: долговая сторона считает, что
+    платежи прошли, а касса их не пропускает. Прогноз верен только при условии
+    перевода — и обе стороны этого условия видны числом, а не молчанием.
+    """
+    deal = _deal(amount=D("300"), schedule=_rule(start=START, payment=D("100")))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0")), _wallet("деньги", D("0"))]
+    incomes = [Income(date(2026, 1, 1), D("300"), "деньги")]
+    result = roll_months(book, START, wallets, incomes, [],
+                         living_floor=D("0"), max_months=3)
+    assert result.deal_roll.total_paid == D("300")      # долговая сторона: заплачено
+    assert result.unsecured_total == D("300")           # касса: не прошло ничего
+    assert result.cash_months[0].unsecured[0].hint.source == "деньги"
 
 
 def test_roll_months_raises_on_no_convergence():

@@ -71,3 +71,71 @@ class Scenario:
     #: Дата ближайшего дохода за окном сценария:
     #: без неё не измерить прожиточный минимум после последнего прихода в окне.
     income_horizon: date | None = None
+
+
+# --- правило кошелька ------------------------------------------------------
+#
+# Одно правило на оба носителя — `Account` в кассе и `Wallet` во взаиморасчётах:
+# у правила один носитель, иначе два места разойдутся. Функции принимают остаток
+# отдельным доводом, а не берут его из объекта: касса ведёт бегущий остаток, и
+# ёмкость кошелька меняется вместе с ним.
+
+def wallet_debt(balance: Decimal, *, is_credit: bool) -> Decimal:
+    """Минус на кредитном — долг. На некредитном минус — нехватка, а не долг."""
+    if is_credit and balance < 0:
+        return -balance
+    return Decimal(0)
+
+
+def wallet_money(balance: Decimal, *, is_credit: bool, available: bool) -> Decimal:
+    """Сколько остатка кошелька идёт в ликвидность.
+
+    Недоступный кошелёк не даёт ничего; минус на некредитном остаётся минусом —
+    это нехватка, а не деньги; свободный лимит кредитного деньгами не считается,
+    а плюс на кредитном — свои деньги (переплата), и он считается.
+    """
+    if not available:
+        return Decimal(0)
+    if is_credit:
+        return balance if balance > 0 else Decimal(0)
+    return balance
+
+
+def wallet_free_limit(balance: Decimal, *, is_credit: bool, available: bool,
+                      limit: Decimal | None) -> Decimal | None:
+    """Сколько лимита кошелька можно использовать: показывается, но не деньги.
+
+    У недоступного кошелька свободного лимита нет — ноль, а не число: арест или
+    закрытый банком лимит использования не дают. Размер линии при этом не
+    теряется — он в `limit`. Лимит неизвестен — None («не оценено»).
+    У некредитного кошелька кредитной линии нет вовсе — это ноль.
+    """
+    if not is_credit or not available:
+        return Decimal(0)
+    if limit is None:
+        return None
+    return max(limit - wallet_debt(balance, is_credit=is_credit), Decimal(0))
+
+
+def wallet_capacity(balance: Decimal, *, is_credit: bool, available: bool,
+                    limit: Decimal | None) -> Decimal | None:
+    """Сколько кошелёк может отдать под платёж: деньги кошелька плюс свободный лимит.
+
+    Деньги — это остаток, а на кредитном переплата (`wallet_money`). Складывать
+    со свободным лимитом именно остаток нельзя: у кредитного в минусе долг уже
+    вычтен из лимита, и второй раз он вычелся бы остатком — кошелёк с долгом 900
+    и лимитом 1000 объявил бы, что не может ничего, хотя сто рублей у него есть.
+    Недоступный кошелёк не отдаёт ничего: с арестованной карты не заплатить.
+    У кредитного с неизвестным лимитом ёмкость не оценена — None, а не ноль:
+    отказ по неизвестному движок не выдумывает, а подставленный ноль запретил бы
+    платёж, который на деле проходит. Отрицательной ёмкости не бывает: кошелёк,
+    ушедший в минус, не может отдать ничего.
+    """
+    if not available:
+        return Decimal(0)
+    free = wallet_free_limit(balance, is_credit=is_credit, available=available,
+                             limit=limit)
+    if free is None:
+        return None
+    money = wallet_money(balance, is_credit=is_credit, available=available)
+    return max(money + free, Decimal(0))
