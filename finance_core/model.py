@@ -17,6 +17,8 @@ class Account:
     name: str
     balance: Decimal
     is_credit: bool = False  # кредитка: минус на ней — долг, а не дыра
+    available: bool = True   # недоступный — в ликвидность не входит
+    limit: Decimal | None = None  # кредитный лимит; свободный лимит деньгами не считается
 
 
 @dataclass
@@ -35,6 +37,9 @@ class Payment:
     `counterparty` — уид контрагента и `purpose` — назначение (новая форма).
     Платёж ссылается хотя бы на одного из них: платёж без контрагента не бывает.
     Счёт обязателен — правило счёта живёт в модели, а не в комментарии.
+
+    `prepaid` — досрочка: платёж сверх графика. Касса проводит её после
+    обязательных платежей месяца, поэтому свободные деньги считаются до неё.
     """
     date: date
     amount: Decimal
@@ -42,6 +47,7 @@ class Payment:
     account: str | None = None
     counterparty: str | None = None
     purpose: str | None = None
+    prepaid: bool = False
 
 
 @dataclass

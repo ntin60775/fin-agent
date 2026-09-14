@@ -18,9 +18,11 @@
 from .debt import (Debt, MonthSnapshot, Plan, compare_strategies,
                    roll_forward)
 from .model import Account, Income, Payment, Scenario, Transfer
-from .roll import (AVALANCHE, SNOWBALL, STRATEGIES, DealMonth, DealRoll,
-                   Expectation, Gap, ScheduledPayment, UnitMonth,
-                   compare_deal_strategies, roll_deals)
+from .roll import (AVALANCHE, SNOWBALL, STRATEGIES, ConvergenceError,
+                   DealMonth, DealRoll, Expectation, Gap, MonthsRoll,
+                   ScheduledPayment, UnitMonth, compare_deal_strategies,
+                   roll_deals, roll_months)
+from .solver import CashMonth, roll_cash
 from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, EXPECTED, IN,
                           I_OWE, KINDS, LEGAL, MOVEMENT_DIRECTIONS,
                           OCCURRENCE_STATUSES, OUT, OWED_TO_ME, PAID, PAID_LATE,
@@ -38,8 +40,8 @@ from .solver import (Outcome, Result, Step, compare, cover_cost, optional_cap,
 __all__ = [
     # касса
     "Account", "Income", "Payment", "Transfer", "Scenario",
-    "Step", "Result", "Outcome", "run", "optional_cap", "cover_cost",
-    "outcome", "compare",
+    "Step", "Result", "Outcome", "run", "roll_cash", "optional_cap",
+    "cover_cost", "outcome", "compare",
     # старый прокат долгов
     "Debt", "MonthSnapshot", "Plan", "roll_forward", "compare_strategies",
     # взаиморасчёты
@@ -49,8 +51,9 @@ __all__ = [
     "counterparty_balance", "counterparty_role", "funding_wallet",
     "payment_channel", "beneficiary", "liquidity", "occurrences", "planned_date",
     # прокат сделок
-    "roll_deals", "compare_deal_strategies", "DealRoll", "DealMonth",
-    "ScheduledPayment", "UnitMonth", "Expectation", "Gap",
+    "roll_deals", "roll_months", "compare_deal_strategies", "DealRoll",
+    "DealMonth", "ScheduledPayment", "UnitMonth", "Expectation", "Gap",
+    "MonthsRoll", "CashMonth", "ConvergenceError",
     # объявленные наборы
     "I_OWE", "OWED_TO_ME", "DIRECTIONS", "OUT", "IN", "MOVEMENT_DIRECTIONS",
     "PERSON", "LEGAL", "KINDS", "SUBTYPES", "STARTER_GROUPS", "WALLET_KINDS",

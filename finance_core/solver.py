@@ -18,10 +18,23 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
 
-from .model import Scenario
+from .model import Income, Scenario
 
 KOPEK = Decimal("0.01")
 DAYS_IN_MONTH = Decimal(30)
+
+
+@dataclass
+class CashMonth:
+    """Касса за месяц: остатки, дыра, нехватка до прожиточного минимума, свободные деньги."""
+    index: int
+    month: date
+    balances: dict[str, Decimal]
+    hole: Decimal | None
+    hole_date: date | None
+    floor_gap: Decimal | None
+    floor_gap_date: date | None
+    free: Decimal
 
 
 @dataclass
@@ -196,3 +209,162 @@ def compare(variants: Mapping[str, Scenario], main: str,
             reserve: Decimal) -> list[Outcome]:
     """Прогнать несколько сценариев и вернуть итоги в порядке передачи."""
     return [outcome(label, s, main, reserve) for label, s in variants.items()]
+
+
+def _month_start(day: date, index: int) -> date:
+    """Первый день месяца через `index` месяцев от месяца даты."""
+    year, month = day.year, day.month + index
+    return date(year + (month - 1) // 12, (month - 1) % 12 + 1, 1)
+
+
+def _month_end(day: date) -> date:
+    """Последний день месяца даты."""
+    import calendar
+    return date(day.year, day.month, calendar.monthrange(day.year, day.month)[1])
+
+
+
+def _validate_accounts(scenario: Scenario) -> None:
+    """Проверка счетов: недоступный не может финансировать платёж."""
+    known = {a.name for a in scenario.accounts}
+    for p in scenario.payments:
+        if p.account is not None and p.account not in known:
+            raise ValueError(
+                f"платёж {p.counterparty or p.creditor!r}: неизвестный счёт {p.account!r}; "
+                f"объявлены: {sorted(known)}")
+        if p.account is not None:
+            acct = next(a for a in scenario.accounts if a.name == p.account)
+            if not acct.available:
+                raise ValueError(
+                    f"платёж {p.counterparty or p.creditor!r}: счёт {p.account!r} недоступен")
+    for i in scenario.income:
+        if i.account not in known:
+            raise ValueError(
+                f"приход: неизвестный счёт {i.account!r}; объявлены: {sorted(known)}")
+    for t in scenario.transfers:
+        if t.from_account not in known:
+            raise ValueError(
+                f"перевод (откуда): неизвестный счёт {t.from_account!r}")
+        if t.to_account not in known:
+            raise ValueError(
+                f"перевод (куда): неизвестный счёт {t.to_account!r}")
+    for p in scenario.payments:
+        if p.counterparty is None and p.creditor is None:
+            raise ValueError("платёж без контрагента: нужен уид контрагента "
+                             "или строковое имя кредитора")
+
+
+def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
+              main: str | None = None) -> list[CashMonth]:
+    """Прокатить кассу по месяцам от `start`.
+
+    Месяцы календарные; первый — с `start` до конца месяца, неполный.
+    Остатки предыдущего месяца — вход следующего. Доходы раньше платежей
+    в один день. Даты доходов и платежей вычислены вызывающим по тем же
+    правилам: кламп на конец месяца и сдвиг с выходного.
+
+    Платёж с `prepaid=True` — досрочка: она уходит после обязательных платежей
+    месяца, поэтому свободные деньги считаются до неё. Неизвестный прожиточный
+    минимум даёт `floor_gap = None` («не оценено»), а не ноль.
+    """
+    _validate_accounts(scenario)
+    bal: dict[str, Decimal] = {a.name: a.balance for a in scenario.accounts}
+    if main is None:
+        main = next(iter(bal))
+    elif main not in bal:
+        raise ValueError(
+            f"основной счёт: неизвестный счёт {main!r}; объявлены: {sorted(bal)}")
+
+    # Доходы: даты вычислены вызывающим по тем же правилам, что и платежи
+    incomes = sorted(scenario.income, key=lambda i: i.date)
+
+    payments = sorted(scenario.payments, key=lambda p: p.date)
+    transfers = sorted(scenario.transfers, key=lambda t: t.date)
+
+    months: list[CashMonth] = []
+    for index in range(1, max_months + 1):
+        month = _month_start(start, index - 1)
+        end = _month_end(month)
+        window_start = start if index == 1 else month
+
+        # События месяца: доходы раньше платежей в один день; досрочки — после
+        # обязательных: свободные деньги становятся известны, когда месяц прожит.
+        regular: list[tuple[date, str, Decimal, str]] = []
+        prepaid: list[tuple[date, str, Decimal, str]] = []
+        for i in incomes:
+            if window_start <= i.date <= end:
+                regular.append((i.date, i.account, i.amount, "income"))
+        for p in payments:
+            if not window_start <= p.date <= end:
+                continue
+            row = (p.date, p.account, -p.amount, "payment")
+            (prepaid if p.prepaid else regular).append(row)
+        for t in transfers:
+            if window_start <= t.date <= end:
+                regular.append((t.date, t.from_account, -t.amount, "transfer"))
+                regular.append((t.date, t.to_account, t.amount, "transfer"))
+
+        # income before payment on same day
+        regular.sort(key=lambda e: (e[0], 0 if e[3] == "income" else 1))
+        prepaid.sort(key=lambda e: e[0])
+
+        start_bal = dict(bal)
+        timeline: list[Step] = []
+        for d, acct, delta, _ in regular:
+            bal[acct] = bal[acct] + delta
+            timeline.append(Step(d, acct, delta, bal[acct]))
+
+        # Нехватка до прожиточного минимума: по обязательным событиям месяца —
+        # досрочка тратится уже после того, как на жизнь отложено.
+        main_steps = [s for s in timeline if s.account == main]
+        floor_gap, floor_gap_date = _assess_floor(scenario, main_steps)
+
+        # Свободные деньги: доступные остатки минус прожиточный минимум месяца.
+        # Считаются до досрочек — это и есть бюджет досрочек.
+        total_money = Decimal(0)
+        for a in scenario.accounts:
+            if not a.available:
+                continue
+            if a.is_credit:
+                total_money += max(bal[a.name], Decimal(0))
+            else:
+                total_money += bal[a.name]
+        if scenario.living_floor_monthly is not None:
+            days = (end - window_start).days + 1
+            monthly_living = (scenario.living_floor_monthly * Decimal(days)
+                              / DAYS_IN_MONTH).quantize(KOPEK, rounding=ROUND_CEILING)
+            free = max(total_money - monthly_living, Decimal(0))
+        else:
+            free = total_money
+
+        # Досрочки — после обязательных: свободные деньги уже посчитаны, второй
+        # раз в бюджет они не попадут, а касса увидит, что деньги ушли.
+        for d, acct, delta, _ in prepaid:
+            bal[acct] = bal[acct] + delta
+            timeline.append(Step(d, acct, delta, bal[acct]))
+
+        # Дыра: худший остаток доступных некредитных счетов, включая старт
+        hole: Decimal | None = None
+        hole_date: date | None = None
+        for a in scenario.accounts:
+            if a.available and not a.is_credit and start_bal[a.name] < 0:
+                if hole is None or start_bal[a.name] < hole:
+                    hole = start_bal[a.name]
+                    hole_date = window_start
+        for s in timeline:
+            acct = next(a for a in scenario.accounts if a.name == s.account)
+            if acct.available and not acct.is_credit and s.balance_after < 0:
+                if hole is None or s.balance_after < hole:
+                    hole = s.balance_after
+                    hole_date = s.date
+        if hole is not None:
+            hole = abs(hole)
+
+        months.append(CashMonth(
+            index=index, month=month, balances=dict(bal),
+            hole=hole, hole_date=hole_date,
+            floor_gap=floor_gap, floor_gap_date=floor_gap_date,
+            free=free,
+        ))
+
+    return months

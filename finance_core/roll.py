@@ -22,6 +22,9 @@
   растёт по ставке сделки.
 - **Пробел — не ноль.** Сделка с неизвестной ставкой или без правила графика в
   прокат не входит и перечисляется пробелом (`Gap`).
+- **Досрочка — тоже платёж.** Она уходит в расписание платежом без вхождения
+  (`ScheduledPayment.planned is None`): деньги покидают кассу, и касса обязана это
+  видеть. Свободные деньги считаются до досрочек — это и есть их бюджет.
 
 Прокат месячный: платежи внутри месяца агрегируются в его итог, а дни у платежей
 остаются — по ним начисляются проценты у дневной ставки. Точку отсчёта и бюджет
@@ -35,9 +38,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
+from .model import Account, Income, Payment, Scenario, Transfer
 from .settlements import (I_OWE, OWED_TO_ME, Deal, Occurrence, Settlements,
-                          deal_amount_at, deal_balance, deal_holder_at,
+                          Wallet, deal_amount_at, deal_balance, deal_holder_at,
                           funding_wallet, occurrences, planned_date)
+from .solver import roll_cash
 
 KOPEK = Decimal("0.01")
 DAYS_IN_YEAR = Decimal(365)
@@ -52,17 +57,18 @@ STRATEGIES = (AVALANCHE, SNOWBALL)
 
 @dataclass
 class ScheduledPayment:
-    """Платёж расписания: что, когда и с какого кошелька уходит по графику.
+    """Платёж расписания: что, когда и с какого кошелька уходит.
 
-    `planned` — плановая дата вхождения, по которой платёж опознаётся; `unit` —
-    копилка, если платёж идёт в неё, а не в остаток сделки.
+    `planned` — плановая дата вхождения, по которой платёж опознаётся; `None` —
+    досрочка: вхождения у неё нет, деньги уходят сверх графика. `unit` — копилка,
+    если платёж идёт в неё, а не в остаток сделки.
     """
     date: date
     amount: Decimal
     deal: str
     counterparty: str
     wallet: str | None
-    planned: date
+    planned: date | None = None
     unit: str | None = None
 
 
@@ -337,13 +343,18 @@ def _facts_at(book: Settlements, deal_uid: str, start: date) -> date:
 
 def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
                strategy: str = AVALANCHE, max_months: int = 600,
-               consent_to_second: bool = False) -> DealRoll:
+               consent_to_second: bool = False,
+               budgets: Mapping[int, Decimal] | None = None) -> DealRoll:
     """Прокатить сделки по месяцам от `start`.
 
     Бюджет месяца — обязательная нагрузка по графику плюс `monthly_extra`;
     нагрузка считается один раз, на начало проката, поэтому освободившийся платёж
     остаётся в бюджете. Обязательные вхождения платятся по датам, свободные
     деньги уходят по стратегии — сначала обязательный график, потом досрочки.
+
+    `budgets` — бюджет досрочек по месяцам (индекс → сумма); если задан,
+    используется вместо `monthly_extra`. Нужен для связки с кассой: свободные
+    деньги месяца становятся бюджетом досрочек.
 
     Второй приоритет не платится, пока владелец не дал согласия
     (`consent_to_second`); без согласия его свободный остаток показывается
@@ -461,7 +472,8 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
     for index in range(1, max_months + 1):
         month = _month_start(start, index - 1)
         rows = due.get(index, [])
-        pool = baseline.get(index, Decimal(0)) + monthly_extra
+        extra = budgets.get(index, Decimal(0)) if budgets is not None else monthly_extra
+        pool = baseline.get(index, Decimal(0)) + extra
         paid = Decimal(0)
         prepaid = Decimal(0)
         payments: list[ScheduledPayment] = []
@@ -522,6 +534,8 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
             pool -= amount
             paid += amount
             prepaid += amount
+            payments.append(_prepayment(book, open_deals, open_units, target,
+                                        amount, month))
 
         # 4. Второй приоритет: сам не платится — предлагается.
         second_open = any(o.second and o.balance > 0 for o in open_deals.values())
@@ -538,6 +552,8 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
                 pool -= amount
                 paid += amount
                 prepaid += amount
+                payments.append(_prepayment(book, open_deals, open_units, target,
+                                            amount, month))
 
         for unit in open_units.values():
             if unit.closed:
@@ -563,6 +579,24 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
 
     return _result(book, months, total_interest, freedom, start_total, stalled,
                    receivables, gaps, start)
+
+
+def _prepayment(book: Settlements, open_deals: dict[str, _Open],
+                open_units: dict[str, _Unit], target: _Target,
+                amount: Decimal, month: date) -> ScheduledPayment:
+    """Досрочка как платёж расписания: вхождения нет, деньги уходят сверх графика.
+
+    Дата — конец месяца: свободные деньги становятся известны, когда обязательные
+    платежи месяца уже прошли. У копилки платёж числится за первым участником.
+    """
+    unit = open_units.get(target.uid)
+    uid = unit.members[0] if unit is not None else target.uid
+    when = _month_end(month)
+    return ScheduledPayment(
+        date=when, amount=amount, deal=uid,
+        counterparty=deal_holder_at(book, uid, when),
+        wallet=funding_wallet(open_deals[uid].deal), planned=None,
+        unit=unit.uid if unit is not None else None)
 
 
 def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
@@ -613,6 +647,124 @@ def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
     expectations.sort(key=lambda e: e.date)
     return DealRoll(months, total_interest, freedom, start_total, stalled,
                     expectations, gaps)
+
+
+@dataclass
+class MonthsRoll:
+    """Прокат месяцев: долги + касса, до сходимости.
+
+    `deal_roll` — прокат сделок; `cash_months` — касса по месяцам.
+    `iterations` — сколько итераций до сходимости; `assumed` — месяцы,
+    посчитанные на допущении (после дыры прокат не останавливается).
+    """
+    deal_roll: DealRoll
+    cash_months: list["CashMonth"]
+    iterations: int
+    assumed: list[int] = field(default_factory=list)
+
+
+class ConvergenceError(Exception):
+    """Расчёт не сошёлся за отведённое число итераций."""
+
+
+def roll_months(book: Settlements, start: date,
+                wallets: list[Wallet],
+                incomes: list[Income],
+                one_offs: list[Payment],
+                living_floor: Decimal | None,
+                transfers: list[Transfer] = (),
+                income_horizon: date | None = None,
+                strategy: str = AVALANCHE,
+                max_months: int = 600,
+                max_iterations: int = 100,
+                consent_to_second: bool = False,
+                main: str | None = None) -> MonthsRoll:
+    """Прокатить месяцы: долги отдают расписание, касса возвращает бюджет досрочек.
+
+    Связка замкнута: свободные деньги месяца становятся бюджетом досрочек,
+    обязательства пересчитываются — и так до сходимости. Если не сошлось —
+    ошибка с понятной причиной.
+
+    Кроме расписания касса принимает приходы, переводы и разовые платежи
+    (`one_offs` — то, что не из сделок); `income_horizon` нужен, чтобы измерить
+    прожиточный минимум после последнего прихода в окне.
+
+    Месяцы после дыры помечаются как посчитанные на допущении: прокат не
+    останавливается и не уходит в минус молча.
+    """
+    if strategy not in STRATEGIES:
+        raise ValueError(f"неизвестная стратегия: {strategy!r}")
+
+    accounts = [
+        Account(
+            name=w.uid,
+            balance=w.balance,
+            is_credit=w.is_credit,
+            available=w.available,
+            limit=w.limit,
+        )
+        for w in wallets
+    ]
+    if main is None and wallets:
+        main = wallets[0].uid
+
+    budgets: dict[int, Decimal] = {}
+    deal_roll: DealRoll | None = None
+    cash_months: list["CashMonth"] = []
+
+    for iteration in range(1, max_iterations + 1):
+        deal_roll = roll_deals(
+            book, start, Decimal(0), strategy=strategy,
+            max_months=max_months,
+            consent_to_second=consent_to_second,
+            budgets=budgets,
+        )
+
+        # Собрать платежи расписания в сценарий кассы
+        payments: list[Payment] = list(one_offs)
+        for dm in deal_roll.months:
+            for sp in dm.payments:
+                if sp.wallet is None:
+                    continue
+                payments.append(Payment(
+                    date=sp.date,
+                    amount=sp.amount,
+                    account=sp.wallet,
+                    counterparty=sp.counterparty,
+                    prepaid=sp.planned is None,
+                ))
+
+        scenario = Scenario(
+            accounts=accounts,
+            income=list(incomes),
+            payments=payments,
+            transfers=list(transfers),
+            living_floor_monthly=living_floor,
+            income_horizon=income_horizon,
+        )
+        cash_months = roll_cash(scenario, start, max_months=max_months, main=main)
+
+        new_budgets = {cm.index: cm.free for cm in cash_months}
+        # Сходимость: бюджеты не изменились
+        if new_budgets == budgets:
+            break
+        budgets = new_budgets
+    else:
+        raise ConvergenceError(
+            f"расчёт не сошёлся за {max_iterations} итераций; "
+            f"последний бюджет: {budgets}"
+        )
+
+    # Месяцы после дыры — на допущении
+    assumed: list[int] = []
+    hole_seen = False
+    for cm in cash_months:
+        if cm.hole is not None:
+            hole_seen = True
+        if hole_seen:
+            assumed.append(cm.index)
+
+    return MonthsRoll(deal_roll, cash_months, iteration, assumed)
 
 
 def compare_deal_strategies(book: Settlements, start: date, monthly_extra: Decimal,
