@@ -189,7 +189,7 @@ links:
 | 08 | [Перенос данных](08-data-migration.md) | 07 | draft |
 | 09 | [Зона: сценарии](09-zone-scenarios.md) | 08, 03 | draft |
 | 10 | [Контракт: убрать старую форму](10-clean-cutover.md) | 09 | draft |
-| 11 | [Приёмка, раунд 1](11-acceptance-round-1.md) | 03 | draft |
+| 11 | [Приёмка, раунд 1](11-acceptance-round-1.md) | 03 | archived |
 | 12 | [Кредитный лимит](12-credit-limit.md) | 11 | draft |
 
 04 и 05 друг друга не блокируют: оба опираются на 03 и идут в любом порядке.
