@@ -662,6 +662,16 @@ class MonthsRoll:
     iterations: int
     assumed: list[int] = field(default_factory=list)
 
+    @property
+    def unsecured_total(self) -> Decimal:
+        """Сколько за весь прокат не прошло из-за ёмкости своего кошелька.
+
+        Не ноль — прогноз долгов держится на переводе: столько денег не дошло до
+        получателей, и долг закроется только после того, как их переведут.
+        Каждый такой платёж назван в `cash_months` вместе с кошельком-источником.
+        """
+        return sum((cm.unsecured_total for cm in self.cash_months), Decimal(0))
+
 
 class ConvergenceError(Exception):
     """Расчёт не сошёлся за отведённое число итераций."""
@@ -759,7 +769,7 @@ def roll_months(book: Settlements, start: date,
     assumed: list[int] = []
     hole_seen = False
     for cm in cash_months:
-        if cm.hole is not None:
+        if cm.hole > 0:
             hole_seen = True
         if hole_seen:
             assumed.append(cm.index)

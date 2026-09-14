@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 
+from .model import wallet_debt, wallet_free_limit, wallet_money
+
 # --- объявленные наборы ----------------------------------------------------
 
 #: Направление сделки: кто кому должен.
@@ -108,9 +110,7 @@ class Wallet:
     @property
     def debt(self) -> Decimal:
         """Минус на кредитном — долг. На некредитном минус — дыра, а не долг."""
-        if self.is_credit and self.balance < 0:
-            return -self.balance
-        return Decimal(0)
+        return wallet_debt(self.balance, is_credit=self.is_credit)
 
     @property
     def overpayment(self) -> Decimal:
@@ -123,30 +123,23 @@ class Wallet:
     def free_limit(self) -> Decimal | None:
         """Сколько лимита кошелька можно использовать: показывается, но не деньги.
 
-        У недоступного кошелька свободного лимита нет — ноль, а не число: арест
-        или закрытый банком лимит использования не дают. Размер линии при этом
-        не теряется — он в `limit`. Лимит неизвестен — None («не оценено»).
-        У некредитного кошелька кредитной линии нет вовсе — это ноль.
+        Правило — `model.wallet_free_limit`: у недоступного кошелька свободного
+        лимита нет — ноль, а не число; неизвестный лимит — None («не оценено»);
+        у некредитного линии нет вовсе.
         """
-        if not self.is_credit or not self.available:
-            return Decimal(0)
-        if self.limit is None:
-            return None
-        return max(self.limit - self.debt, Decimal(0))
+        return wallet_free_limit(self.balance, is_credit=self.is_credit,
+                                 available=self.available, limit=self.limit)
 
     @property
     def money(self) -> Decimal:
         """Сколько остатка кошелька идёт в ликвидность.
 
-        Недоступный кошелёк не даёт ничего; минус на некредитном остаётся
-        минусом — это дыра, а не деньги; свободный лимит кредитного деньгами не
-        считается.
+        Правило — `model.wallet_money`: недоступный кошелёк не даёт ничего; минус
+        на некредитном остаётся минусом — это дыра, а не деньги; свободный лимит
+        кредитного деньгами не считается.
         """
-        if not self.available:
-            return Decimal(0)
-        if self.is_credit:
-            return self.overpayment
-        return self.balance
+        return wallet_money(self.balance, is_credit=self.is_credit,
+                            available=self.available)
 
 
 @dataclass

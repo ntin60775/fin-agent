@@ -31,12 +31,12 @@ links:
 ```mermaid
 flowchart LR
     subgraph A["fin-agent — архитектурная зона"]
-        E["finance_core<br/><i>движок: касса + долги</i>"]
-        AT["tests/<br/><i>28 синтетических</i>"]
+        E["finance_core<br/><i>движок: касса,<br/>взаиморасчёты, прокат</i>"]
+        AT["tests/<br/><i>синтетические</i>"]
     end
     subgraph F["finance — финансовая зона"]
         S["scenarios/<br/><i>личные цифры</i>"]
-        FT["tests/<br/><i>17 сценарных</i>"]
+        FT["tests/<br/><i>сценарные</i>"]
     end
     E -->|"установлен как пакет"| S
     S --> FT
