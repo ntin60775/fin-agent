@@ -7,7 +7,8 @@ from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (Account, Income, Payment, Scenario, Transfer,
+from finance_core import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER, Account,
+                          Income, Payment, Scenario, Transfer, TransferHint,
                           compare, cover_cost, optional_cap, run)
 
 
@@ -80,17 +81,217 @@ def test_transfer_moves_money_without_changing_total():
     assert r.total == D("100")
 
 
-def test_hole_is_lowest_point_of_main_account():
+def test_payment_does_not_pass_when_the_wallet_is_empty():
+    """Платёж, которому не хватило ёмкости кошелька, не проходит целиком.
+
+    Регресс на класс ошибок «движок сам создаёт дыру»: платёж уходил с
+    финансирующего кошелька, уводил его в минус, а деньги простаивали рядом.
+    """
     s = Scenario(
         accounts=[Account("main", D("1000"))],
-        income=[Income(date(2026, 1, 25), D("500"), "main")],
-        payments=[Payment(date(2026, 1, 10), D("1200"), "x", "main"),
-                  Payment(date(2026, 1, 20), D("100"), "y", "main")],
+        payments=[Payment(date(2026, 1, 10), D("1200"), "x", "main")],
     )
     r = run(s, main="main")
-    assert r.hole == D("-300")
-    assert r.min_date == date(2026, 1, 20)
-    assert r.end_balance == D("200")
+    assert r.balances["main"] == D("1000")          # кошелёк не ушёл в минус
+    assert r.min_balance == D("1000")               # остаток остался остатком
+    assert r.hole == D("0")                         # деньги есть — дыры нет
+    [(u,)] = [r.unsecured]
+    assert (u.date, u.amount, u.paid, u.short, u.kind) == (
+        date(2026, 1, 10), D("1200"), D("0"), D("200"), KIND_PAYMENT)
+    # Не прошёл целиком, а не хватило двухсот: столько и надо перевести.
+    assert u.amount - u.paid == D("1200")
+
+
+def test_hole_is_a_shortage_across_wallets():
+    """Дыра — нехватка суммарно по доступным кошелькам: «денег нет нигде».
+
+    Необеспеченный платёж дырой не становится: деньги есть, но не на этом
+    кошельке. Смешать их значит потерять причину.
+    """
+    elsewhere = Scenario(
+        accounts=[Account("деньги", D("500")), Account("пустой", D("0"))],
+        payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")],
+    )
+    r = run(elsewhere, main="деньги")
+    assert r.hole == D("0")
+    assert r.unsecured_total == D("300")
+    assert r.balances == {"деньги": D("500"), "пустой": D("0")}
+
+    nowhere = Scenario(
+        accounts=[Account("деньги", D("100")), Account("пустой", D("0"))],
+        payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")],
+    )
+    assert run(nowhere, main="деньги").hole == D("0")   # деньги на одном есть
+
+
+def test_hole_comes_from_the_outside():
+    """Дыра приходит снаружи — остатком, который уже в минусе.
+
+    Даты у такой дыры нет: события её не создавали.
+    """
+    r = run(Scenario(accounts=[Account("main", D("-300"))]), main="main")
+    assert r.hole == D("300")
+    assert r.hole_date is None
+    assert r.unsecured == []
+
+
+def test_money_on_another_wallet_is_not_a_hole():
+    """Деньги на другом кошельке — необеспеченность, а не дыра, и лечится переводом."""
+    s = Scenario(
+        accounts=[Account("деньги", D("0")), Account("пустой", D("0"))],
+        income=[Income(date(2026, 1, 1), D("500"), "деньги")],
+        payments=[Payment(date(2026, 1, 10), D("500"), "кредитор", "пустой")],
+        living_floor_monthly=D("0"),
+    )
+    r = run(s, main="деньги")
+    assert r.balances == {"деньги": D("500"), "пустой": D("0")}
+    assert r.hole == D("0")
+    assert r.unsecured_total == D("500")
+    assert r.unsecured[0].hint == TransferHint("деньги", D("500"))
+
+
+def test_prepayment_takes_what_the_wallet_can_give():
+    """Досрочка — исключение по сумме: движок назначает столько, сколько кошелёк может.
+
+    Обязательство платят целиком или не платят вовсе, а досрочку движок выбирает
+    сам — и берёт её в границах кошелька.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("100"))],
+        payments=[Payment(date(2026, 1, 10), D("400"), "x", "main", prepaid=True)],
+    )
+    r = run(s, main="main")
+    assert r.balances["main"] == D("0")             # ушло ровно сто
+    [(u,)] = [r.unsecured]
+    assert (u.kind, u.amount, u.paid, u.short) == (
+        KIND_PREPAID, D("400"), D("100"), D("300"))
+
+
+def test_prepayment_with_nothing_to_give_pays_nothing():
+    """Досрочка на пустом кошельке не платит ничего и в минус не уходит."""
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        payments=[Payment(date(2026, 1, 10), D("400"), "x", "main", prepaid=True)],
+    )
+    r = run(s, main="main")
+    assert r.balances["main"] == D("0")
+    assert r.timeline == []                 # деньги не двигались
+    [(u,)] = [r.unsecured]
+    assert (u.paid, u.short) == (D("0"), D("400"))
+
+
+def test_transfer_from_an_empty_wallet_does_not_pass():
+    """Перевод с пустого кошелька не проходит — тем же предохранителем."""
+    s = Scenario(
+        accounts=[Account("деньги", D("500")), Account("пустой", D("0"))],
+        transfers=[Transfer(date(2026, 1, 5), D("80"), "пустой", "деньги")],
+    )
+    r = run(s, main="деньги")
+    assert r.balances == {"деньги": D("500"), "пустой": D("0")}
+    assert r.total == D("500")                      # деньги не берутся из ниоткуда
+    [(u,)] = [r.unsecured]
+    assert (u.kind, u.short) == (KIND_TRANSFER, D("80"))
+    # Сначала досылают на кошелёк, потом переводят с него.
+    assert u.hint == TransferHint("деньги", D("80"))
+
+
+def test_hint_does_not_promise_more_than_the_source_has():
+    """Подсказка говорит, сколько можно перевести: обещать больше нечего."""
+    s = Scenario(
+        accounts=[Account("малый", D("50")), Account("пустой", D("0"))],
+        payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")],
+    )
+    [(u,)] = [run(s, main="пустой").unsecured]
+    assert u.short == D("300")
+    assert u.hint == TransferHint("малый", D("50"))
+
+
+def test_hint_is_absent_when_there_is_nowhere_to_transfer_from():
+    """Переводить неоткуда — подсказки нет: это дыра, а не необеспеченность."""
+    s = Scenario(accounts=[Account("пустой", D("0"))],
+                 payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")])
+    [(u,)] = [run(s, main="пустой").unsecured]
+    assert u.hint is None
+
+
+def test_credit_wallet_pays_up_to_its_free_limit():
+    """Кредитка платит остатком и свободным лимитом, а больше лимита — нет."""
+    s = Scenario(
+        accounts=[Account("card", D("0"), is_credit=True, limit=D("1000"))],
+        payments=[Payment(date(2026, 1, 10), D("1000"), "x", "card"),
+                  Payment(date(2026, 1, 11), D("100"), "y", "card")],
+    )
+    r = run(s, main="card")
+    assert r.balances["card"] == D("-1000")         # минус на кредитном — долг
+    assert r.unsecured_total == D("100")            # лимита больше нет
+    assert r.hole == D("0")                         # долг — не дыра
+
+
+def test_credit_wallet_with_debt_pays_the_rest_of_its_limit():
+    """Ёмкость кредитки с долгом — свободный лимит: долг в нём уже учтён.
+
+    Регресс на двойной учёт долга: сложив остаток (−900) со свободным лимитом
+    (100), движок объявил бы, что кошелёк не может ничего.
+    """
+    s = Scenario(
+        accounts=[Account("card", D("-900"), is_credit=True, limit=D("1000"))],
+        payments=[Payment(date(2026, 1, 10), D("100"), "x", "card"),
+                  Payment(date(2026, 1, 11), D("50"), "y", "card")],
+    )
+    r = run(s, main="card")
+    assert r.balances["card"] == D("-1000")         # лимит выбран до конца
+    assert r.unsecured_total == D("50")             # а больше лимита нет
+    assert r.hole == D("0")                         # долг — не дыра
+
+
+def test_unknown_limit_does_not_invent_a_refusal():
+    """Лимит кредитного неизвестен — ёмкость не оценена: отказа движок не выдумывает."""
+    s = Scenario(
+        accounts=[Account("card", D("0"), is_credit=True)],
+        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card")],
+    )
+    r = run(s, main="card")
+    assert r.balances["card"] == D("-500")
+    assert r.unsecured == []
+
+
+def test_income_comes_before_payment_on_the_same_day():
+    """В один день сначала приходит доход, потом уходит платёж — в любом порядке ввода."""
+    income = Income(date(2026, 1, 10), D("500"), "main")
+    payment = Payment(date(2026, 1, 10), D("500"), "x", "main")
+
+    straight = Scenario(accounts=[Account("main", D("0"))],
+                        income=[income], payments=[payment])
+    swapped = Scenario(accounts=[Account("main", D("0"))],
+                       payments=[payment], income=[income])
+    for s in (straight, swapped):
+        r = run(s, main="main")
+        assert r.balances["main"] == D("0")     # доход успел до платежа
+        assert r.min_balance == D("0")          # и в минус никто не уходил
+        assert r.unsecured == []
+
+
+def test_transfer_comes_before_payment_on_the_same_day():
+    """Перевод в один день с платежом уходит первым: переводят до того, как тратят."""
+    s = Scenario(
+        accounts=[Account("деньги", D("300")), Account("карта", D("0"))],
+        payments=[Payment(date(2026, 1, 5), D("300"), "x", "карта")],
+        transfers=[Transfer(date(2026, 1, 5), D("300"), "деньги", "карта")],
+    )
+    r = run(s, main="деньги")
+    assert r.balances == {"деньги": D("0"), "карта": D("0")}
+    assert r.unsecured == []
+    # Порядок дня виден в линии: перевод уходит раньше платежа, который им оплачен.
+    assert [(x.account, x.delta) for x in r.timeline] == [
+        ("деньги", D("-300")), ("карта", D("300")), ("карта", D("-300"))]
+
+
+def test_unavailable_wallet_cannot_pay():
+    """С арестованной карты не заплатить — ошибка, а не тихий минус."""
+    s = Scenario(accounts=[Account("main", D("1000"), available=False)],
+                 payments=[Payment(date(2026, 1, 1), D("10"), "x", "main")])
+    with pytest.raises(ValueError, match="недоступен"):
+        run(s, main="main")
 
 
 def test_hole_is_zero_when_balance_never_goes_negative():
@@ -161,6 +362,18 @@ def test_optional_cap_is_balance_minus_reserve():
     r = run(s, main="main")
     assert optional_cap(r, D("250")) == D("350")
     assert optional_cap(r, D("600")) == D("-0")   # резерв больше остатка
+
+
+def test_optional_cap_reserves_what_did_not_pass():
+    """Потолок частного транша не считает свободными деньги непрошедшего платежа.
+
+    Платёж не отменён: деньги на него уже обещаны, хотя и лежат пока на кошельке.
+    """
+    s = Scenario(accounts=[Account("main", D("1000"))],
+                 payments=[Payment(date(2026, 1, 5), D("1200"), "x", "main")])
+    r = run(s, main="main")
+    assert r.end_balance == D("1000")             # платёж не прошёл — деньги на месте
+    assert optional_cap(r, D("0")) == D("-200")   # но они не свободны
 
 
 def test_cover_cost_yearly_and_daily():

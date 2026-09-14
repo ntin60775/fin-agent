@@ -34,14 +34,16 @@ from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, EXPECTED, IN,
                           deal_amount_at, deal_balance, deal_holder_at,
                           funding_wallet, liquidity, occurrences,
                           payment_channel, planned_date, validate)
-from .solver import (Outcome, Result, Step, compare, cover_cost, optional_cap,
-                     outcome, run)
+from .solver import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER,
+                     UNSECURED_KINDS, Outcome, Result, Step, TransferHint,
+                     Unsecured, compare, cover_cost, optional_cap, outcome, run)
 
 __all__ = [
     # касса
     "Account", "Income", "Payment", "Transfer", "Scenario",
     "Step", "Result", "Outcome", "run", "roll_cash", "optional_cap",
     "cover_cost", "outcome", "compare",
+    "Unsecured", "TransferHint",
     # старый прокат долгов
     "Debt", "MonthSnapshot", "Plan", "roll_forward", "compare_strategies",
     # взаиморасчёты
@@ -60,5 +62,6 @@ __all__ = [
     "CREDITOR", "DEBTOR", "BOTH",
     "EXPECTED", "PAID", "PAID_LATE", "SKIPPED", "POSTPONED",
     "OCCURRENCE_STATUSES",
+    "KIND_PAYMENT", "KIND_PREPAID", "KIND_TRANSFER", "UNSECURED_KINDS",
     "AVALANCHE", "SNOWBALL", "STRATEGIES",
 ]
