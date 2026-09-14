@@ -2,7 +2,7 @@
 node_type: ticket
 title: Расписание долгов → касса — прокат месяцев
 service: _platform
-status: active
+status: archived
 updated: 2026-09-14
 links:
   part_of: [README.md]
