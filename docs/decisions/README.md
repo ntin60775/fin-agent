@@ -23,3 +23,4 @@ links:
 - [schedule-to-cash.md](schedule-to-cash.md) — долги отдают кассе расписание, касса возвращает бюджет досрочек
 - [card-schemas.md](card-schemas.md) — карточки покрыты схемами через frontmatter, проза свободна
 - [what-means-out.md](what-means-out.md) — «выбрался» — это покрытые расходы, а не закрытые долги
+- [wallet-pays-what-it-has.md](wallet-pays-what-it-has.md) — кошелёк платит тем, что у него есть; дыра — «денег нет нигде»

@@ -5,7 +5,7 @@ service: _platform
 status: active
 updated: 2026-09-14
 links:
-  depends_on: [../../decisions/counterparty-model.md, ../../decisions/derived-balances.md, ../../decisions/schedule-to-cash.md, ../../decisions/what-means-out.md, ../../decisions/card-schemas.md]
+  depends_on: [../../decisions/counterparty-model.md, ../../decisions/derived-balances.md, ../../decisions/schedule-to-cash.md, ../../decisions/what-means-out.md, ../../decisions/card-schemas.md, ../../decisions/wallet-pays-what-it-has.md]
   relates_to: [../zone-split.md]
 ---
 
@@ -57,8 +57,14 @@ links:
 8. Старые данные разложены по новому формату без потерь: сверка до и после сходится —
    число сделок, число карточек и суммарный остаток совпадают, каждое расхождение
    объяснено.
-9. Синтетические тесты движка зелёные; сценарные тесты потребителя зелёные; линт
-   базы знаний чист.
+9. Кошелёк платит тем, что у него есть: платёж, которому не хватило ёмкости своего
+   кошелька, не проходит целиком, а деньги, до которых он не дотянулся, видны как
+   необеспеченность с подсказкой перевода. Дырой называется только нехватка
+   суммарно по кошелькам — «денег нет нигде». Свободный лимит кредитного кошелька
+   оплачивает жизненный расход и не оплачивает долговой
+   ([wallet-pays-what-it-has.md](../../decisions/wallet-pays-what-it-has.md)).
+10. Синтетические тесты движка зелёные; сценарные тесты потребителя зелёные; линт
+    базы знаний чист.
 
 **Scope**
 
