@@ -170,7 +170,7 @@ links:
 | # | Тикет | Блокируют | Статус |
 |---|---|---|---|
 | 01 | [Модель взаиморасчётов](01-settlements.md) | — | archived |
-| 02 | [Прокат сделок](02-deal-roll.md) | 01 | draft |
+| 02 | [Прокат сделок](02-deal-roll.md) | 01 | active |
 | 03 | [Расписание → касса](03-months-roll.md) | 02 | draft |
 | 04 | [Действия и цена варианта](04-actions-and-price.md) | 03 | draft |
 | 05 | [Прогноз](05-forecast-steps.md) | 03 | draft |

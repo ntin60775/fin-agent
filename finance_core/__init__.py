@@ -1,12 +1,15 @@
 """Ядро расчёта личных финансов: касса, долги и взаиморасчёты.
 
-Три стороны:
+Четыре стороны:
 
 - `solver` — касса: хватит ли денег в периоде, где разрыв, хватает ли остатка
   прожить до следующего прихода;
-- `debt` — долги: когда они закроются и сколько стоят проценты;
+- `debt` — старый прокат долгов: плоская модель, живёт до переезда зоны;
 - `settlements` — взаиморасчёты: контрагенты, кошельки, сделки и движения,
-  остаток по сделке и сальдо по контрагенту — производные величины.
+  остаток по сделке и сальдо по контрагенту — производные величины; правило
+  графика порождает вхождения со статусами;
+- `roll` — прокат сделок по месяцам: что платится, что копится в копилке и
+  когда закрывается последний долг.
 
 Ядро не хранит состояние и не читает markdown: оно считает то, что ему передали,
 и возвращает результат. Источник цифр — на стороне вызывающего кода. Деньги —
@@ -15,14 +18,20 @@
 from .debt import (Debt, MonthSnapshot, Plan, compare_strategies,
                    roll_forward)
 from .model import Account, Income, Payment, Scenario, Transfer
-from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, IN, I_OWE, KINDS,
-                          LEGAL, MOVEMENT_DIRECTIONS, OUT, OWED_TO_ME, PERSON,
-                          STARTER_GROUPS, SUBTYPES, WALLET_KINDS, Assignment,
-                          Counterparty, Deal, Movement, ScheduleRule,
-                          Settlements, Wallet, beneficiary,
+from .roll import (AVALANCHE, SNOWBALL, STRATEGIES, DealMonth, DealRoll,
+                   Expectation, Gap, ScheduledPayment, UnitMonth,
+                   compare_deal_strategies, roll_deals)
+from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, EXPECTED, IN,
+                          I_OWE, KINDS, LEGAL, MOVEMENT_DIRECTIONS,
+                          OCCURRENCE_STATUSES, OUT, OWED_TO_ME, PAID, PAID_LATE,
+                          PERSON, POSTPONED, SKIPPED, STARTER_GROUPS, SUBTYPES,
+                          WALLET_KINDS, Assignment, Counterparty, Deal,
+                          FirstPayment, Movement, Occurrence, OccurrenceEdit,
+                          ScheduleRule, Settlements, Wallet, beneficiary,
                           counterparty_balance, counterparty_role,
                           deal_amount_at, deal_balance, deal_holder_at,
-                          funding_wallet, liquidity, payment_channel, validate)
+                          funding_wallet, liquidity, occurrences,
+                          payment_channel, planned_date, validate)
 from .solver import (Outcome, Result, Step, compare, cover_cost, optional_cap,
                      outcome, run)
 
@@ -31,15 +40,22 @@ __all__ = [
     "Account", "Income", "Payment", "Transfer", "Scenario",
     "Step", "Result", "Outcome", "run", "optional_cap", "cover_cost",
     "outcome", "compare",
-    # долги
+    # старый прокат долгов
     "Debt", "MonthSnapshot", "Plan", "roll_forward", "compare_strategies",
     # взаиморасчёты
-    "Counterparty", "Wallet", "Deal", "ScheduleRule", "Movement", "Assignment",
-    "Settlements", "validate", "deal_balance", "deal_amount_at",
-    "deal_holder_at", "counterparty_balance", "counterparty_role",
-    "funding_wallet", "payment_channel", "beneficiary", "liquidity",
+    "Counterparty", "Wallet", "Deal", "ScheduleRule", "FirstPayment",
+    "Movement", "Assignment", "Occurrence", "OccurrenceEdit", "Settlements",
+    "validate", "deal_balance", "deal_amount_at", "deal_holder_at",
+    "counterparty_balance", "counterparty_role", "funding_wallet",
+    "payment_channel", "beneficiary", "liquidity", "occurrences", "planned_date",
+    # прокат сделок
+    "roll_deals", "compare_deal_strategies", "DealRoll", "DealMonth",
+    "ScheduledPayment", "UnitMonth", "Expectation", "Gap",
     # объявленные наборы
     "I_OWE", "OWED_TO_ME", "DIRECTIONS", "OUT", "IN", "MOVEMENT_DIRECTIONS",
     "PERSON", "LEGAL", "KINDS", "SUBTYPES", "STARTER_GROUPS", "WALLET_KINDS",
     "CREDITOR", "DEBTOR", "BOTH",
+    "EXPECTED", "PAID", "PAID_LATE", "SKIPPED", "POSTPONED",
+    "OCCURRENCE_STATUSES",
+    "AVALANCHE", "SNOWBALL", "STRATEGIES",
 ]

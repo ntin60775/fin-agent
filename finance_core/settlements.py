@@ -6,15 +6,21 @@
 сальдо по контрагенту не хранятся: и то и другое считается из условий и движений
 (`docs/decisions/derived-balances.md`).
 
+Правило графика порождает **вхождения** — плановые платежи с тремя датами и
+статусом (`occurrences`). Вхождения тоже считаются: правило плюс правки журнала
+(`OccurrenceEdit`) плюс движения, ссылающиеся на вхождение. Правки приходят
+снаружи — переносом, пропуском, сменой суммы, — а не правят само правило.
+
 Новая форма живёт рядом со старой: строковое имя контрагента в кассовой модели
 (`model.Payment.creditor`) продолжает работать до переезда зоны. Личных чисел и
 имён здесь нет — всё приходит снаружи.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+import calendar
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 # --- объявленные наборы ----------------------------------------------------
@@ -48,6 +54,14 @@ WALLET_KINDS = ("карта", "счёт", "наличные", "электрон�
 CREDITOR = "кредитор"
 DEBTOR = "должник"
 BOTH = "и то и другое"
+
+#: Статусы вхождения — производные от правок и движений, не хранятся.
+EXPECTED = "ожидается"
+PAID = "исполнен"
+PAID_LATE = "исполнен с опозданием"
+SKIPPED = "пропущен"
+POSTPONED = "перенесён"
+OCCURRENCE_STATUSES = (EXPECTED, PAID, PAID_LATE, SKIPPED, POSTPONED)
 
 
 # --- сущности --------------------------------------------------------------
@@ -136,16 +150,45 @@ class Wallet:
 
 
 @dataclass
+class FirstPayment:
+    """Отдельный первый платёж: своя дата и своя сумма.
+
+    Стоит перед рядом регулярных вхождений и в их число не входит: «отдельный» —
+    значит не из ряда. Дата проходит те же оговорки, что и остальные, — кламп на
+    конец месяца и сдвиг с выходного по флагу правила.
+    """
+    date: date
+    amount: Decimal
+
+
+@dataclass
 class ScheduleRule:
     """Правило графика: как рождаются вхождения сделки.
 
+    Закрытый набор форм:
+
+    - **фиксированная сумма с числом платежей** — `payment` и `count`: сколько
+      платить и сколько раз; после `count` вхождений график кончается;
+    - **минималка процентом от остатка** — `percent`: доля остатка, которую
+      платят в месяц; сумма вхождения становится известна только в прокате;
+    - **несколько дней в месяце** — `days`: сколько дней, столько вхождений;
+    - **отдельный первый платёж** — `first`: своя дата и своя сумма перед рядом.
+
     `days` — дни месяца, когда наступает вхождение; дня, которого нет в месяце,
-    не бывает (берётся последний), а выходной сдвигает дату — это правила
-    проката (тикет 02). `shift_weekend` — флаг сдвига: платёж сдвигается вперёд;
-    приходы считает касса (тикет 03).
+    не бывает (берётся последний), а выходной сдвигает дату вперёд — по флагу
+    `shift_weekend`; праздники не учитываются. `start` — с какого месяца идёт
+    ряд: без него не сосчитать `count`.
+
+    Правило порождает вхождения, а правят их поверх — переносом, пропуском,
+    сменой суммы (`OccurrenceEdit`). Само правило при этом не меняется.
     """
     days: tuple[int, ...] = ()
     shift_weekend: bool = True
+    start: date | None = None
+    payment: Decimal | None = None      # фиксированная сумма платежа
+    count: int | None = None            # число платежей
+    percent: Decimal | None = None      # минималка: доля остатка на месяц
+    first: FirstPayment | None = None   # отдельный первый платёж
 
 
 @dataclass
@@ -196,6 +239,12 @@ class Movement:
     прежние движения по-прежнему указывают на прежнего держателя. `wallet`,
     `channel` и `benefit_for` переопределяют значения сделки, `purpose` —
     назначение (на что ушли деньги).
+
+    `occurrence` — какое вхождение движение закрывает, по его плановой дате:
+    плановая не меняется, поэтому и годится в опознание. Вхождение считается
+    исполненным по такому движению — фактическая дата вхождения и есть его дата.
+    Движение без ссылки вхождение не закрывает: это досрочка или платёж вне
+    графика — деньги ушли, а ряд платежей идёт своим чередом.
     """
     date: date
     amount: Decimal
@@ -206,6 +255,7 @@ class Movement:
     channel: str | None = None
     benefit_for: str | None = None
     purpose: str | None = None
+    occurrence: date | None = None
 
 
 @dataclass
@@ -227,18 +277,90 @@ class Assignment:
 
 
 @dataclass
+class OccurrenceEdit:
+    """Правка вхождения поверх правила: перенести, пропустить, сменить сумму.
+
+    Запись журнала зоны: движок её не хранит, а получает вместе с книгой.
+    Вхождение опознаётся парой «сделка + плановая дата» — плановая не меняется,
+    поэтому и годится в опознание. Несколько правок одного вхождения
+    применяются по порядку: поздняя побеждает по тем полям, которые задаёт, —
+    переговорили о новой дате, значит действует новая.
+
+    `postponed` — перенесено; отложение, то есть перенос без даты, — тот же
+    перенос с `moved_to=None`: дата ещё не назначена, платить пока некуда.
+    Перенесённая дата берётся как назначено: сдвиг по выходным — дело правила
+    графика, а не договорённости. `skipped` — пропущено: платить не будут,
+    остаток от этого не уменьшается.
+    """
+    deal: str
+    planned: date
+    postponed: bool = False
+    moved_to: date | None = None
+    skipped: bool = False
+    amount: Decimal | None = None
+
+
+@dataclass
+class Occurrence:
+    """Плановый платёж (вхождение): три даты и статус.
+
+    Плановая дата — по графику, не меняется; перенесённая — когда должен после
+    договорённости; фактическая — когда заплатили. Статус — производная от
+    правок и движений: «ожидается», «исполнен», «исполнен с опозданием»,
+    «пропущен», «перенесён». Ни то, ни другое движок не хранит: вхождения
+    считаются, а не лежат.
+
+    `amount` — сколько платить; None у минималки процентом от остатка: сумма
+    зависит от остатка и становится известна только в прокате. `paid` — сколько
+    уже закрыто движениями, ссылающимися на это вхождение (`Movement.occurrence`).
+    """
+    deal: str
+    planned: date
+    amount: Decimal | None
+    moved: date | None = None
+    actual: date | None = None
+    paid: Decimal = Decimal(0)
+    status: str = EXPECTED
+
+    @property
+    def due(self) -> date | None:
+        """Когда платёж должен состояться: перенесённая дата, иначе плановая.
+
+        Отложенное вхождение без назначенной даты — None: платить некуда, пока
+        договорённость не даст дату.
+        """
+        if self.moved is not None:
+            return self.moved
+        return None if self.status == POSTPONED else self.planned
+
+    @property
+    def remaining(self) -> Decimal | None:
+        """Сколько по вхождению ещё не уплачено; None — сумма не определена."""
+        if self.amount is None:
+            return None
+        return max(self.amount - self.paid, Decimal(0))
+
+    @property
+    def payable(self) -> bool:
+        """Платёж ещё предстоит: вхождение не исполнено и не пропущено."""
+        return self.status in (EXPECTED, POSTPONED) and self.due is not None
+
+
+@dataclass
 class Settlements:
     """Взаиморасчёты целиком: контрагенты, кошельки, сделки, движения, передачи.
 
     Собранную книгу сначала проверяют `validate`, а потом спрашивают производные
     величины: проверка ловит ссылки на необъявленное и расхождения, на которых
-    остаток и сальдо посчитались бы неверно.
+    остаток и сальдо посчитались бы неверно. `edits` — правки вхождений из
+    журнала зоны: они меняют график, а не условия сделки.
     """
     counterparties: list[Counterparty] = field(default_factory=list)
     wallets: list[Wallet] = field(default_factory=list)
     deals: list[Deal] = field(default_factory=list)
     movements: list[Movement] = field(default_factory=list)
     assignments: list[Assignment] = field(default_factory=list)
+    edits: list[OccurrenceEdit] = field(default_factory=list)
 
 
 # --- проверка ссылок -------------------------------------------------------
@@ -268,6 +390,7 @@ def validate(book: Settlements) -> None:
     _validate_deals(book)
     _validate_movements(book)
     _validate_assignments(book)
+    _validate_edits(book)
 
 
 def _validate_counterparties(book: Settlements) -> None:
@@ -324,13 +447,54 @@ def _validate_deals(book: Settlements) -> None:
         if d.rate_per_year is not None and d.rate_per_day is not None:
             raise ValueError(f"сделка {d.uid!r}: ставка либо годовая, либо дневная")
         if d.schedule is not None:
-            for day in d.schedule.days:
-                if not 1 <= day <= 31:
-                    raise ValueError(f"сделка {d.uid!r}: день месяца {day} вне 1–31")
+            _validate_rule(d.uid, d.schedule)
+        if d.closure_unit is not None and d.amount is None:
+            raise ValueError(f"сделка {d.uid!r}: у регулярного расхода нет единицы "
+                             f"закрытия — закрывать нечего")
+        if d.closure_unit is not None and d.direction == OWED_TO_ME:
+            raise ValueError(f"сделка {d.uid!r}: требование в единице закрытия — "
+                             f"копилка собирает то, что гасится вместе, а требование "
+                             f"приходит, а не гасится")
         _declared(d.counterparty, counterparties, f"сделка {d.uid!r}: контрагент")
         _declared(d.wallet, wallets, f"сделка {d.uid!r}: кошелёк по умолчанию")
         _declared(d.channel, counterparties, f"сделка {d.uid!r}: канал платежа")
         _declared(d.benefit_for, counterparties, f"сделка {d.uid!r}: получатель выгоды")
+
+
+def _validate_rule(uid: str, rule: ScheduleRule) -> None:
+    """Правило графика: закрытый набор форм, и каждая — целиком."""
+    seen: set[int] = set()
+    for day in rule.days:
+        if not 1 <= day <= 31:
+            raise ValueError(f"сделка {uid!r}: день месяца {day} вне 1–31")
+        if day in seen:
+            raise ValueError(f"сделка {uid!r}: день месяца {day} повторён — "
+                             f"вхождение задвоится")
+        seen.add(day)
+    # Дня, которого нет в месяце, не бывает: короткий месяц схлопывает 30-е и
+    # 31-е в одно вхождение, и опознать их станет нечем.
+    short = [min(day, 28) for day in rule.days]
+    if len(set(short)) != len(short):
+        raise ValueError(f"сделка {uid!r}: дни месяца {list(rule.days)} схлопываются "
+                         f"в коротком месяце — вхождения задвоятся")
+    if not rule.days and rule.first is None:
+        raise ValueError(f"сделка {uid!r}: правило графика пустое — ни дней месяца, "
+                         f"ни первого платежа")
+    if rule.payment is not None and rule.payment <= 0:
+        raise ValueError(f"сделка {uid!r}: сумма платежа должна быть положительной")
+    if rule.count is not None:
+        if rule.count < 1:
+            raise ValueError(f"сделка {uid!r}: число платежей должно быть "
+                             f"положительным")
+        if rule.start is None:
+            raise ValueError(f"сделка {uid!r}: без даты начала не сосчитать платежи")
+    if rule.percent is not None and not Decimal(0) < rule.percent <= Decimal(1):
+        raise ValueError(f"сделка {uid!r}: процент от остатка — доля от 0 до 1")
+    if rule.count is not None and rule.percent is not None:
+        raise ValueError(f"сделка {uid!r}: график либо числом платежей, либо "
+                         f"процентом от остатка — не тем и другим сразу")
+    if rule.first is not None and rule.first.amount <= 0:
+        raise ValueError(f"сделка {uid!r}: первый платёж должен быть положительным")
 
 
 def _validate_movements(book: Settlements) -> None:
@@ -388,6 +552,31 @@ def _validate_assignments(book: Settlements) -> None:
                 f"сделка {uid!r}: держатель {deal.counterparty!r} расходится с "
                 f"последней передачей долга ({a.to_holder!r}): правьте данные, "
                 f"а не поле")
+
+
+def _validate_edits(book: Settlements) -> None:
+    deals = {d.uid for d in book.deals}
+    for e in book.edits:
+        _declared(e.deal, deals, "правка вхождения: сделка")
+        if e.moved_to is not None and not e.postponed:
+            raise ValueError(f"вхождение {e.deal!r} от {e.planned}: перенесённая "
+                             f"дата без переноса")
+        if e.amount is not None and e.amount <= 0:
+            raise ValueError(f"вхождение {e.deal!r} от {e.planned}: сумма должна "
+                             f"быть положительной")
+
+    # Правки одного вхождения сливаются по порядку — судим по тому, что вышло.
+    for (uid, planned), e in _merged_edits(book).items():
+        if uid in deals and not occurrences(book, uid, planned, planned):
+            raise ValueError(f"вхождение {uid!r} от {planned}: такого вхождения по "
+                             f"графику нет — правьте данные")
+        if e.postponed and e.skipped:
+            raise ValueError(f"вхождение {uid!r} от {planned}: и перенесено, и "
+                             f"пропущено — правьте данные")
+        if e.skipped and any(m.deal == uid and m.occurrence == planned
+                             for m in book.movements):
+            raise ValueError(f"вхождение {uid!r} от {planned}: пропущено, а движение "
+                             f"по нему есть — правьте данные")
 
 
 # --- производные величины --------------------------------------------------
@@ -525,3 +714,150 @@ def beneficiary(deal: Deal, movement: Movement | None = None) -> str | None:
 def liquidity(book: Settlements) -> Decimal:
     """Ликвидность: деньги доступных кошельков. Свободный лимит не считается."""
     return sum((w.money for w in book.wallets), Decimal(0))
+
+
+# --- вхождения -------------------------------------------------------------
+
+def _merged_edits(book: Settlements) -> dict[tuple[str, date], OccurrenceEdit]:
+    """Правки одного вхождения, слитые по порядку: поздняя побеждает."""
+    merged: dict[tuple[str, date], OccurrenceEdit] = {}
+    for e in book.edits:
+        key = (e.deal, e.planned)
+        current = merged.get(key)
+        if current is None:
+            merged[key] = OccurrenceEdit(e.deal, e.planned, e.postponed, e.moved_to,
+                                         e.skipped, e.amount)
+            continue
+        if e.postponed:
+            current.postponed = True
+        if e.moved_to is not None:
+            current.moved_to = e.moved_to
+        if e.skipped:
+            current.skipped = True
+        if e.amount is not None:
+            current.amount = e.amount
+    return merged
+
+
+def planned_date(year: int, month: int, day: int, shift_weekend: bool) -> date:
+    """Дата вхождения по правилу: кламп на конец месяца и сдвиг с выходного.
+
+    Дня, которого нет в месяце, не бывает — берётся последний. Выходной сдвигает
+    платёж вперёд; праздники не учитываются: календаря праздников у движка нет.
+    """
+    last = calendar.monthrange(year, month)[1]
+    when = date(year, month, min(day, last))
+    while shift_weekend and when.weekday() >= 5:
+        when += timedelta(days=1)
+    return when
+
+
+def _months(since: date, until: date) -> Iterator[tuple[int, int]]:
+    """Месяцы от `since` до `until` включительно — по одному."""
+    year, month = since.year, since.month
+    while (year, month) <= (until.year, until.month):
+        yield year, month
+        year, month = year + (month == 12), month % 12 + 1
+
+
+def _linked(deal: Deal, planned: date,
+            movements: Iterable[Movement]) -> tuple[date | None, Decimal]:
+    """Факт по вхождению: когда оно закрылось и сколько закрыто.
+
+    Считаются движения, ссылающиеся на вхождение (`Movement.occurrence`):
+    по сделке — в зачёт, против неё — из зачёта. Фактическая дата — дата
+    закрывающего движения, последнего из связанных.
+    """
+    when: date | None = None
+    total = Decimal(0)
+    for m in movements:
+        if m.deal != deal.uid or m.occurrence != planned:
+            continue
+        along = ((deal.direction == I_OWE and m.direction == OUT)
+                 or (deal.direction == OWED_TO_ME and m.direction == IN))
+        total += m.amount if along else -m.amount
+        if when is None or m.date > when:
+            when = m.date
+    return when, total
+
+
+def _occurrence(book: Settlements, deal: Deal, planned: date,
+                amount: Decimal | None,
+                edits: dict[tuple[str, date], OccurrenceEdit]) -> Occurrence:
+    """Вхождение на плановую дату: правило, правки, факты — и статус."""
+    edit = edits.get((deal.uid, planned))
+    moved: date | None = None
+    skipped = False
+    if edit is not None:
+        moved = edit.moved_to if edit.postponed else None
+        skipped = edit.skipped
+        if edit.amount is not None:
+            amount = edit.amount
+
+    actual, paid = _linked(deal, planned, book.movements)
+    postponed = edit is not None and edit.postponed
+    due = moved if moved is not None else planned
+    if skipped:
+        status = SKIPPED
+    elif paid > 0 and (amount is None or paid >= amount):
+        status = PAID if actual is not None and actual <= due else PAID_LATE
+    elif postponed:
+        status = POSTPONED
+    else:
+        status = EXPECTED
+    return Occurrence(deal.uid, planned, amount, moved, actual, paid, status)
+
+
+def occurrences(book: Settlements, deal_uid: str, since: date,
+                until: date) -> list[Occurrence]:
+    """Вхождения сделки в окне плановых дат.
+
+    Порождаются правилом графика и правятся правками из журнала; статус — от
+    движений, ссылающихся на вхождение. Окно задаётся **плановыми** датами:
+    перенесённая дата может увести вхождение за его пределы — это дело проката,
+    он раскладывает вхождения по месяцам, когда платить.
+
+    Вхождения считаются, а не лежат: движок их не хранит, а получает правило,
+    правки и движения — и возвращает список.
+    """
+    deal = _deal(book, deal_uid)
+    rule = deal.schedule
+    if rule is None:
+        return []
+    edits = _merged_edits(book)
+    found: list[Occurrence] = []
+
+    if rule.first is not None:
+        first = rule.first.date
+        when = planned_date(first.year, first.month, first.day, rule.shift_weekend)
+        if since <= when <= until:
+            found.append(_occurrence(book, deal, when, rule.first.amount, edits))
+
+    if rule.days:
+        # Месяц до и после окна: сдвиг с выходного уводит дату за его край.
+        before = since.replace(day=1) - timedelta(days=1)
+        after = (until.replace(day=1) + timedelta(days=32)).replace(day=1)
+        # Дни идут по календарю, а не в том порядке, как записаны: иначе число
+        # платежей отсчитается от чужого вхождения.
+        days = sorted(rule.days)
+        for year, month in _months(before, after):
+            if rule.start is not None and (year, month) < (rule.start.year,
+                                                           rule.start.month):
+                continue               # ряд идёт с начала, раньше вхождений нет
+            for position, day in enumerate(days):
+                when = planned_date(year, month, day, rule.shift_weekend)
+                if not since <= when <= until:
+                    continue
+                if rule.count is not None and rule.start is not None:
+                    index = (((year - rule.start.year) * 12 + month - rule.start.month)
+                             * len(days) + position + 1)
+                    if index > rule.count:
+                        continue
+                found.append(_occurrence(book, deal, when, rule.payment, edits))
+
+    found.sort(key=lambda o: o.planned)
+    for left, right in zip(found, found[1:]):
+        if left.planned == right.planned:
+            raise ValueError(f"сделка {deal_uid!r}: два вхождения на {left.planned} — "
+                             f"правьте правило графика")
+    return found
