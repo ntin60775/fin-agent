@@ -16,11 +16,12 @@
              domain-modeling, mp-* (гейт-пайплайн)
   commands/  /kb /kb-map /doc /onto-doc /grill /grilling /architecture
              /code-review /to-tickets /handoff /prototype /ship
-  rules/     kb-source-of-truth, kb-first, ship-gate, acceptance-rounds
-finance_core/  движок: касса (solver) и долги (debt) + README
+  rules/     kb-source-of-truth, kb-first, ship-gate, acceptance-rounds, inbox-first
+finance_core/  движок: model, касса (solver), взаиморасчёты (settlements), прокат (roll),
+               прогноз (forecast), старые долги (debt)
 tests/         синтетические тесты движка — без личных данных
 inbox/         заявки из финансовой зоны (сырьё: потребность, а не решение)
-docs/          база знаний (это KB): reference, decisions, plans
+docs/          база знаний (это KB): reference, decisions, plans, ops
 CONTEXT.md     доменные термины
 AGENTS.md      этот файл — читается первым
 ```
@@ -39,7 +40,7 @@ AGENTS.md      этот файл — читается первым
 
 Markdown + git — источник правды. Производное — индекс `.gitmark/index.db` и
 HTML-карта — регенерируется из md и в git не коммитится. `README.md` каждой папки
-— её индекс; документ без ссылок (сирота) считается ошибкой.
+базы знаний — её индекс; документ без ссылок (сирота) считается ошибкой.
 
 ## Проверка
 

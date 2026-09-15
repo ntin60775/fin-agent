@@ -3,7 +3,7 @@ node_type: index
 title: Решения
 service: _platform
 status: active
-updated: 2026-09-14
+updated: 2026-09-15
 links:
   part_of: [../README.md]
 ---

@@ -3,7 +3,7 @@ node_type: index
 title: База знаний ядра расчёта
 service: _platform
 status: active
-updated: 2026-09-11
+updated: 2026-09-15
 links:
   part_of: [../AGENTS.md]
 ---
@@ -29,7 +29,9 @@ Markdown — источник правды. Всё производное — п
 - [unknown-is-not-zero.md](decisions/unknown-is-not-zero.md) — почему неизвестное значение даёт `None`, а не ноль
 - [counterparty-model.md](decisions/counterparty-model.md) — почему кредитор уходит, а роли выводятся из истории
 - [derived-balances.md](decisions/derived-balances.md) — почему остаток и сальдо считаются, а не хранятся
+- [movement-settles-occurrence.md](decisions/movement-settles-occurrence.md) — почему факт по вхождению несёт движение, а не правка
 - [schedule-to-cash.md](decisions/schedule-to-cash.md) — почему связка двусторонняя: расписание туда, бюджет досрочек обратно
+- [wallet-pays-what-it-has.md](decisions/wallet-pays-what-it-has.md) — почему кошелёк платит тем, что у него есть, а дыра — «денег нет нигде»
 - [card-schemas.md](decisions/card-schemas.md) — почему схема карточки — frontmatter и линтер, а не JSON Schema
 - [what-means-out.md](decisions/what-means-out.md) — почему «выбрался» — это покрытые расходы, а не закрытые долги
 
@@ -40,6 +42,7 @@ Markdown — источник правды. Всё производное — п
 ## Ops
 
 - [перенос-на-другую-машину.md](ops/перенос-на-другую-машину.md) — что копировать, что нужно на новой машине, как проверить
+- [публикация.md](ops/публикация.md) — как выложить зону в открытый репозиторий и что проверить до первого push
 
 ## Движок
 

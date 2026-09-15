@@ -17,6 +17,7 @@
 | Что не прошло из-за ёмкости кошелька и что перевести | `run()` → `Result.unsecured` |
 | Сколько я должен и сколько должны мне | `counterparty_balance()`, `deal_balance()` |
 | Когда закроются сделки и когда я выйду из долгов | `roll_deals()`, `roll_months()` |
+| Когда владелец выберется и что даёт сдвиг одного параметра | `forecast()`, `forecast_shifts()` |
 
 Полный список вопросов и правил — [finance_core/README.md](finance_core/README.md).
 
@@ -32,7 +33,7 @@ python3 -m pip install -e .     # поставить как библиотеку
 ## Устройство
 
 ```
-finance_core/  движок: model + касса (solver) + взаиморасчёты (settlements) + прокат (roll) + старые долги (debt)
+finance_core/  движок: model + касса (solver) + взаиморасчёты (settlements) + прокат (roll) + прогноз (forecast) + старые долги (debt)
 tests/         синтетические тесты — без личных данных
 inbox/         заявки от зоны-потребителя (вход в работу)
 docs/          база знаний: reference, decisions, plans, ops
