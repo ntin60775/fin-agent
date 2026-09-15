@@ -2,7 +2,7 @@
 node_type: ticket
 title: Прогноз — две ступени «выбрался», вилка, требования отдельно
 service: _platform
-status: active
+status: archived
 updated: 2026-09-15
 links:
   part_of: [README.md]
