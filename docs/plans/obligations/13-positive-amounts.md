@@ -2,8 +2,8 @@
 node_type: ticket
 title: Суммы кассы положительные — направление несёт само событие
 service: _platform
-status: draft
-updated: 2026-09-14
+status: archived
+updated: 2026-09-15
 links:
   part_of: [README.md]
   depends_on: [11-acceptance-round-1.md]
