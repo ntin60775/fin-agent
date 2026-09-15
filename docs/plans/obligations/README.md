@@ -3,7 +3,7 @@ node_type: plan
 title: Взаиморасчёты и прогноз — единая модель контрагентов, сделок и кассы
 service: _platform
 status: active
-updated: 2026-09-14
+updated: 2026-09-15
 links:
   depends_on: [../../decisions/counterparty-model.md, ../../decisions/derived-balances.md, ../../decisions/schedule-to-cash.md, ../../decisions/what-means-out.md, ../../decisions/card-schemas.md, ../../decisions/wallet-pays-what-it-has.md]
   relates_to: [../zone-split.md]
@@ -193,7 +193,7 @@ links:
 | 10 | [Контракт: убрать старую форму](10-clean-cutover.md) | 09 | draft |
 | 11 | [Приёмка, раунд 1](11-acceptance-round-1.md) | 03 | archived |
 | 12 | [Кредитный лимит](12-credit-limit.md) | 11 | draft |
-| 13 | [Суммы кассы положительные](13-positive-amounts.md) | 11 | draft |
+| 13 | [Суммы кассы положительные](13-positive-amounts.md) | 11 | archived |
 
 05 опирается на 03 и идёт в любом порядке с 04; 04 дополнительно ждёт 13 — он считает
 досрочку от свободного остатка месяца, а остаток бывает отрицательным.
