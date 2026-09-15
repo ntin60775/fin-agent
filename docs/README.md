@@ -23,6 +23,8 @@ Markdown — источник правды. Всё производное — п
 
 ## Decisions
 
+Все решения — [decisions/README.md](decisions/README.md).
+
 - [zone-split.md](decisions/zone-split.md) — почему движок вынесен в отдельную зону от финансовых данных
 - [request-channel.md](decisions/request-channel.md) — почему заявки из финансовой зоны идут в `inbox/`, а не правятся в коде на месте
 - [library-not-database.md](decisions/library-not-database.md) — почему ядро — библиотека, а не база данных
@@ -40,6 +42,8 @@ Markdown — источник правды. Всё производное — п
 - [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [obligations/](plans/obligations/README.md)
 
 ## Ops
+
+Все процедуры — [ops/README.md](ops/README.md).
 
 - [перенос-на-другую-машину.md](ops/перенос-на-другую-машину.md) — что копировать, что нужно на новой машине, как проверить
 - [публикация.md](ops/публикация.md) — как выложить зону в открытый репозиторий и что проверить до первого push

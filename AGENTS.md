@@ -29,12 +29,12 @@ AGENTS.md      этот файл — читается первым
 ## С чего начать
 
 - **Как работать с двумя зонами** → [docs/reference/how-to-work.md](docs/reference/how-to-work.md)
-- **Заявки из финансовой зоны** → [inbox/](inbox/) — вход в работу: разобрать прежде чем начинать своё
+- **Заявки из финансовой зоны** → [inbox/README.md](inbox/README.md) — вход в работу: разобрать прежде чем начинать своё
 - **Устройство движка** → [finance_core/README.md](finance_core/README.md)
 - **База знаний** → [docs/README.md](docs/README.md)
 - **Модель знаний** (типы, свойства, ссылки) → [docs/ontology.md](docs/ontology.md)
 - **Термины** → [CONTEXT.md](CONTEXT.md)
-- **Решения** → [docs/decisions/](docs/decisions/)
+- **Решения** → [docs/decisions/README.md](docs/decisions/README.md)
 
 ## Принцип
 
