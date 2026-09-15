@@ -185,7 +185,7 @@ links:
 | 02 | [Прокат сделок](02-deal-roll.md) | 01 | archived |
 | 03 | [Расписание → касса](03-months-roll.md) | 02 | archived |
 | 04 | [Действия и цена варианта](04-actions-and-price.md) | 03, 13 | draft |
-| 05 | [Прогноз](05-forecast-steps.md) | 03 | draft |
+| 05 | [Прогноз](05-forecast-steps.md) | 03 | active |
 | 06 | [Схемы карточек](06-lint-schemas.md) | 01 | draft |
 | 07 | [Зона: карточки и форматы](07-zone-counterparties.md) | 06, 02 | draft |
 | 08 | [Перенос данных](08-data-migration.md) | 07 | draft |
