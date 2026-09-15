@@ -52,7 +52,8 @@ confirmation.
 ## Stop-points (from the parent contract's `Constraints`)
 
 - `stop-before-commit` — after review, stop with the uncommitted diff in the worktree;
-  commit and everything after wait for the operator's "continue". Default for 1C projects.
+  commit and everything after wait for the operator's "continue". The default when the
+  contract names no other stop-point.
 - `stop-after-mr` — after opening the MR, stop for the operator's review.
 - `no-deploy` — skip the deploy step.
 
