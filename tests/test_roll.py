@@ -425,6 +425,45 @@ def test_second_priority_is_not_paid_by_its_own_schedule():
     assert roll.months[0].offer == D("5000")                # а свободные деньги предложены
 
 
+def test_second_priority_is_paid_to_the_end_when_agreed():
+    """Согласие считается до конца: видно, когда закроется второй приоритет.
+
+    Без согласия прокат кончается свободой первого приоритета — закрывать второй
+    некому, и даты его закрытия не существует.
+    """
+    schedule_deal = _deal(uid="график", amount=D("6000"),
+                          schedule=_rule(payment=D("1000")))
+    claim = _deal(uid="взыскание", amount=D("3000"), second_priority=True,
+                  schedule=None)
+    book = _book(schedule_deal, claim)
+    validate(book)
+
+    offered = roll_deals(book, START, D("1000"), max_months=24)
+    assert offered.freedom == date(2026, 3, 1)
+    assert offered.second_freedom is None
+
+    agreed = roll_deals(book, START, D("1000"), max_months=24,
+                        consent_to_second=True)
+    assert agreed.freedom == date(2026, 3, 1)       # первый приоритет не переехал
+    assert agreed.second_freedom == date(2026, 5, 1)
+    assert agreed.months[-1].balances["взыскание"] == D("0.00")
+
+
+def test_unclosed_second_priority_does_not_mark_the_roll_stalled():
+    """`stalled` — про первый приоритет: второй закрывается и после его свободы."""
+    schedule_deal = _deal(uid="график", amount=D("6000"),
+                          schedule=_rule(payment=D("1000")))
+    claim = _deal(uid="взыскание", amount=D("3000"), second_priority=True,
+                  schedule=None)
+    book = _book(schedule_deal, claim)
+    validate(book)
+    roll = roll_deals(book, START, D("1200"), max_months=3,
+                      consent_to_second=True)
+    assert roll.freedom == date(2026, 3, 1)         # первый приоритет закрылся
+    assert roll.second_freedom is None              # а второй за три месяца не успел
+    assert roll.stalled is False
+
+
 def test_percent_minimum_counts_from_the_month_start():
     """Минималка процентом считается от остатка на начало месяца, а не от текущего."""
     deal = _deal(amount=D("1000"), schedule=_rule(days=(5, 20), percent=D("0.5")))

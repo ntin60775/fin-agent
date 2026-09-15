@@ -213,6 +213,21 @@ def test_roll_cash_living_floor_reduces_free():
     assert months[0].free == D("500")
 
 
+def test_roll_cash_obligation_reserve_reduces_free():
+    """Резерв обязательств вычитается из свободных денег: без него рвётся начало месяца."""
+    s = Scenario(
+        accounts=[Account("main", D("1000"))],
+        income=[Income(date(2026, 4, 5), D("500"), "main")],
+        payments=[Payment(date(2026, 4, 10), D("200"), account="main",
+                          counterparty="c")],
+        living_floor_monthly=D("800"),
+        obligation_reserve=D("300"),
+    )
+    months = roll_cash(s, date(2026, 4, 1), max_months=1, main="main")
+    # 1300 - 800 (минимум) - 300 (резерв) = 200
+    assert months[0].free == D("200")
+
+
 def test_roll_cash_unknown_floor_gives_none_gap():
     """Неизвестный прожиточный минимум — floor_gap = None, а не ноль."""
     s = Scenario(
