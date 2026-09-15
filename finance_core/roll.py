@@ -135,6 +135,11 @@ class DealRoll:
     `freedom` — месяц закрытия последней сделки первого приоритета; None вместе
     с `stalled` значит, что за отведённые месяцы долги не закрылись. Регулярные
     расходы на срок не влияют: закрывать там нечего.
+
+    `second_freedom` — месяц закрытия второго приоритета. Сам он платится только
+    по согласию владельца, и тогда прокат идёт, пока не закроется и он; закрыться
+    он может и без согласия — взыскание, попавшее в единицу закрытия, гасится
+    вместе с ней первым приоритетом, и дата тоже видна.
     """
     months: list[DealMonth]
     total_interest: Decimal
@@ -143,6 +148,7 @@ class DealRoll:
     stalled: bool
     expectations: list[Expectation]
     gaps: list[Gap]
+    second_freedom: date | None = None
 
     @property
     def total_paid(self) -> Decimal:
@@ -358,7 +364,9 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
 
     Второй приоритет не платится, пока владелец не дал согласия
     (`consent_to_second`); без согласия его свободный остаток показывается
-    предложением (`DealMonth.offer`).
+    предложением (`DealMonth.offer`). Согласие считается до конца: прокат идёт,
+    пока не закроется и второй приоритет, — иначе даты его закрытия не видно
+    (`DealRoll.second_freedom`).
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"неизвестная стратегия: {strategy!r}")
@@ -465,9 +473,13 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
     months: list[DealMonth] = []
     total_interest = Decimal(0)
     freedom: date | None = None
+    second_freedom: date | None = None
     stalled = False
     start_total = sum((o.balance for o in open_deals.values() if not o.second),
                       Decimal(0))
+    # Второй приоритет был открыт на начало проката: закрытие пустого приоритета
+    # датой не объявляется.
+    second_start = _second_open(open_deals, open_units)
 
     for index in range(1, max_months + 1):
         month = _month_start(start, index - 1)
@@ -538,9 +550,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
                                         amount, month))
 
         # 4. Второй приоритет: сам не платится — предлагается.
-        second_open = any(o.second and o.balance > 0 for o in open_deals.values())
-        second_open = second_open or any(u.second and not u.closed
-                                         for u in open_units.values())
+        second_open = _second_open(open_deals, open_units)
         if consent_to_second:
             for target in _order(_targets(open_deals, open_units, True), strategy):
                 if target.remaining <= 0:
@@ -571,14 +581,22 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
             payments=payments,
         ))
 
-        if _all_closed(open_deals, open_units):
+        first_done = _all_closed(open_deals, open_units)
+        second_done = not _second_open(open_deals, open_units)
+        if first_done and freedom is None:
             freedom = month
+        if second_start and second_done and second_freedom is None:
+            second_freedom = month
+        if first_done and (second_done or not consent_to_second):
             break
     else:
-        stalled = True
+        # Прокат кончился без свободы первого приоритета: закрывать было нечего
+        # или не удалось. Второй приоритет сюда не входит — о нём говорит
+        # `second_freedom`.
+        stalled = freedom is None
 
     return _result(book, months, total_interest, freedom, start_total, stalled,
-                   receivables, gaps, start)
+                   receivables, gaps, start, second_freedom)
 
 
 def _prepayment(book: Settlements, open_deals: dict[str, _Open],
@@ -626,9 +644,18 @@ def _all_closed(open_deals: dict[str, _Open], open_units: dict[str, _Unit]) -> b
     return all(u.closed for u in open_units.values() if not u.second)
 
 
+def _second_open(open_deals: dict[str, _Open],
+                 open_units: dict[str, _Unit]) -> bool:
+    """Открыт ли ещё второй приоритет: сам он не платится, но закрыться может."""
+    if any(o.second and o.balance > 0 for o in open_deals.values()):
+        return True
+    return any(u.second and not u.closed for u in open_units.values())
+
+
 def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
             freedom: date | None, start_total: Decimal, stalled: bool,
-            receivables: Iterable[Deal], gaps: list[Gap], start: date) -> DealRoll:
+            receivables: Iterable[Deal], gaps: list[Gap], start: date,
+            second_freedom: date | None = None) -> DealRoll:
     """Собрать прокат: месяцы плюс то, что в них не входило.
 
     Требования перечисляются за те же месяцы, что прокатаны: дальше срока проката
@@ -646,7 +673,7 @@ def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
                                             occ.due, occ.remaining))
     expectations.sort(key=lambda e: e.date)
     return DealRoll(months, total_interest, freedom, start_total, stalled,
-                    expectations, gaps)
+                    expectations, gaps, second_freedom)
 
 
 @dataclass
@@ -682,6 +709,7 @@ def roll_months(book: Settlements, start: date,
                 incomes: list[Income],
                 one_offs: list[Payment],
                 living_floor: Decimal | None,
+                obligation_reserve: Decimal | None = None,
                 transfers: list[Transfer] = (),
                 income_horizon: date | None = None,
                 strategy: str = AVALANCHE,
@@ -697,7 +725,8 @@ def roll_months(book: Settlements, start: date,
 
     Кроме расписания касса принимает приходы, переводы и разовые платежи
     (`one_offs` — то, что не из сделок); `income_horizon` нужен, чтобы измерить
-    прожиточный минимум после последнего прихода в окне.
+    прожиточный минимум после последнего прихода в окне, а `obligation_reserve` —
+    чтобы не раздать досрочками деньги, оставленные под начало следующего месяца.
 
     Месяцы после дыры помечаются как посчитанные на допущении: прокат не
     останавливается и не уходит в минус молча.
@@ -750,6 +779,7 @@ def roll_months(book: Settlements, start: date,
             payments=payments,
             transfers=list(transfers),
             living_floor_monthly=living_floor,
+            obligation_reserve=obligation_reserve,
             income_horizon=income_horizon,
         )
         cash_months = roll_cash(scenario, start, max_months=max_months, main=main)

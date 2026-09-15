@@ -46,8 +46,12 @@ SUBTYPES = {
     PERSON: ("родственник", "знакомый", "коллега", "прочее"),
 }
 
+#: Группа своих: деньги такому контрагенту — передача внутри семьи, в отчётах
+#: отдельной строкой с детализацией, кому и на что.
+FAMILY = "семья"
+
 #: Группы контрагента — свободные метки; стартовый набор обязателен.
-STARTER_GROUPS = ("семья", "работа", "жильё", "долги")
+STARTER_GROUPS = (FAMILY, "работа", "жильё", "долги")
 
 #: Типы кошелька: стартовый набор, дальше список расширяется потребителем.
 WALLET_KINDS = ("карта", "счёт", "наличные", "электронный кошелёк")
@@ -252,6 +256,20 @@ class Movement:
 
 
 @dataclass
+class ObservedBalance:
+    """Фактический остаток сделки на дату — наблюдение извне, а не второй источник.
+
+    Введён из выписки или приложения кредитора и служит для сверки: расчётный
+    остаток считается (`deal_balance`), а расхождение — незакрытый вопрос, а не
+    повод править число. Правится не число, а данные
+    (`docs/decisions/derived-balances.md`).
+    """
+    deal: str
+    on: date
+    amount: Decimal
+
+
+@dataclass
 class Assignment:
     """Передача долга (цессия): от кого к кому, когда, сколько было и что стало.
 
@@ -346,7 +364,8 @@ class Settlements:
     Собранную книгу сначала проверяют `validate`, а потом спрашивают производные
     величины: проверка ловит ссылки на необъявленное и расхождения, на которых
     остаток и сальдо посчитались бы неверно. `edits` — правки вхождений из
-    журнала зоны: они меняют график, а не условия сделки.
+    журнала зоны: они меняют график, а не условия сделки. `observed` —
+    наблюдения извне: фактический остаток с датой, с которым сверяется расчётный.
     """
     counterparties: list[Counterparty] = field(default_factory=list)
     wallets: list[Wallet] = field(default_factory=list)
@@ -354,6 +373,7 @@ class Settlements:
     movements: list[Movement] = field(default_factory=list)
     assignments: list[Assignment] = field(default_factory=list)
     edits: list[OccurrenceEdit] = field(default_factory=list)
+    observed: list[ObservedBalance] = field(default_factory=list)
 
 
 # --- проверка ссылок -------------------------------------------------------
@@ -384,6 +404,7 @@ def validate(book: Settlements) -> None:
     _validate_movements(book)
     _validate_assignments(book)
     _validate_edits(book)
+    _validate_observed(book)
 
 
 def _validate_counterparties(book: Settlements) -> None:
@@ -570,6 +591,26 @@ def _validate_edits(book: Settlements) -> None:
                              for m in book.movements):
             raise ValueError(f"вхождение {uid!r} от {planned}: пропущено, а движение "
                              f"по нему есть — правьте данные")
+
+
+def _validate_observed(book: Settlements) -> None:
+    """Наблюдения извне: ссылка на объявленную сделку, сумма не отрицательная.
+
+    У регулярного расхода остатка нет — сверять нечего, и наблюдение по нему
+    отклоняется: иначе оно навсегда осталось бы открытым вопросом прогноза.
+    Расхождение же факта с расчётом ошибкой не объявляется: проверка падает на
+    необъяснённом расхождении, а не на самом расхождении — его видно открытым
+    вопросом прогноза (`docs/decisions/derived-balances.md`).
+    """
+    deals = {d.uid: d for d in book.deals}
+    for o in book.observed:
+        _declared(o.deal, set(deals), "фактический остаток: сделка")
+        if o.amount < 0:
+            raise ValueError(f"фактический остаток по сделке {o.deal!r} на {o.on}: "
+                             f"сумма не может быть отрицательной")
+        if o.deal in deals and deals[o.deal].amount is None:
+            raise ValueError(f"фактический остаток по сделке {o.deal!r}: у "
+                             f"регулярного расхода остатка нет — сверять нечего")
 
 
 # --- производные величины --------------------------------------------------
