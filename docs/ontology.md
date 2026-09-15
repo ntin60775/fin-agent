@@ -139,6 +139,9 @@ them — and never launch `/ship`: the operator starts it by hand. Their own out
 - **I7.** The command registry is in sync: every `.omp/commands/*.md` has `args:`/`drives:`
   frontmatter, a row in the generated summary table and a `## /cmd` section in
   `docs/reference/commands.md` — and vice versa (checked by `gitmark inventory --check`).
+- **I8.** The knowledge model has not drifted: `docs/ontology.md` and the package copy
+  `skills/kb-curate/ontology.md` agree from the first `## ` heading onward (the title and the
+  header notes may differ). ERR in the package's own repo, WARN in a consumer.
 
 ## Why this, not a wiki/Notion
 
