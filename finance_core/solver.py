@@ -293,6 +293,8 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     в кассе — `Payment`, `Transfer` и `Income`; у правила один носитель, иначе
     два места разойдутся.
     """
+    if not scenario.accounts:
+        raise ValueError("счета: не объявлено ни одного — считать нечего")
     for i in scenario.income:
         if i.amount <= 0:
             raise ValueError(
@@ -483,7 +485,9 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
     вызывающим по тем же правилам: кламп на конец месяца и сдвиг с выходного.
 
     Платёж с `prepaid=True` — досрочка: она уходит после обязательных платежей
-    месяца, поэтому свободные деньги считаются до неё. Неизвестный прожиточный
+    месяца, поэтому свободные деньги считаются до неё. Из свободных денег
+    вычитается и резерв обязательств (`Scenario.obligation_reserve`) — деньги,
+    оставленные под платежи начала следующего месяца. Неизвестный прожиточный
     минимум даёт `floor_gap = None` («не оценено»), а не ноль. Платёж и перевод,
     которым не хватило ёмкости своего кошелька, не проходят: они видны в
     `CashMonth.unsecured` с подсказкой, что перевести, а деньги остаются на месте.
@@ -545,19 +549,21 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
         main_steps = [s for s in timeline if s.account == main]
         floor_gap, floor_gap_date = _assess_floor(scenario, main_steps)
 
-        # Свободные деньги: доступные остатки минус прожиточный минимум месяца и
-        # минус то, что не прошло: непрошедшее обязательство не отменено — деньги
-        # на него уже обещаны. Считаются до досрочек — это и есть бюджет досрочек.
+        # Свободные деньги: доступные остатки минус прожиточный минимум месяца,
+        # минус резерв обязательств и минус то, что не прошло: непрошедшее
+        # обязательство не отменено — деньги на него уже обещаны. Считаются до
+        # досрочек — это и есть бюджет досрочек.
         # По всем кошелькам: владелец видит свои деньги целиком, а недосягаемое
         # для кошелька сделки показывается необеспеченностью с подсказкой перевода.
         total_money = _money_total(scenario, bal) - _unpaid(unsecured)
+        reserved = scenario.obligation_reserve or Decimal(0)
         if scenario.living_floor_monthly is not None:
             days = (end - window_start).days + 1
             monthly_living = (scenario.living_floor_monthly * Decimal(days)
                               / DAYS_IN_MONTH).quantize(KOPEK, rounding=ROUND_CEILING)
-            free = max(total_money - monthly_living, Decimal(0))
+            free = max(total_money - monthly_living - reserved, Decimal(0))
         else:
-            free = total_money
+            free = total_money - reserved
 
         # Досрочки — после обязательных: свободные деньги уже посчитаны, второй
         # раз в бюджет они не попадут, а касса увидит, что деньги ушли.

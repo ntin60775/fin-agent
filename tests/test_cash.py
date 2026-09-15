@@ -123,6 +123,16 @@ def test_negative_amounts_rejected_in_roll_cash_too():
         roll_cash(s, start=date(2026, 1, 1))
 
 
+def test_scenario_without_accounts_is_an_error():
+    """Сценарий без счетов — ошибка с понятным текстом, а не StopIteration из кассы."""
+    s = Scenario(accounts=[],
+                 payments=[Payment(date(2026, 1, 5), D("50"), "x", "main")])
+    with pytest.raises(ValueError, match="не объявлено ни одного"):
+        roll_cash(s, start=date(2026, 1, 1))
+    with pytest.raises(ValueError, match="не объявлено ни одного"):
+        run(s, main="main")
+
+
 def test_payment_hits_its_funding_account():
     """Платёж списывается со своего счёта, а не с основного.
 
