@@ -287,7 +287,27 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     контрагента: уидом (новая форма) или строкой имени (старая, живёт до переезда
     зоны). Платить и переводить можно только с доступного кошелька: с
     арестованной карты не заплатить, её можно только гасить.
+
+    Сумма события кассы положительная — направление несёт само событие, а не
+    знак. Правило одно на оба носителя: во взаиморасчётах его держит `Movement`,
+    в кассе — `Payment`, `Transfer` и `Income`; у правила один носитель, иначе
+    два места разойдутся.
     """
+    for i in scenario.income:
+        if i.amount <= 0:
+            raise ValueError(
+                f"приход на {i.account!r}: сумма должна быть положительной, "
+                f"а направление несут сами данные")
+    for p in scenario.payments:
+        if p.amount <= 0:
+            raise ValueError(
+                f"платёж {p.counterparty or p.creditor!r}: сумма должна быть "
+                f"положительной, а направление несут сами данные")
+    for t in scenario.transfers:
+        if t.amount <= 0:
+            raise ValueError(
+                f"перевод {t.from_account!r} → {t.to_account!r}: сумма должна "
+                f"быть положительной, а направление несут сами данные")
     known = {a.name for a in scenario.accounts}
     by_name = {a.name: a for a in scenario.accounts}
     refs = []

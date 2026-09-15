@@ -9,7 +9,7 @@ import pytest
 
 from finance_core import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER, Account,
                           Income, Payment, Scenario, Transfer, TransferHint,
-                          compare, cover_cost, optional_cap, run)
+                          compare, cover_cost, optional_cap, roll_cash, run)
 
 
 # --- каскад ---------------------------------------------------------------
@@ -50,6 +50,77 @@ def test_unknown_account_gives_clear_error():
         run(s, main="main")
     with pytest.raises(ValueError, match="основной счёт"):
         run(Scenario(accounts=[Account("main", D("100"))]), main="нет-такого")
+
+
+# --- суммы событий положительные ------------------------------------------
+
+def test_negative_payment_is_an_error_not_money():
+    """Отрицательный платёж не начисляет деньги: модель отказывает, а не считает.
+
+    Регресс на класс ошибок «знак вместо направления»: `Payment(amount=-50)`
+    с пустого кошелька не списывал, а начислял 50 — в линии шаг +50, и
+    необеспеченности не было, потому что «деньги» появились.
+    """
+    s = Scenario(accounts=[Account("main", D("0"))],
+                payments=[Payment(date(2026, 1, 5), D("-50"), "x", "main")])
+    with pytest.raises(ValueError, match="положительной"):
+        run(s, main="main")
+
+
+def test_zero_payment_is_an_error():
+    """Нулевой платёж — не деньги: он ничего не двигает, отдельного смысла нет."""
+    s = Scenario(accounts=[Account("main", D("100"))],
+                payments=[Payment(date(2026, 1, 5), D("0"), "x", "main")])
+    with pytest.raises(ValueError, match="положительной"):
+        run(s, main="main")
+
+
+def test_negative_transfer_is_an_error_not_money_moved_backwards():
+    """Отрицательный перевод не двигает деньги назад: источник не получает,
+    получатель не уходит в минус."""
+    s = Scenario(accounts=[Account("a", D("0")), Account("b", D("0"))],
+                transfers=[Transfer(date(2026, 1, 5), D("-100"), "a", "b")])
+    with pytest.raises(ValueError, match="положительной"):
+        run(s, main="a")
+
+
+def test_zero_transfer_is_an_error():
+    s = Scenario(accounts=[Account("a", D("100")), Account("b", D("0"))],
+                transfers=[Transfer(date(2026, 1, 5), D("0"), "a", "b")])
+    with pytest.raises(ValueError, match="положительной"):
+        run(s, main="a")
+
+
+def test_negative_income_is_an_error_not_money():
+    """Отрицательный доход — та же ошибка знака, что и отрицательный платёж."""
+    s = Scenario(accounts=[Account("main", D("0"))],
+                income=[Income(date(2026, 1, 1), D("-10"), "main")])
+    with pytest.raises(ValueError, match="положительной"):
+        run(s, main="main")
+
+
+def test_zero_income_is_an_error():
+    """«В этом месяце дохода нет» — пустой список, а не ноль в списке."""
+    s = Scenario(accounts=[Account("main", D("0"))],
+                income=[Income(date(2026, 1, 1), D("0"), "main")])
+    with pytest.raises(ValueError, match="положительной"):
+        run(s, main="main")
+
+
+def test_negative_amounts_rejected_in_roll_cash_too():
+    """Проверка одна на оба пути: `run()` и `roll_cash()` не разъезжаются."""
+    s = Scenario(accounts=[Account("main", D("0"))],
+                payments=[Payment(date(2026, 1, 5), D("-50"), "x", "main")])
+    with pytest.raises(ValueError, match="положительной"):
+        roll_cash(s, start=date(2026, 1, 1))
+    s = Scenario(accounts=[Account("a", D("0")), Account("b", D("0"))],
+                transfers=[Transfer(date(2026, 1, 5), D("-100"), "a", "b")])
+    with pytest.raises(ValueError, match="положительной"):
+        roll_cash(s, start=date(2026, 1, 1))
+    s = Scenario(accounts=[Account("main", D("0"))],
+                income=[Income(date(2026, 1, 1), D("0"), "main")])
+    with pytest.raises(ValueError, match="положительной"):
+        roll_cash(s, start=date(2026, 1, 1))
 
 
 def test_payment_hits_its_funding_account():
