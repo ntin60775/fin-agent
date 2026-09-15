@@ -84,7 +84,7 @@ skills feed `Context`/`Goal`, never the contract.
 ## Always at the end
 
 ```bash
-python3 .omp/skills/kb-search/gitmark.py lint     # invariants I1–I6
+python3 .omp/skills/kb-search/gitmark.py lint     # invariants I1–I7
 python3 .omp/skills/kb-search/gitmark.py index    # rebuild search
 ```
 `lint` flags: missing/broken frontmatter, type outside vocabulary, orphans (0 links),
