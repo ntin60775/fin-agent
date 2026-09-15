@@ -64,8 +64,8 @@ operator's hand launch *is* the confirmation.
 ## Stop-points (from the plan contract's `Constraints`)
 
 - `stop-before-commit` — after review (step 6), stop with the uncommitted diff in the
-  worktree; commit and everything after wait for the operator's "continue". Default for
-  1C projects (see the `ship-1c` rule).
+  worktree; commit and everything after wait for the operator's "continue". The default
+  when the contract names no other stop-point.
 - `stop-after-mr` — after opening the MR (step 7), stop for the operator's review.
 - `no-deploy` — skip the deploy in step 9.
 
