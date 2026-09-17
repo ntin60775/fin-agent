@@ -295,12 +295,14 @@ def test_hint_is_absent_when_there_is_nowhere_to_transfer_from():
     assert u.hint is None
 
 
-def test_credit_wallet_pays_up_to_its_free_limit():
-    """Кредитка платит остатком и свободным лимитом, а больше лимита — нет."""
+# --- ёмкость кошелька: кредитный лимит -------------------------------------
+
+def test_credit_wallet_pays_a_living_expense_up_to_its_free_limit():
+    """Кредитка платит жизненный расход остатком и свободным лимитом, а больше — нет."""
     s = Scenario(
         accounts=[Account("card", D("0"), is_credit=True, limit=D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("1000"), "x", "card"),
-                  Payment(date(2026, 1, 11), D("100"), "y", "card")],
+        payments=[Payment(date(2026, 1, 10), D("1000"), "x", "card", debt=False),
+                  Payment(date(2026, 1, 11), D("100"), "y", "card", debt=False)],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("-1000")         # минус на кредитном — долг
@@ -316,8 +318,8 @@ def test_credit_wallet_with_debt_pays_the_rest_of_its_limit():
     """
     s = Scenario(
         accounts=[Account("card", D("-900"), is_credit=True, limit=D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("100"), "x", "card"),
-                  Payment(date(2026, 1, 11), D("50"), "y", "card")],
+        payments=[Payment(date(2026, 1, 10), D("100"), "x", "card", debt=False),
+                  Payment(date(2026, 1, 11), D("50"), "y", "card", debt=False)],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("-1000")         # лимит выбран до конца
@@ -325,15 +327,81 @@ def test_credit_wallet_with_debt_pays_the_rest_of_its_limit():
     assert r.hole == D("0")                         # долг — не дыра
 
 
+def test_credit_limit_does_not_pay_a_debt():
+    """Лимит закрыт под погашение: долговой платёж идёт только своими деньгами.
+
+    Деньги, до которых платёж не дотянулся, видны необеспеченностью с подсказкой
+    перевода: они не «отсутствуют нигде», а лежат на другом кошельке.
+    """
+    s = Scenario(
+        accounts=[Account("card", D("0"), is_credit=True, limit=D("1000")),
+                  Account("свои", D("400"))],
+        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card")],
+    )
+    r = run(s, main="свои")
+    assert r.balances["card"] == D("0")             # лимит не тронут
+    assert r.hole == D("0")                         # деньги есть, но не на карте
+    [u] = r.unsecured
+    assert (u.paid, u.short) == (D("0"), D("500"))
+    assert u.hint == TransferHint("свои", D("400"))
+
+
+def test_credit_limit_does_not_fund_a_prepayment():
+    """Досрочка долговая всегда: лимитом она не финансируется, только своими."""
+    s = Scenario(
+        accounts=[Account("card", D("100"), is_credit=True, limit=D("1000"))],
+        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card", prepaid=True)],
+    )
+    r = run(s, main="card")
+    assert r.balances["card"] == D("0")             # ушло ровно сто — свои деньги
+    [u] = r.unsecured
+    assert (u.kind, u.paid, u.short) == (KIND_PREPAID, D("100"), D("400"))
+
+
+def test_prepayment_cannot_be_living():
+    """Досрочка всегда долговая: `debt=False` у неё — противоречие, а не выбор."""
+    s = Scenario(
+        accounts=[Account("main", D("1000"))],
+        payments=[Payment(date(2026, 1, 10), D("500"), "x", "main",
+                          prepaid=True, debt=False)],
+    )
+    with pytest.raises(ValueError, match="досрочка всегда долговая"):
+        run(s, main="main")
+
+
+def test_transfer_is_not_a_debt_payment():
+    """Перевод — не платёж по долгу: свободный лимит к нему применим."""
+    s = Scenario(
+        accounts=[Account("card", D("0"), is_credit=True, limit=D("1000")),
+                  Account("свои", D("0"))],
+        transfers=[Transfer(date(2026, 1, 5), D("500"), "card", "свои")],
+    )
+    r = run(s, main="card")
+    assert r.balances == {"card": D("-500"), "свои": D("500")}
+    assert r.unsecured == []
+
+
 def test_unknown_limit_does_not_invent_a_refusal():
     """Лимит кредитного неизвестен — ёмкость не оценена: отказа движок не выдумывает."""
     s = Scenario(
         accounts=[Account("card", D("0"), is_credit=True)],
-        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card")],
+        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card", debt=False)],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("-500")
     assert r.unsecured == []
+
+
+def test_unknown_limit_is_no_help_to_a_debt_payment():
+    """Долговой платёж лимита не спрашивает: неизвестный его ёмкость не отменяет."""
+    s = Scenario(
+        accounts=[Account("card", D("100"), is_credit=True)],
+        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card")],
+    )
+    r = run(s, main="card")
+    assert r.balances["card"] == D("100")           # целиком или никак: ушло ноль
+    [u] = r.unsecured
+    assert (u.short, r.unsecured_total) == (D("400"), D("500"))
 
 
 def test_income_comes_before_payment_on_the_same_day():
