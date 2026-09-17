@@ -16,8 +16,10 @@
 Кошелёк платит тем, что у него есть (`docs/decisions/wallet-pays-what-it-has.md`):
 платёж, которому не хватило ёмкости своего кошелька, не проходит целиком, а
 досрочка — исключение по сумме: её сумму назначает движок, поэтому он назначает
-столько, сколько кошелёк может отдать. Дыру движок не создаёт сам — она приходит
-снаружи, остатками, которые уже в минусе.
+столько, сколько кошелёк может отдать. Свободный лимит кредитного кошелька идёт
+только под жизненный расход: долговой платёж (`Payment.debt`) лимитом не
+финансируется, а перевод — не платёж по долгу, и лимит к нему применим. Дыру
+движок не создаёт сам — она приходит снаружи, остатками, которые уже в минусе.
 
 Неизвестное — `None`, не ноль. Не задан прожиточный минимум (`?`) —
 `floor_gap` равен None: честный ответ «не оценено», а не ноль.
@@ -197,11 +199,15 @@ def _account(scenario: Scenario, name: str) -> Account:
     return next(a for a in scenario.accounts if a.name == name)
 
 
-def _room(scenario: Scenario, bal: dict[str, Decimal], account: str) -> Decimal | None:
-    """Сколько кошелёк может отдать под платёж; None — ёмкость не оценена."""
+def _room(scenario: Scenario, bal: dict[str, Decimal], account: str, *,
+          debt: bool) -> Decimal | None:
+    """Сколько кошелёк может отдать под платёж; None — ёмкость не оценена.
+
+    Долговой платёж лимита не получает — правило кошелька (`wallet_capacity`).
+    """
     a = _account(scenario, account)
     return wallet_capacity(bal[a.name], is_credit=a.is_credit,
-                           available=a.available, limit=a.limit)
+                           available=a.available, limit=a.limit, debt=debt)
 
 
 def _hint(scenario: Scenario, bal: dict[str, Decimal], account: str,
@@ -211,7 +217,9 @@ def _hint(scenario: Scenario, bal: dict[str, Decimal], account: str,
     Своего кошелька подсказка не предлагает: переводить с него на него нечего.
     Переводить неоткуда — подсказки нет: это уже дыра, а не перевод. Нехватка
     больше самого полного кошелька — подсказка говорит, сколько он может отдать:
-    обещать больше нечего.
+    обещать больше нечего. Свободный лимит в подсказке не участвует: она
+    предлагает свои деньги, а перевод с кредитного — заём, и решает о нём
+    владелец, а не движок.
     """
     best: tuple[Decimal, str] | None = None
     for a in scenario.accounts:
@@ -241,6 +249,7 @@ class _Event:
     account: str
     amount: Decimal
     to_account: str | None = None    # у перевода — куда
+    debt: bool = True                # долговой: кредитным лимитом не финансируется
 
 
 def _apply_event(scenario: Scenario, bal: dict[str, Decimal], event: _Event,
@@ -250,14 +259,16 @@ def _apply_event(scenario: Scenario, bal: dict[str, Decimal], event: _Event,
     Доход приходит всегда: деньги не берутся с кошелька, а приходят на него.
     Перевод и платёж проверяются ёмкостью своего кошелька: обязательство платится
     целиком или не платится вовсе, досрочка — настолько, насколько кошелёк может
-    отдать. Не хватило — событие видно в `unsecured` вместе с подсказкой, что
-    перевести; деньги при этом остаются там, где лежали.
+    отдать. Ёмкость — `wallet_capacity`: у долгового платежа это деньги кошелька,
+    у жизненного — ещё и свободный лимит. Не хватило — событие видно в
+    `unsecured` вместе с подсказкой, что перевести; деньги при этом остаются там,
+    где лежали.
     """
     if event.kind == KIND_INCOME:
         bal[event.account] += event.amount
         return [Step(event.date, event.account, event.amount, bal[event.account])]
 
-    room = _room(scenario, bal, event.account)
+    room = _room(scenario, bal, event.account, debt=event.debt)
     amount, short = event.amount, Decimal(0)
     if room is not None and amount > room:
         # Обязательство — целиком или никак; досрочку движок назначает сам,
@@ -291,7 +302,9 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     Сумма события кассы положительная — направление несёт само событие, а не
     знак. Правило одно на оба носителя: во взаиморасчётах его держит `Movement`,
     в кассе — `Payment`, `Transfer` и `Income`; у правила один носитель, иначе
-    два места разойдутся.
+    два места разойдутся. Досрочка всегда долговая: её движок направляет на
+    долг, а долг кредитным лимитом не платится — `debt=False` у неё
+    противоречие, а не выбор.
     """
     if not scenario.accounts:
         raise ValueError("счета: не объявлено ни одного — считать нечего")
@@ -328,6 +341,11 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
         if p.counterparty is None and p.creditor is None:
             raise ValueError("платёж без контрагента: нужен уид контрагента "
                              "или строковое имя кредитора")
+        if p.prepaid and not p.debt:
+            raise ValueError(
+                f"досрочка {p.counterparty or p.creditor!r}: досрочка всегда "
+                f"долговая — её движок направляет на долг, а долг лимитом "
+                f"не платится")
         if p.account is not None and not by_name[p.account].available:
             raise ValueError(
                 f"платёж {p.counterparty or p.creditor!r}: счёт {p.account!r} недоступен")
@@ -343,8 +361,9 @@ def run(scenario: Scenario, main: str) -> Result:
     В один день сначала приходит доход, потом уходит перевод, потом платёж:
     переводят до того, как тратят. Платёж, которому не хватило ёмкости своего
     кошелька, не проходит — деньги остаются там, где лежали, а необеспеченность
-    видна в `Result.unsecured`. Дыра при этом не создаётся: она приходит снаружи,
-    остатками, которые уже в минусе.
+    видна в `Result.unsecured`. Долговой платёж лимитом не платится: свободный
+    лимит идёт только под жизненный расход (`Payment.debt`). Дыра при этом не
+    создаётся: она приходит снаружи, остатками, которые уже в минусе.
     """
     _validate(scenario, main)
     bal: dict[str, Decimal] = {a.name: a.balance for a in scenario.accounts}
@@ -354,10 +373,10 @@ def run(scenario: Scenario, main: str) -> Result:
         events.append(_Event(i.date, KIND_INCOME, i.account, i.amount))
     for t in scenario.transfers:
         events.append(_Event(t.date, KIND_TRANSFER, t.from_account, t.amount,
-                             t.to_account))
+                             t.to_account, debt=False))   # перевод — не долг
     for p in scenario.payments:
         kind = KIND_PREPAID if p.prepaid else KIND_PAYMENT
-        events.append(_Event(p.date, kind, p.account, p.amount))
+        events.append(_Event(p.date, kind, p.account, p.amount, debt=p.debt))
 
     # Стабильная сортировка: внутри дня события идут по виду, а внутри вида —
     # в порядке добавления. Дата не сдвигается, касса только считает.
@@ -491,6 +510,8 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
     минимум даёт `floor_gap = None` («не оценено»), а не ноль. Платёж и перевод,
     которым не хватило ёмкости своего кошелька, не проходят: они видны в
     `CashMonth.unsecured` с подсказкой, что перевести, а деньги остаются на месте.
+    Свободный лимит кредитного кошелька идёт только под жизненный расход:
+    долговой платёж (`Payment.debt`) лимитом не финансируется.
     """
     _validate(scenario)
     bal: dict[str, Decimal] = {a.name: a.balance for a in scenario.accounts}
@@ -522,13 +543,14 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
         for t in transfers:
             if window_start <= t.date <= end:
                 regular.append(_Event(t.date, KIND_TRANSFER, t.from_account,
-                                      t.amount, t.to_account))
+                                      t.amount, t.to_account,
+                                      debt=False))       # перевод — не долг
         for p in payments:
             if not window_start <= p.date <= end:
                 continue
             kind = KIND_PREPAID if p.prepaid else KIND_PAYMENT
             (prepaid if p.prepaid else regular).append(
-                _Event(p.date, kind, p.account, p.amount))
+                _Event(p.date, kind, p.account, p.amount, debt=p.debt))
 
         regular.sort(key=lambda e: (e.date, _day_order(e.kind)))
         prepaid.sort(key=lambda e: e.date)

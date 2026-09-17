@@ -341,6 +341,29 @@ def test_regular_expense_pays_but_never_closes_or_is_prepaid():
     assert roll.months[0].free == D("5000")         # свободные деньги её не досрочили
 
 
+def test_scheduled_payment_knows_whether_it_is_debt():
+    """Признак — из модели: сделка с остатком платит долг, регулярный расход — нет."""
+    rent = _deal(uid="аренда", amount=None, counterparty="арендодатель",
+                 schedule=_rule(days=(5,), payment=D("500")))
+    loan = _deal(uid="заём", amount=D("1000"), schedule=_rule(payment=D("500")))
+    book = _book(rent, loan,
+                 counterparties=[_counterparty(uid="арендодатель", name="Арендодатель",
+                                               subtype="прочее")])
+    by_deal = {p.deal: p for p in roll_deals(book, START, D("0"),
+                                             max_months=1).months[0].payments}
+    assert by_deal["заём"].debt is True
+    assert by_deal["аренда"].debt is False
+
+
+def test_prepayment_is_a_debt_payment():
+    """Досрочка долговая всегда: её движок направляет на долг."""
+    loan = _deal(uid="заём", amount=D("1000"), schedule=_rule(payment=D("500")))
+    book = _book(loan)
+    payments = roll_deals(book, START, D("300"), max_months=1).months[0].payments
+    early = [p for p in payments if p.planned is None]
+    assert early and all(p.debt for p in early)
+
+
 # --- копилка ---------------------------------------------------------------
 
 def test_closure_unit_is_a_piggy_bank():
