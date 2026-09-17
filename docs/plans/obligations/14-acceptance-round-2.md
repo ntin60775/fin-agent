@@ -2,7 +2,7 @@
 node_type: ticket
 title: Приёмка, раунд 2 — заявленное против фактического
 service: _platform
-status: active
+status: archived
 updated: 2026-09-17
 links:
   part_of: [README.md]
