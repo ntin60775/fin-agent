@@ -62,6 +62,10 @@ class ScheduledPayment:
     `planned` — плановая дата вхождения, по которой платёж опознаётся; `None` —
     досрочка: вхождения у неё нет, деньги уходят сверх графика. `unit` — копилка,
     если платёж идёт в неё, а не в остаток сделки.
+
+    `debt` — платёж долговой: у сделки с остатком платёж гасит долг, у
+    регулярного расхода — нет, а досрочка долговая всегда. Признак нужен кассе:
+    долговой платёж кредитным лимитом не финансируется (`Payment.debt`).
     """
     date: date
     amount: Decimal
@@ -70,6 +74,7 @@ class ScheduledPayment:
     wallet: str | None
     planned: date | None = None
     unit: str | None = None
+    debt: bool = True
 
 
 @dataclass
@@ -535,7 +540,9 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
                 date=when, amount=amount, deal=uid,
                 counterparty=deal_holder_at(book, uid, when),
                 wallet=funding_wallet(opened.deal), planned=occ.planned,
-                unit=opened.unit))
+                unit=opened.unit,
+                # Сделка с остатком — долг, регулярный расход — жизнь.
+                debt=opened.deal.amount is not None))
 
         # 3. Свободные деньги — по стратегии, сначала обязательный график.
         for target in _order(_targets(open_deals, open_units, False), strategy):
@@ -608,6 +615,8 @@ def _prepayment(book: Settlements, open_deals: dict[str, _Open],
 
     Дата — конец месяца: свободные деньги становятся известны, когда обязательные
     платежи месяца уже прошли. У копилки платёж числится за первым участником.
+    Досрочка всегда долговая: движок направляет её на долг, а долг кредитным
+    лимитом не платится.
     """
     unit = open_units.get(target.uid)
     uid = unit.members[0] if unit is not None else target.uid
@@ -616,7 +625,7 @@ def _prepayment(book: Settlements, open_deals: dict[str, _Open],
         date=when, amount=amount, deal=uid,
         counterparty=deal_holder_at(book, uid, when),
         wallet=funding_wallet(open_deals[uid].deal), planned=None,
-        unit=unit.uid if unit is not None else None)
+        unit=unit.uid if unit is not None else None, debt=True)
 
 
 def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
@@ -771,6 +780,7 @@ def roll_months(book: Settlements, start: date,
                     account=sp.wallet,
                     counterparty=sp.counterparty,
                     prepaid=sp.planned is None,
+                    debt=sp.debt,
                 ))
 
         scenario = Scenario(
