@@ -6,7 +6,7 @@ from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (KIND_PREPAID, Account, ConvergenceError, Counterparty,
+from finance_core import (KIND_PREPAID, LEGAL, Account, ConvergenceError, Counterparty,
                             Deal, Income, Payment, Scenario, Settlements,
                             TransferHint, Wallet, roll_cash, roll_deals,
                             roll_months, run)
@@ -180,6 +180,25 @@ def test_both_paths_agree_on_the_guard():
     assert months[0].unsecured_total == r.unsecured_total
 
 
+def test_both_paths_agree_on_the_credit_limit():
+    """Касса и прокат месяцев держат правило лимита одинаково.
+
+    Долговой платёж лимита не получает, жизненный получает — в обоих путях
+    одно и то же число.
+    """
+    s = Scenario(
+        accounts=[Account("card", D("0"), is_credit=True, limit=D("1000"))],
+        payments=[Payment(date(2026, 1, 10), D("400"), account="card",
+                          counterparty="c"),
+                  Payment(date(2026, 1, 11), D("300"), account="card",
+                          counterparty="c", debt=False)],
+    )
+    r = run(s, main="card")
+    months = roll_cash(s, START, max_months=1, main="card")
+    assert months[0].balances == r.balances == {"card": D("-300")}
+    assert months[0].unsecured_total == r.unsecured_total == D("400")
+
+
 def test_roll_cash_hole_on_starting_negative_balance():
     """Дыра: счёт начинается с отрицательного остатка — дыра видна без событий."""
     s = Scenario(
@@ -293,6 +312,30 @@ def test_roll_months_marks_the_forecast_as_conditional():
     assert result.deal_roll.total_paid == D("300")      # долговая сторона: заплачено
     assert result.unsecured_total == D("300")           # касса: не прошло ничего
     assert result.cash_months[0].unsecured[0].hint.source == "деньги"
+
+
+def test_roll_months_credit_card_pays_rent_but_not_the_loan():
+    """Кредитка платит регулярный расход и не платит заём: признак — из сделки.
+
+    Лимит закрыт под погашение кредитов, а аренда — жизненный расход: она
+    проходит. Заём не проходит целиком и виден необеспеченностью, а не дырой.
+    """
+    loan = _deal(uid="заём", amount=D("1000"), wallet="кредитка",
+                 schedule=_rule(start=START, payment=D("500")))
+    rent = _deal(uid="аренда", amount=None, counterparty="арендодатель",
+                 wallet="кредитка", schedule=_rule(start=START, payment=D("300")))
+    wallets = [_wallet("кредитка", D("0"), is_credit=True, limit=D("10000"))]
+    book = _book(loan, rent,
+                 counterparties=[Counterparty(uid="арендодатель",
+                                              name="Арендодатель", kind=LEGAL,
+                                              subtype="прочее")],
+                 wallets=wallets)
+    result = roll_months(book, START, wallets, [], [], living_floor=D("0"),
+                         max_months=1)
+    assert result.cash_months[0].balances["кредитка"] == D("-300")
+    assert result.cash_months[0].hole == D("0")         # деньги есть — лимит закрыт
+    [u] = result.cash_months[0].unsecured
+    assert (u.amount, u.short) == (D("500"), D("500"))
 
 
 def test_roll_months_raises_on_no_convergence():
