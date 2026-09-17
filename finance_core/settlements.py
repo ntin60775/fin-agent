@@ -172,9 +172,10 @@ class ScheduleRule:
     - **отдельный первый платёж** — `first`: своя дата и своя сумма перед рядом.
 
     `days` — дни месяца, когда наступает вхождение; дня, которого нет в месяце,
-    не бывает (берётся последний), а выходной сдвигает дату вперёд — по флагу
-    `shift_weekend`; праздники не учитываются. `start` — с какого месяца идёт
-    ряд: без него не сосчитать `count`.
+    не бывает (берётся последний), а выходной сдвигает дату по флагу
+    `shift_weekend`: платёж — вперёд, доход — назад (сторону задаёт направление
+    сделки, `occurrences`); праздники не учитываются. `start` — с какого месяца
+    идёт ряд: без него не сосчитать `count`.
 
     Правило порождает вхождения, а правят их поверх — переносом, пропуском,
     сменой суммы (`OccurrenceEdit`). Само правило при этом не меняется.
@@ -773,16 +774,19 @@ def _merged_edits(book: Settlements) -> dict[tuple[str, date], OccurrenceEdit]:
     return merged
 
 
-def planned_date(year: int, month: int, day: int, shift_weekend: bool) -> date:
+def planned_date(year: int, month: int, day: int, shift_weekend: bool,
+                 backward: bool = False) -> date:
     """Дата вхождения по правилу: кламп на конец месяца и сдвиг с выходного.
 
     Дня, которого нет в месяце, не бывает — берётся последний. Выходной сдвигает
-    платёж вперёд; праздники не учитываются: календаря праздников у движка нет.
+    дату: платёж — вперёд, к понедельнику; доход — назад, к пятнице (`backward`).
+    Праздники не учитываются: календаря праздников у движка нет.
     """
     last = calendar.monthrange(year, month)[1]
     when = date(year, month, min(day, last))
+    step = -1 if backward else 1
     while shift_weekend and when.weekday() >= 5:
-        when += timedelta(days=1)
+        when += timedelta(days=step)
     return when
 
 
@@ -860,10 +864,13 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
         return []
     edits = _merged_edits(book)
     found: list[Occurrence] = []
+    # Доход сдвигается назад, платёж вперёд: выходной переезжает по стороне денег.
+    backward = deal.direction == OWED_TO_ME
 
     if rule.first is not None:
         first = rule.first.date
-        when = planned_date(first.year, first.month, first.day, rule.shift_weekend)
+        when = planned_date(first.year, first.month, first.day, rule.shift_weekend,
+                            backward=backward)
         if since <= when <= until:
             found.append(_occurrence(book, deal, when, rule.first.amount, edits))
 
@@ -879,7 +886,8 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
                                                            rule.start.month):
                 continue               # ряд идёт с начала, раньше вхождений нет
             for position, day in enumerate(days):
-                when = planned_date(year, month, day, rule.shift_weekend)
+                when = planned_date(year, month, day, rule.shift_weekend,
+                                    backward=backward)
                 if not since <= when <= until:
                     continue
                 if rule.count is not None and rule.start is not None:

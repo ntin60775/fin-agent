@@ -196,7 +196,10 @@ def test_requirements_are_a_separate_line_and_do_not_enter_liquidity():
                  wallets=[_wallet(balance=D("-5000"))])
     f = forecast(_input(book, living_floor=D("3000"), max_months=3))
     assert [(e.deal, e.date, e.amount) for e in f.expectations] == [
-        ("должны", date(2026, 1, 1), D("20000"))]
+        ("должны", date(2026, 1, 1), D("20000")),
+        # 1 февраля — воскресенье: доход сдвигается назад, к пятнице, и попадает
+        # в январское окно отчёта — деньги приходят в январе, а не в феврале.
+        ("должны", date(2026, 1, 30), D("20000"))]
     assert f.months[0].hole == D("5000")            # дыра требованием не уменьшена
     assert "должны" not in f.months[0].balances
     assert f.deficits[0].covers_hole is True        # требование закрыло бы дыру

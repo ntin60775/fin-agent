@@ -306,6 +306,8 @@ def _gap_reason(deal: Deal) -> str | None:
     if (deal.amount is not None and deal.rate_per_year is None
             and deal.rate_per_day is None):
         return "ставка не задана: неизвестно, растёт ли долг"
+    if deal.wallet is None:
+        return "финансирующий кошелёк не задан: платить не с чего"
     if deal.second_priority:
         return None
     if rule is None:
@@ -763,8 +765,6 @@ def roll_months(book: Settlements, start: date,
         payments: list[Payment] = list(one_offs)
         for dm in deal_roll.months:
             for sp in dm.payments:
-                if sp.wallet is None:
-                    continue
                 payments.append(Payment(
                     date=sp.date,
                     amount=sp.amount,
