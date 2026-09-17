@@ -2,7 +2,7 @@
 node_type: ticket
 title: Кредитный лимит — жизнь можно, долг нельзя
 service: _platform
-status: active
+status: archived
 updated: 2026-09-17
 links:
   part_of: [README.md]
