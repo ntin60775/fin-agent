@@ -9,8 +9,8 @@ import pytest
 from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           POSTPONED, SKIPPED, Counterparty, Deal, FirstPayment,
                           Movement, OccurrenceEdit, ScheduleRule, Settlements,
-                          compare_deal_strategies, occurrences, roll_deals,
-                          validate)
+                          Wallet, compare_deal_strategies, occurrences,
+                          roll_deals, validate)
 
 START = date(2026, 1, 1)
 
@@ -23,14 +23,17 @@ def _counterparty(uid: str = "банк", name: str = "Банк", **kw) -> Counte
 
 def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     base = dict(uid=uid, title="Заём", counterparty="банк", amount=amount,
-                rate_per_year=D("0"))
+                rate_per_year=D("0"), wallet="карта")
     base.update(kw)
     return Deal(**base)
 
 
-def _book(*deals, counterparties=(), movements=(), edits=()) -> Settlements:
+def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Settlements:
+    if wallets is None:
+        wallets = [Wallet("карта", "Карта", "карта", D("0"))]
     return Settlements(
         counterparties=[_counterparty(), *counterparties],
+        wallets=list(wallets),
         deals=list(deals),
         movements=list(movements),
         edits=list(edits),
@@ -253,6 +256,21 @@ def test_weekend_shifts_the_payment_forward_and_holidays_are_not_counted():
     validate(off)
     assert [o.planned for o in occurrences(off, "без-сдвига", START,
                                            date(2026, 1, 31))] == [date(2026, 1, 3)]
+
+
+def test_weekend_shifts_the_income_backward():
+    """Выходной переезжает по стороне денег: у требования — назад, к пятнице.
+
+    Сторона платежа проверена рядом:
+    `test_weekend_shifts_the_payment_forward_and_holidays_are_not_counted`.
+    """
+    claim = _deal(uid="требование", amount=D("2000"), direction=OWED_TO_ME,
+                  schedule=_rule(days=(3,), payment=D("1000")))
+    book = _book(claim)
+    validate(book)
+    # 3 января — суббота: доход приходит в пятницу, 2-го, а не в понедельник.
+    assert [o.planned for o in occurrences(book, "требование", START,
+                                           date(2026, 1, 31))] == [date(2026, 1, 2)]
 
 
 def test_overdue_occurrence_is_paid_in_the_first_month_not_in_the_past():
@@ -496,6 +514,18 @@ def test_deal_without_a_schedule_is_a_gap():
     assert "графика" in roll.gaps[0].reason
 
 
+def test_deal_without_a_wallet_is_a_gap_not_silence():
+    """Без финансирующего кошелька платёж не дойдёт до кассы: это пробел,
+    а не молчаливое уменьшение остатка без движения денег."""
+    book = _book(_deal(uid="без-кошелька", amount=D("5000"), wallet=None,
+                       schedule=_rule(payment=D("1000"))))
+    validate(book)
+    roll = roll_deals(book, START, D(0))
+    assert [g.deal for g in roll.gaps] == ["без-кошелька"]
+    assert "кошелёк" in roll.gaps[0].reason
+    assert roll.months[0].total == D("0")
+
+
 def test_closed_deal_is_not_a_gap_and_not_rolled():
     """Закрытая сделка прокатывать нечего — и пробелом она не считается."""
     deal = _deal(uid="закрытая", amount=D("1000"), schedule=_rule(payment=D("1000")))
@@ -647,8 +677,8 @@ def test_month_aggregates_its_payments_and_keeps_their_days():
     assert jan.index == 1 and jan.month == date(2026, 1, 1)
     assert jan.paid == D("1000")
     assert [(p.date, p.amount, p.wallet, p.counterparty)
-            for p in jan.payments] == [(date(2026, 1, 5), D("500"), None, "банк"),
-                                       (date(2026, 1, 20), D("500"), None, "банк")]
+            for p in jan.payments] == [(date(2026, 1, 5), D("500"), "карта", "банк"),
+                                       (date(2026, 1, 20), D("500"), "карта", "банк")]
 
 
 # --- проверки книги --------------------------------------------------------
