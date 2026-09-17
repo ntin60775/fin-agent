@@ -29,12 +29,15 @@ def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     return Deal(**base)
 
 
-def _book(*deals, counterparties=(), movements=(), edits=()) -> Settlements:
+def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Settlements:
     from finance_core import LEGAL
+    if wallets is None:
+        wallets = [_wallet()]
     return Settlements(
         counterparties=[Counterparty(uid="банк", name="Банк", kind=LEGAL,
                                      subtype="банк", groups=("долги",)),
                         *counterparties],
+        wallets=list(wallets),
         deals=list(deals),
         movements=list(movements),
         edits=list(edits),
