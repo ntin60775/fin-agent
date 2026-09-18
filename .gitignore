@@ -9,8 +9,7 @@
 # --- omp: поставка плагинами (каталог sot-omp-marketplace) ---
 # Доставленное не версионируется здесь: источник истины — репозитории плагинов и
 # машинный слой (sot-omp-core). В проекте версионируется только своё:
-# .omp/rules/ (имена не совпадают с плагинными), .omp/extensions/,
-# .omp/TECH_DEBT.md, .omp/unica-gate-escalations.txt.
+# .omp/rules/ (имена не совпадают с плагинными).
 .omp/plugins/
 .omp/skills/
 .omp/commands/
