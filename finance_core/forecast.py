@@ -174,7 +174,8 @@ class Forecast:
     дыры): цифра на допущении не выглядит фактом. `questions` — необъяснённые
     расхождения факта с расчётом: пока они есть, прогноз неполон.
     `unsecured_total` — сколько за прокат не прошло из-за ёмкости своего кошелька:
-    не ноль значит, что прогноз долгов держится на переводе.
+    не ноль значит, что прогноз долгов держится на переводе. `interest` — рубли
+    процентов за прокат целиком: прогноз, закрывающий долги раньше, платит меньше.
     """
     start: date
     months: list[CashMonth]
@@ -192,6 +193,7 @@ class Forecast:
     living_floor: Decimal | None = None
     obligation_reserve: Decimal | None = None
     unsecured_total: Decimal = Decimal(0)
+    interest: Decimal = Decimal(0)
 
     @property
     def reached(self) -> bool:
@@ -259,6 +261,7 @@ def forecast(inp: ForecastInput) -> Forecast:
         living_floor=inp.living_floor,
         obligation_reserve=inp.obligation_reserve,
         unsecured_total=roll.unsecured_total,
+        interest=roll.deal_roll.total_interest,
     )
 
 
