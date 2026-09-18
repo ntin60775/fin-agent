@@ -1,3 +1,13 @@
+---
+node_type: reference
+title: Ядро расчёта личных финансов — доменные термины
+service: _platform
+status: active
+updated: 2026-09-18
+links:
+  relates_to: [docs/ontology.md, docs/README.md]
+---
+
 # Ядро расчёта личных финансов
 
 Библиотека арифметики для личных финансов: **касса** (хватит ли денег, где дыра,

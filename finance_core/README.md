@@ -1,3 +1,14 @@
+---
+node_type: index
+title: finance_core — устройство, API, инварианты
+service: _platform
+status: active
+updated: 2026-09-18
+links:
+  documents: [solver.py, debt.py, settlements.py, roll.py, forecast.py, actions.py, model.py]
+  part_of: [../docs/README.md]
+---
+
 # finance_core
 
 Ядро расчёта: **касса**, **долги**, **взаиморасчёты**, **прокат сделок** и
