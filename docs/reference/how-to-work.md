@@ -92,7 +92,7 @@ flowchart LR
 5. Синтетические тесты движка: `python3 -m pytest tests/`.
 6. **Сценарные тесты потребителя — это и есть интеграционный тест движка:**
    `cd ../finance && python3 tests/test_scenarios.py`.
-7. База знаний: `python3 .omp/skills/kb-search/gitmark.py lint`.
+7. База знаний: `python3 skill://kb-search/gitmark.py lint`.
 
 ## Установка движка
 

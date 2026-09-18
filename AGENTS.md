@@ -46,8 +46,8 @@ HTML-карта — регенерируется из md и в git не комм
 
 ```bash
 python3 -m pytest tests/                          # синтетические тесты движка
-python3 .omp/skills/kb-search/gitmark.py lint     # инварианты KB (I1–I7)
-python3 .omp/skills/kb-search/gitmark.py index    # индекс поиска
+python3 skill://kb-search/gitmark.py lint         # инварианты KB (I1–I8)
+python3 skill://kb-search/gitmark.py index        # индекс поиска
 ```
 
 ## Потребитель
