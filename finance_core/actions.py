@@ -175,7 +175,7 @@ def _totals(base: Base, variant: Variant) -> str | None:
             return (f"досрочки по сделке {deal_uid!r} вместе больше остатка "
                     f"({remaining})")
     for month, total in by_month.items():
-        free = _free_at(base, month)
+        free = _budget_at(base, month)
         if free is not None and total > free:
             return (f"досрочки месяца {month} вместе больше свободных денег "
                     f"({free})")
@@ -304,7 +304,7 @@ def _prepay_reason(base: Base, action: Prepay) -> str | None:
     if action.amount > remaining:
         return (f"досрочка {action.deal!r}: {action.amount} больше остатка "
                 f"({remaining})")
-    free = _free_at(base, action.date)
+    free = _budget_at(base, action.date)
     if free is None:
         return (f"досрочка {action.deal!r}: месяц {action.date} за отчётом — "
                 f"свободных денег не видно")
@@ -632,9 +632,13 @@ def _remaining(book: Settlements, deal: Deal, on: date) -> Decimal:
     return deal_balance(book, deal.uid, on) or Decimal(0)
 
 
-def _free_at(base: Base, when: date) -> Decimal | None:
-    """Свободные деньги месяца, в котором стоит дата; None — месяц за отчётом."""
+def _budget_at(base: Base, when: date) -> Decimal | None:
+    """Бюджет досрочек месяца, в котором стоит дата; None — месяц за отчётом.
+
+    Бюджет, а не свободные деньги: отрицательные свободные деньги — нехватка, и
+    досрочке они ничего не дают (`CashMonth.prepay_budget`).
+    """
     for cm in base.forecast.months:
         if cm.month == when.replace(day=1):
-            return cm.free
+            return cm.prepay_budget
     return None

@@ -261,6 +261,22 @@ def test_roll_cash_unknown_floor_gives_none_gap():
     assert months[0].floor_gap_date is None
 
 
+def test_roll_cash_free_money_can_be_negative():
+    """Свободные деньги — состояние месяца: без денег величина отрицательна.
+
+    Отрицательные свободные деньги — нехватка, а не бюджет: бюджет досрочек
+    (`prepay_budget`) не бывает отрицательным.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="main",
+                          counterparty="c")],
+    )
+    months = roll_cash(s, START, max_months=1, main="main")
+    assert months[0].free == D("-500")              # деньги обещаны платежу
+    assert months[0].prepay_budget == D("0")
+
+
 # --- roll_months -----------------------------------------------------------
 
 def test_roll_months_converges():
@@ -277,6 +293,26 @@ def test_roll_months_converges():
     assert len(result.cash_months) == 12
     # Deal may close earlier than max_months — that's correct
     assert len(result.deal_roll.months) <= 12
+
+
+def test_roll_months_converges_without_living_floor():
+    """Прокат месяцев сходится, когда прожиточный минимум неизвестен, а денег не хватает.
+
+    Дефект: отрицательные свободные деньги уходили в бюджет досрочек, уменьшали
+    пул месяца — обязательные платежи не проходили целиком, и расчёт уходил в
+    `ConvergenceError`. Нехватка бюджетом не становится: он не бывает отрицательным.
+    """
+    deal = _deal(amount=D("3000"), rate_per_year=None, rate_per_day=D("0.00005"),
+                 schedule=_rule(start=START, payment=D("1000")))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0"))]
+    result = roll_months(book, START, wallets, [], [],
+                         living_floor=None, max_months=4)
+    assert result.iterations >= 1
+    # Свободные деньги — состояние месяца: 0 − 1 000, платёж не прошёл
+    assert result.cash_months[0].free == D("-1000")
+    # Бюджет досрочек не бывает отрицательным — нехватка его не уменьшает
+    assert all(cm.prepay_budget == D("0") for cm in result.cash_months)
 
 
 def test_roll_months_assumed_after_hole():

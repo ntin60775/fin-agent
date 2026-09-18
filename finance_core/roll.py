@@ -742,6 +742,11 @@ def roll_months(book: Settlements, start: date,
     обязательства пересчитываются — и так до сходимости. Если не сошлось —
     ошибка с понятной причиной.
 
+    В бюджет досрочек идёт `CashMonth.prepay_budget`, а не `free`: отрицательные
+    свободные деньги — нехватка, а не бюджет, и пул месяца они не уменьшают.
+    Поэтому связка сходится и когда прожиточный минимум неизвестен, а денег
+    не хватает.
+
     Кроме расписания касса принимает приходы, переводы и разовые платежи
     (`one_offs` — то, что не из сделок); `income_horizon` нужен, чтобы измерить
     прожиточный минимум после последнего прихода в окне, а `obligation_reserve` —
@@ -802,7 +807,9 @@ def roll_months(book: Settlements, start: date,
         )
         cash_months = roll_cash(scenario, start, max_months=max_months, main=main)
 
-        new_budgets = {cm.index: cm.free for cm in cash_months}
+        # Бюджет досрочек не бывает отрицательным: свободные деньги месяца —
+        # состояние месяца и могут быть нехваткой; `prepay_budget` клампит их нулём.
+        new_budgets = {cm.index: cm.prepay_budget for cm in cash_months}
         # Сходимость: бюджеты не изменились
         if new_budgets == budgets:
             break
