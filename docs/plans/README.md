@@ -3,7 +3,7 @@ node_type: index
 title: Планы
 service: _platform
 status: active
-updated: 2026-09-15
+updated: 2026-09-18
 links:
   part_of: [../README.md]
 ---
@@ -18,4 +18,5 @@ links:
 выполнение — `/ship` по одному тикету.
 
 - [zone-split.md](zone-split.md) — разделение проекта на архитектурную и финансовую зоны
+- [engine-wording.md](engine-wording.md) — докстринги движка называют вещи как глоссарий
 - [obligations/](obligations/README.md) — взаиморасчёты и прогноз: контрагенты, сделки, связка кассы и долгов
