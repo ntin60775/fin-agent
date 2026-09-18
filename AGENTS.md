@@ -18,7 +18,7 @@
              /code-review /to-tickets /handoff /prototype /ship
   rules/     kb-source-of-truth, kb-first, ship-gate, acceptance-rounds, inbox-first
 finance_core/  движок: model, касса (solver), взаиморасчёты (settlements), прокат (roll),
-               прогноз (forecast), старые долги (debt)
+               прогноз (forecast), действия и цена варианта (actions), старые долги (debt)
 tests/         синтетические тесты движка — без личных данных
 inbox/         заявки из финансовой зоны (сырьё: потребность, а не решение)
 docs/          база знаний (это KB): reference, decisions, plans, ops
