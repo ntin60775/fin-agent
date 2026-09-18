@@ -2,7 +2,7 @@
 node_type: plan
 title: Докстринги движка — называть вещи как глоссарий
 service: _platform
-status: active
+status: archived
 updated: 2026-09-18
 links:
   documents: [../finance_core/__init__.py, ../finance_core/debt.py, ../finance_core/roll.py, ../finance_core/settlements.py]
