@@ -3,7 +3,7 @@ node_type: plan
 title: Взаиморасчёты и прогноз — единая модель контрагентов, сделок и кассы
 service: _platform
 status: active
-updated: 2026-09-17
+updated: 2026-09-18
 links:
   depends_on: [../../decisions/counterparty-model.md, ../../decisions/derived-balances.md, ../../decisions/schedule-to-cash.md, ../../decisions/what-means-out.md, ../../decisions/card-schemas.md, ../../decisions/wallet-pays-what-it-has.md]
   relates_to: [../zone-split.md]
@@ -204,7 +204,7 @@ links:
 | 12 | [Кредитный лимит](12-credit-limit.md) | 11 | archived |
 | 13 | [Суммы кассы положительные](13-positive-amounts.md) | 11 | archived |
 | 14 | [Приёмка, раунд 2 — заявленное против фактического](14-acceptance-round-2.md) | 01, 03, 05, 13 | archived |
-| 15 | [Приёмка, раунд 3 — прокат месяцев без прожиточного минимума](15-acceptance-round-3.md) | 03, 05 | draft |
+| 15 | [Приёмка, раунд 3 — прокат месяцев без прожиточного минимума](15-acceptance-round-3.md) | 03, 05 | archived |
 
 05 опирается на 03 и идёт в любом порядке с 04; 04 дополнительно ждёт 13 — он считает
 досрочку от свободного остатка месяца, а остаток бывает отрицательным.
