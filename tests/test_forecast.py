@@ -99,7 +99,10 @@ def test_step_two_is_the_first_month_with_free_money():
                         living_floor=D("20000")))
     assert [d.index for d in f.deficits] == [1]
     assert f.deficits[0].floor_gap == D("5666.67")  # 20 000 × 31/30 − 15 000
-    assert f.months[0].free == D("0")
+    # Свободные деньги — состояние месяца: нагрузка больше денег — величина отрицательна
+    assert f.months[0].free == D("-6666.67")        # 15 000 − 1 000 − 20 666.67
+    # ... а бюджет досрочек не бывает отрицательным
+    assert f.months[0].prepay_budget == D("0")
     assert f.months[1].free == D("9333.33")
     assert f.step1.month == date(2026, 2, 1)
     assert f.step2.month == date(2026, 2, 1)
