@@ -2,7 +2,7 @@
 node_type: ticket
 title: Приёмка, раунд 3 — прокат месяцев без прожиточного минимума
 service: _platform
-status: active
+status: archived
 updated: 2026-09-18
 links:
   part_of: [README.md]
