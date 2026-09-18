@@ -39,7 +39,7 @@ Markdown — источник правды. Всё производное — п
 
 ## Планы
 
-- [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [engine-wording.md](plans/engine-wording.md), [obligations/](plans/obligations/README.md)
+- [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [engine-wording.md](plans/engine-wording.md), [engine-messages.md](plans/engine-messages.md), [obligations/](plans/obligations/README.md)
 
 ## Ops
 

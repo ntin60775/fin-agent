@@ -19,4 +19,5 @@ links:
 
 - [zone-split.md](zone-split.md) — разделение проекта на архитектурную и финансовую зоны
 - [engine-wording.md](engine-wording.md) — докстринги движка называют вещи как глоссарий
+- [engine-messages.md](engine-messages.md) — сообщения движка называют кошелёк кошельком
 - [obligations/](obligations/README.md) — взаиморасчёты и прогноз: контрагенты, сделки, связка кассы и долгов
