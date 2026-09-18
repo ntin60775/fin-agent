@@ -226,6 +226,15 @@ def _month_index(start: date, when: date) -> int:
     return max((when.year - start.year) * 12 + when.month - start.month + 1, 1)
 
 
+def horizon(start: date, max_months: int) -> date:
+    """Последний день окна проката: дальше прокат не заглядывает.
+
+    Одно правило на прокат и на действия: за горизонт не заглядывает ни платёж,
+    ни мост, ни перенос.
+    """
+    return _month_end(_month_start(start, max_months - 1))
+
+
 def _service_date(deal: Deal, when: date, start: date) -> date:
     """Когда платёж случится: просроченное вхождение — в первый месяц проката.
 
@@ -438,8 +447,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
             if unit.closed:
                 open_deals[member].balance = Decimal(0)
 
-    horizon = _month_start(start, max_months - 1)
-    until = _month_end(horizon)
+    until = horizon(start, max_months)
 
     # Вхождения: окно от начала графика и самых ранних правок — правка может
     # увести вхождение в прокатываемый месяц из-за его начала.

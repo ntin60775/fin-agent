@@ -54,6 +54,24 @@ def _input(book: Settlements, **kw) -> ForecastInput:
     return ForecastInput(book=book, **base)
 
 
+# --- проценты --------------------------------------------------------------
+
+def test_interest_is_the_rolls_total_and_grows_with_the_rate():
+    """Рубли процентов за прокат: ставки нет — нет и процентов, ставка выше — дороже."""
+    day = _book(_deal(uid="дневной", rate_per_year=None, rate_per_day=D("0.005"),
+                      schedule=ScheduleRule(days=(20,), payment=D("1000"))))
+    dear = forecast(_input(day, living_floor=D("0"))).interest
+    assert dear > 0
+
+    cheap = _book(_deal(uid="дешёвый", rate_per_year=None, rate_per_day=D("0.001"),
+                        schedule=ScheduleRule(days=(20,), payment=D("1000"))))
+    assert forecast(_input(cheap, living_floor=D("0"))).interest < dear
+
+    free = _book(_deal(uid="бесплатный", schedule=ScheduleRule(days=(20,),
+                                                              payment=D("1000"))))
+    assert forecast(_input(free, living_floor=D("0"))).interest == D("0")
+
+
 # --- ступени ---------------------------------------------------------------
 
 def test_step_one_is_the_last_deficit_month_not_the_first_good_one():
