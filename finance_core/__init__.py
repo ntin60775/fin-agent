@@ -1,6 +1,6 @@
 """Ядро расчёта личных финансов: касса, долги и взаиморасчёты.
 
-Четыре стороны:
+Шесть сторон:
 
 - `solver` — касса: хватит ли денег в периоде, где разрыв, хватает ли остатка
   прожить до следующего прихода;
@@ -9,12 +9,18 @@
   остаток по сделке и сальдо по контрагенту — производные величины; правило
   графика порождает вхождения со статусами;
 - `roll` — прокат сделок по месяцам: что платится, что копится в копилке и
-  когда закрывается последний долг.
+  когда закрывается последний долг;
+- `forecast` — прогноз: когда ступени «выбрался» достигнуты и что этому мешает;
+- `actions` — действия и цена варианта: правка сценария как объект, вариант как
+  список действий, цена набором измерений, а не одним числом.
 
 Ядро не хранит состояние и не читает markdown: оно считает то, что ему передали,
 и возвращает результат. Источник цифр — на стороне вызывающего кода. Деньги —
 `Decimal`; зависимостей нет, только стандартная библиотека.
 """
+from .actions import (Action, Base, Bridge, Direct, ImpossibleAction, Move,
+                      Prepay, Price, Variant, applied, baseline, facts,
+                      impossible, price, prices, variants)
 from .debt import (Debt, MonthSnapshot, Plan, compare_strategies,
                    roll_forward)
 from .forecast import (Deficit, Discrepancy, FamilyTransfer, Forecast,
@@ -24,7 +30,7 @@ from .model import Account, Income, Payment, Scenario, Transfer
 from .roll import (AVALANCHE, SNOWBALL, STRATEGIES, ConvergenceError,
                    DealMonth, DealRoll, Expectation, Gap, MonthsRoll,
                    ScheduledPayment, UnitMonth, compare_deal_strategies,
-                   roll_deals, roll_months)
+                   horizon, roll_deals, roll_months)
 from .solver import CashMonth, roll_cash
 from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, EXPECTED, FAMILY,
                           IN, I_OWE, KINDS, LEGAL, MOVEMENT_DIRECTIONS,
@@ -59,10 +65,14 @@ __all__ = [
     # прокат сделок
     "roll_deals", "roll_months", "compare_deal_strategies", "DealRoll",
     "DealMonth", "ScheduledPayment", "UnitMonth", "Expectation", "Gap",
-    "MonthsRoll", "CashMonth", "ConvergenceError",
+    "MonthsRoll", "CashMonth", "ConvergenceError", "horizon",
     # прогноз
     "forecast", "forecast_shifts", "widest", "Forecast", "ForecastInput",
     "Milestone", "Deficit", "FamilyTransfer", "Discrepancy", "Shift",
+    # действия и цена варианта
+    "Move", "Bridge", "Prepay", "Direct", "Action", "Variant", "Base", "Price",
+    "ImpossibleAction", "baseline", "impossible", "applied", "price", "prices",
+    "facts", "variants",
     # объявленные наборы
     "I_OWE", "OWED_TO_ME", "DIRECTIONS", "OUT", "IN", "MOVEMENT_DIRECTIONS",
     "PERSON", "LEGAL", "KINDS", "SUBTYPES", "STARTER_GROUPS", "WALLET_KINDS",
