@@ -2,7 +2,7 @@
 node_type: ticket
 title: Действия и цена варианта
 service: _platform
-status: active
+status: archived
 updated: 2026-09-18
 links:
   part_of: [README.md]
