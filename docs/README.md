@@ -55,10 +55,14 @@ Markdown — источник правды. Всё производное — п
 ## Производные
 
 ```bash
-G="python3 .omp/skills/kb-search/gitmark.py"
-$G index                 # построить индекс
-$G search "<запрос>"     # bm25 ∪ trigram ∪ fuzzy
-$G lint                  # инварианты I1–I7
-$G map -o docs-map.html  # HTML-карта и граф
-$G inventory             # перегенерировать таблицы реестра
+python3 skill://kb-search/gitmark.py index                 # построить индекс
+python3 skill://kb-search/gitmark.py search "<запрос>"     # bm25 ∪ trigram ∪ fuzzy
+python3 skill://kb-search/gitmark.py lint                  # инварианты I1–I8
+python3 skill://kb-search/gitmark.py map -o docs-map.html  # HTML-карта и граф
+python3 skill://kb-search/gitmark.py inventory             # перегенерировать таблицы реестра
 ```
+
+Адрес `skill://kb-search/gitmark.py` разрешает агентская среда: он ведёт к файлу
+пакета, где бы тот ни стоял, — поэтому работает и там, где `.omp/skills/` нет.
+В переменную такую команду положить нельзя: в присваивании `skill://` не
+разрешается.

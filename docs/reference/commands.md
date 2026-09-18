@@ -14,8 +14,8 @@ links:
 правят. Рассинхрон ловит линтер (I7), пересобрать — `gitmark inventory`.
 
 ```bash
-python3 .omp/skills/kb-search/gitmark.py inventory          # перегенерировать
-python3 .omp/skills/kb-search/gitmark.py inventory --check  # проверить (exit 1 при рассинхроне)
+python3 skill://kb-search/gitmark.py inventory          # перегенерировать
+python3 skill://kb-search/gitmark.py inventory --check  # проверить (exit 1 при рассинхроне)
 ```
 
 ## Команды
