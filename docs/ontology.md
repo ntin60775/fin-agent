@@ -136,9 +136,11 @@ them — and never launch `/ship`: the operator starts it by hand. Their own out
 - **I4.** No broken links (a markdown link to a missing file).
 - **I5.** Every `docs/**` folder has a `README.md` index.
 - **I6.** A `supersedes` target has `status: deprecated|archived`.
-- **I7.** The command registry is in sync: every `.omp/commands/*.md` has `args:`/`drives:`
-  frontmatter, a row in the generated summary table and a `## /cmd` section in
-  `docs/reference/commands.md` — and vice versa (checked by `gitmark inventory --check`).
+- **I7.** The command registry is in sync: every command the engine discovers — the
+  project's `.omp/commands/*.md` and the package's `commands/*.md` — has `args:`/`drives:`
+  frontmatter and a row in the generated summary table; every project command also has a
+  `## /cmd` section in `docs/reference/commands.md`, and every such section names a known
+  command (checked by `gitmark inventory --check`).
 - **I8.** The knowledge model has not drifted: `docs/ontology.md` and the package copy
   `skills/kb-curate/ontology.md` agree from the first `## ` heading onward (the title and the
   header notes may differ). ERR in the package's own repo, WARN in a consumer.
