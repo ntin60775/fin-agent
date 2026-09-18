@@ -3,7 +3,7 @@ node_type: reference
 title: Реестр команд и навыков
 service: _platform
 status: active
-updated: 2026-09-11
+updated: 2026-09-18
 links:
   part_of: [README.md]
 ---

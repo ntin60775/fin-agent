@@ -15,4 +15,4 @@ links:
 
 - [how-to-work.md](how-to-work.md) — как работать с двумя зонами: где открывать агента, кто что меняет
 - [commands.md](commands.md) — реестр команд и навыков пакета
-- [../CONTEXT.md](../CONTEXT.md) — доменные термины ядра
+- [../../CONTEXT.md](../../CONTEXT.md) — доменные термины ядра

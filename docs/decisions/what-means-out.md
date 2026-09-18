@@ -3,7 +3,7 @@ node_type: decision
 title: «Выбрался» — это покрытые расходы, а не закрытые долги
 service: _platform
 status: active
-updated: 2026-09-13
+updated: 2026-09-18
 links:
   relates_to: [unknown-is-not-zero.md, ../plans/obligations/README.md]
 ---

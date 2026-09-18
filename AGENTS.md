@@ -12,11 +12,9 @@
 
 ```
 .omp/
-  skills/    kb-search (движок поиска), kb-curate, dev-flow, grilling,
-             domain-modeling, mp-* (гейт-пайплайн)
-  commands/  /kb /kb-map /doc /onto-doc /grill /grilling /architecture
-             /code-review /to-tickets /handoff /prototype /ship
-  rules/     kb-source-of-truth, kb-first, ship-gate, acceptance-rounds, inbox-first
+  rules/     inbox-first — правило зоны (заявки из финансовой зоны)
+  plugins/   конфигурация плагинов; навыки, команды и остальные правила
+             приходят пакетом ontoship
 finance_core/  движок: model, касса (solver), взаиморасчёты (settlements), прокат (roll),
                прогноз (forecast), действия и цена варианта (actions), старые долги (debt)
 tests/         синтетические тесты движка — без личных данных

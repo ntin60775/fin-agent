@@ -3,7 +3,7 @@ node_type: index
 title: База знаний ядра расчёта
 service: _platform
 status: active
-updated: 2026-09-15
+updated: 2026-09-18
 links:
   part_of: [../AGENTS.md]
 ---
