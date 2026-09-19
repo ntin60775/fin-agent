@@ -2,7 +2,7 @@
 node_type: plan
 title: Сообщения движка называют кошелёк кошельком
 service: _platform
-status: active
+status: archived
 updated: 2026-09-20
 links:
   documents: [../../finance_core/solver.py, ../../finance_core/forecast.py, ../../tests/test_cash.py]
