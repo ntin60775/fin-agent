@@ -3,7 +3,7 @@ node_type: index
 title: Планы
 service: _platform
 status: active
-updated: 2026-09-18
+updated: 2026-09-20
 links:
   part_of: [../README.md]
 ---
@@ -28,6 +28,5 @@ links:
 - `obligations` — цепочка по зависимостям тикетов: **06 → 07 → 08 → 09 → 10**
   (см. `obligations/README.md`, там же правило «тикет выполняется, когда все
   блокирующие закрыты»);
-- `engine-messages` — готовая мелкая правка сообщений, блокирующих связей нет:
-  берётся, когда удобно, до или после очередного тикета `obligations`;
-- `zone-split` и `engine-wording` — архивные, порядок не задают.
+- `zone-split`, `engine-wording` и `engine-messages` — архивные, порядок не
+  задают.
