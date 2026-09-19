@@ -200,7 +200,7 @@ def test_both_paths_agree_on_the_credit_limit():
 
 
 def test_roll_cash_hole_on_starting_negative_balance():
-    """Дыра: счёт начинается с отрицательного остатка — дыра видна без событий."""
+    """Дыра: кошелёк начинается с отрицательного остатка — дыра видна без событий."""
     s = Scenario(
         accounts=[Account("main", D("-100"))],
     )

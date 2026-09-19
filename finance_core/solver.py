@@ -320,7 +320,7 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     противоречие, а не выбор.
     """
     if not scenario.accounts:
-        raise ValueError("счета: не объявлено ни одного — считать нечего")
+        raise ValueError("кошельки: не объявлено ни одного — считать нечего")
     for i in scenario.income:
         if i.amount <= 0:
             raise ValueError(
@@ -340,7 +340,7 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     by_name = {a.name: a for a in scenario.accounts}
     refs = []
     if main is not None:
-        refs.append((main, "основной счёт"))
+        refs.append((main, "основной кошелёк"))
     refs += [(i.account, "приход") for i in scenario.income]
     refs += [(p.account, f"платёж {p.counterparty or p.creditor!r}")
              for p in scenario.payments]
@@ -349,7 +349,7 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     for name, what in refs:
         if name not in known:
             raise ValueError(
-                f"{what}: неизвестный счёт {name!r}; объявлены: {sorted(known)}")
+                f"{what}: неизвестный кошелёк {name!r}; объявлены: {sorted(known)}")
     for p in scenario.payments:
         if p.counterparty is None and p.creditor is None:
             raise ValueError("платёж без контрагента: нужен уид контрагента "
@@ -361,11 +361,11 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
                 f"не платится")
         if p.account is not None and not by_name[p.account].available:
             raise ValueError(
-                f"платёж {p.counterparty or p.creditor!r}: счёт {p.account!r} недоступен")
+                f"платёж {p.counterparty or p.creditor!r}: кошелёк {p.account!r} недоступен")
     for t in scenario.transfers:
         if not by_name[t.from_account].available:
             raise ValueError(
-                f"перевод: счёт {t.from_account!r} недоступен — с него взять нельзя")
+                f"перевод: кошелёк {t.from_account!r} недоступен — с него взять нельзя")
 
 
 def run(scenario: Scenario, main: str) -> Result:
@@ -535,7 +535,7 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
         main = next(iter(bal))
     elif main not in bal:
         raise ValueError(
-            f"основной счёт: неизвестный счёт {main!r}; объявлены: {sorted(bal)}")
+            f"основной кошелёк: неизвестный кошелёк {main!r}; объявлены: {sorted(bal)}")
 
     # Доходы: даты вычислены вызывающим по тем же правилам, что и платежи
     incomes = sorted(scenario.income, key=lambda i: i.date)
