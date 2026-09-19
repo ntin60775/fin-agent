@@ -3,7 +3,7 @@ node_type: reference
 title: GitMark ontology — a knowledge model over code
 service: _platform
 status: active
-updated: 2026-09-18
+updated: 2026-09-19
 tags: [ontology, palantir, node-type, links, frontmatter]
 links:
   relates_to: [reference/commands.md, ../CONTEXT.md]
@@ -132,8 +132,14 @@ them — and never launch `/ship`: the operator starts it by hand. Their own out
 
 - **I1.** Every load-bearing doc has frontmatter with a valid `node_type`.
 - **I2.** `node_type`/`service`/`status` values are within their vocabularies.
-- **I3.** No orphans: a load-bearing doc has ≥1 incoming or outgoing link.
-- **I4.** No broken links (a markdown link to a missing file).
+- **I3.** No orphans: a load-bearing doc has ≥1 incoming or outgoing link — a markdown link
+  in the body (either direction) or its own `links:` block.
+- **I4.** No broken links — markdown body AND frontmatter `links:` (all types), resolved
+  against the filesystem as a reader would: `.md` inside the KB, directories and files
+  outside it. Titles, `<>`-wrappers, `#anchors` and `:line`-selectors are stripped and
+  URL-encoding decoded; the path is checked where it leads, even outside the repo (the KB is
+  read in a multi-repo layout). External URIs, bare anchors and root-absolute `/…` are out
+  of scope.
 - **I5.** Every `docs/**` folder has a `README.md` index.
 - **I6.** A `supersedes` target has `status: deprecated|archived`.
 - **I7.** The command registry is in sync: every command the engine discovers — the
