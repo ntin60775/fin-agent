@@ -3,7 +3,7 @@ node_type: index
 title: Решения
 service: _platform
 status: active
-updated: 2026-09-15
+updated: 2026-09-20
 links:
   part_of: [../README.md]
 ---
@@ -24,3 +24,4 @@ links:
 - [card-schemas.md](card-schemas.md) — карточки покрыты схемами через frontmatter, проза свободна
 - [what-means-out.md](what-means-out.md) — «выбрался» — это покрытые расходы, а не закрытые долги
 - [wallet-pays-what-it-has.md](wallet-pays-what-it-has.md) — кошелёк платит тем, что у него есть; дыра — «денег нет нигде»
+- [ontology-full-scope.md](ontology-full-scope.md) — модель знаний распространяется на каждый документ зоны: без исключений для корневых и пакетных
