@@ -60,7 +60,9 @@ CONTEXT.md     доменные термины
 
 ## Происхождение и лицензия
 
-- `finance_core/` — оригинальный код этого проекта.
+- `finance_core/`, тесты и документация этого репозитория — оригинальный код
+  проекта, лицензия **MIT**: см. [LICENSE](LICENSE).
 - `.omp/` и `docs/ontology.md` — пакет **OntoShip** (GitMark), автор
-  **Valera Kovalskii**, лицензия **MIT**: см. [LICENSE](LICENSE). Копирайт и текст
+  **Valera Kovalskii**, лицензия **MIT**: см.
+  [LICENSES/ontoship-MIT.txt](LICENSES/ontoship-MIT.txt). Копирайт и текст
   лицензии сохраняются как есть — пакет не выдаётся за собственный.
