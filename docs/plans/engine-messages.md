@@ -3,9 +3,9 @@ node_type: plan
 title: Сообщения движка называют кошелёк кошельком
 service: _platform
 status: draft
-updated: 2026-09-18
+updated: 2026-09-19
 links:
-  documents: [../finance_core/solver.py, ../finance_core/forecast.py, ../tests/test_cash.py]
+  documents: [../../finance_core/solver.py, ../../finance_core/forecast.py, ../../tests/test_cash.py]
   relates_to: [engine-wording.md]
 ---
 
