@@ -418,7 +418,7 @@ def test_payment_without_counterparty_is_rejected():
 
 
 def test_family_transfer_is_an_expense_from_the_owners_cash():
-    """Передача члену семьи — расход владельца с назначением; чужой счёт не считается."""
+    """Передача члену семьи — расход владельца с назначением; чужой кошелёк не считается."""
     book = Settlements(
         counterparties=[_counterparty(uid="родня", name="Член семьи", kind=PERSON,
                                       subtype="родственник", groups=("семья",))],

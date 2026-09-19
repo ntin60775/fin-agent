@@ -341,7 +341,7 @@ def _step_last_deficit(roll: MonthsRoll, deficits: list[Deficit],
         return Milestone(
             reason="нехватка до прожиточного минимума не оценена: в месяце "
                    f"{blind[0]} судить нечем — прихода впереди не видно или по "
-                   f"основному счёту в нём нет событий")
+                   f"основному кошельку в нём нет событий")
     return Milestone(month=roll.cash_months[last].month)
 
 
