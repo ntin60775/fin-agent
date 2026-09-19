@@ -15,7 +15,7 @@ from finance_core import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER, Account,
 # --- каскад ---------------------------------------------------------------
 
 def test_events_apply_in_date_order():
-    """События применяются по дате, остаток ведётся по каждому счёту."""
+    """События применяются по дате, остаток ведётся по каждому кошельку."""
     s = Scenario(
         accounts=[Account("main", D("1000"))],
         income=[Income(date(2026, 3, 20), D("500"), "main")],
@@ -43,12 +43,12 @@ def test_timeline_never_goes_back_in_time():
 
 
 def test_unknown_account_gives_clear_error():
-    """Опечатка в имени счёта — понятная ошибка, а не KeyError."""
+    """Опечатка в имени кошелька — понятная ошибка, а не KeyError."""
     s = Scenario(accounts=[Account("main", D("100"))],
                  payments=[Payment(date(2026, 1, 1), D("10"), "x", "typo")])
     with pytest.raises(ValueError, match="typo"):
         run(s, main="main")
-    with pytest.raises(ValueError, match="основной счёт"):
+    with pytest.raises(ValueError, match="основной кошелёк"):
         run(Scenario(accounts=[Account("main", D("100"))]), main="нет-такого")
 
 
@@ -124,7 +124,7 @@ def test_negative_amounts_rejected_in_roll_cash_too():
 
 
 def test_scenario_without_accounts_is_an_error():
-    """Сценарий без счетов — ошибка с понятным текстом, а не StopIteration из кассы."""
+    """Сценарий без кошельков — ошибка с понятным текстом, а не StopIteration из кассы."""
     s = Scenario(accounts=[],
                  payments=[Payment(date(2026, 1, 5), D("50"), "x", "main")])
     with pytest.raises(ValueError, match="не объявлено ни одного"):
@@ -134,10 +134,10 @@ def test_scenario_without_accounts_is_an_error():
 
 
 def test_payment_hits_its_funding_account():
-    """Платёж списывается со своего счёта, а не с основного.
+    """Платёж списывается со своего кошелька, а не с основного.
 
     Это регресс на класс ошибок «какой картой платим»: если платёж уходит
-    не со своего счёта, результат меняется.
+    не со своего кошелька, результат меняется.
     """
     s = Scenario(
         accounts=[Account("main", D("1000")), Account("card", D("500"))],
