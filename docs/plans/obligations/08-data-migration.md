@@ -2,7 +2,7 @@
 node_type: ticket
 title: Перенос истории и сверка «до и после»
 service: _platform
-status: draft
+status: active
 updated: 2026-09-20
 links:
   part_of: [README.md]
