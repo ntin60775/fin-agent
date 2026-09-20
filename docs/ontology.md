@@ -38,6 +38,7 @@ Each document has exactly one `node_type` — its "table" in the ontology.
 | `ticket` | a tracer-bullet vertical slice of a plan, one `/ship` run each | `docs/plans/<slug>/NN-<ticket>.md` |
 | `guide` | how to use something (clients, public API) | varies |
 | `index` | a folder's table of contents | any `README.md` |
+| `schema` | a card schema: the required fields and allowed values of the cards in its folder | the cards' folder, next to them |
 
 Rule: if unsure, a spec is `reference`, a how-to is `guide`. Add a new type only if
 none fit and there will be ≥3 such documents.
@@ -82,6 +83,31 @@ Links are markdown links `[text](path.md)`. The link type is declared by a key u
 
 The doc→code link (`documents`/`implemented_by`) is what makes this an ontology **over
 code**: a document is explicitly tied to the files/component it describes.
+
+### Card schemas (`node_type: schema`)
+
+A folder of cards may declare its schema: a document with `node_type: schema` sitting
+next to the cards. The declaration is machine-readable — the linter reads it, so a new
+card type needs no code change:
+
+```yaml
+---
+node_type: schema
+title: Wallet card
+card_type: wallet                  # the node_type the cards of this folder carry
+required: [uid, name, kind, balance, observed, available]
+values: ["kind: card|cash|ewallet", "available: yes|no"]
+---
+```
+
+- The schema governs its own folder: every document in it (except the folder's
+  `README.md` and the schemas themselves) must declare a `node_type` listed by a folder
+  schema, carry each `required` field, and keep `values` fields within the listed set.
+  A violation is an error, named by file and field (I9).
+- Card fields live in frontmatter; the body stays free prose — schemas do not constrain
+  it.
+- Schemas are declared where the cards live — in a consumer's KB, not in this package:
+  the package knows the format, never a consumer's card types.
 
 ## Kinetic layer — Actions (curation rules)
 
@@ -150,6 +176,10 @@ them — and never launch `/ship`: the operator starts it by hand. Their own out
 - **I8.** The knowledge model has not drifted: `docs/ontology.md` and the package copy
   `skills/kb-curate/ontology.md` agree from the first `## ` heading onward (the title and the
   header notes may differ). ERR in the package's own repo, WARN in a consumer.
+- **I9.** Card schemas hold: in every folder that declares a schema (`node_type: schema`),
+  each document (except the folder's `README.md` and the schemas themselves) declares a
+  `node_type` listed by a folder schema, carries every `required` field, and keeps `values`
+  fields within the listed set. Reported by file and field; card prose is not constrained.
 
 ## Why this, not a wiki/Notion
 

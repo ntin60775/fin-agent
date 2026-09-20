@@ -3,7 +3,7 @@ node_type: plan
 title: Взаиморасчёты и прогноз — единая модель контрагентов, сделок и кассы
 service: _platform
 status: active
-updated: 2026-09-18
+updated: 2026-09-20
 links:
   depends_on: [../../decisions/counterparty-model.md, ../../decisions/derived-balances.md, ../../decisions/schedule-to-cash.md, ../../decisions/what-means-out.md, ../../decisions/card-schemas.md, ../../decisions/wallet-pays-what-it-has.md]
   relates_to: [../zone-split.md]
@@ -196,7 +196,7 @@ links:
 | 03 | [Расписание → касса](03-months-roll.md) | 02 | archived |
 | 04 | [Действия и цена варианта](04-actions-and-price.md) | 03, 13 | archived |
 | 05 | [Прогноз](05-forecast-steps.md) | 03 | archived |
-| 06 | [Схемы карточек](06-lint-schemas.md) | 01 | draft |
+| 06 | [Схемы карточек](06-lint-schemas.md) | 01 | archived |
 | 07 | [Зона: карточки и форматы](07-zone-counterparties.md) | 06, 02 | draft |
 | 08 | [Перенос данных](08-data-migration.md) | 07 | draft |
 | 09 | [Зона: сценарии](09-zone-scenarios.md) | 03, 07, 08 | draft |
@@ -231,7 +231,12 @@ links:
 Прокат месяцев не сходился, когда прожиточный минимум неизвестен, а денег не хватает:
 отрицательные свободные деньги уходили в бюджет досрочек и калечили пул месяца. Движок
 обещал «не оценено», а падал — добавлять движку поверх этого было нельзя. Порядок
-оставшихся: 06 → 07 → 08 → 09 → 10.
+оставшихся: 07 → 08 → 09 → 10.
+
+Тикет 06 — механизм схем карточек: линтер получил инвариант I9 (обязательные поля и
+допустимые значения карточек), словарь типов читается из таблицы онтологии — один
+носитель для документа и кода. Правка выпущена пакетом `ontoship 0.4.8`; схема
+карточки кошелька объявлена в финансовой зоне (`wallets/_schema.md`).
 
 ## Источники
 
