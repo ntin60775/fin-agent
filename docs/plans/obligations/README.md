@@ -198,7 +198,7 @@ links:
 | 05 | [Прогноз](05-forecast-steps.md) | 03 | archived |
 | 06 | [Схемы карточек](06-lint-schemas.md) | 01 | archived |
 | 07 | [Зона: карточки и форматы](07-zone-counterparties.md) | 06, 02 | archived |
-| 08 | [Перенос истории и сверка «до и после»](08-data-migration.md) | 07 | draft |
+| 08 | [Перенос истории и сверка «до и после»](08-data-migration.md) | 07 | active |
 | 09 | [Зона: сценарии](09-zone-scenarios.md) | 03, 07, 08 | draft |
 | 10 | [Контракт: убрать старую форму](10-clean-cutover.md) | 09 | draft |
 | 11 | [Приёмка, раунд 1](11-acceptance-round-1.md) | 03 | archived |
