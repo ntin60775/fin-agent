@@ -638,17 +638,27 @@ def _prepayment(book: Settlements, open_deals: dict[str, _Open],
 
 def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
              second: bool) -> list[_Target]:
-    """Куда могут пойти свободные деньги: сделки и копилки одного приоритета."""
+    """Куда могут пойти свободные деньги: сделки и копилки одного приоритета.
+
+    Сделка с `prepay=False` в список не попадает: досрочка ей запрещена, и
+    свободные деньги идут дальше по стратегии. Копилка досрочится вся целиком,
+    поэтому запрет любого её участника запрещает и копилку: иначе досрочка
+    обошла бы запрет через единицу закрытия.
+    """
     rows: list[_Target] = []
     for uid, opened in open_deals.items():
         if opened.second != second or opened.unit is not None:
             continue
         if opened.deal.amount is None:
             continue                       # регулярный расход не досрочится
+        if not opened.deal.prepay:
+            continue                       # досрочка этой сделки запрещена
         rows.append(_Target(uid, _rate(opened.deal), opened.balance, opened.pay))
     for uid, unit in open_units.items():
         if unit.second != second:
             continue
+        if any(not open_deals[member].deal.prepay for member in unit.members):
+            continue                       # запрет участника запрещает копилку
         rows.append(_Target(uid, Decimal(0), unit.remaining, unit.pay))
     return rows
 

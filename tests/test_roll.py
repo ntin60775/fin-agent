@@ -643,6 +643,53 @@ def test_avalanche_is_cheaper_than_snowball():
     assert avalanche.start_total == snowball.start_total == D("140000")
 
 
+def test_prepay_can_be_forbidden_for_one_deal():
+    """`prepay=False`: свободные деньги сделку не трогают — она идёт своим графиком.
+
+    Так помечают револьверную кредитку: закрывать её досрочкой бессмысленно,
+    лимит освобождает минимальный платёж и снова тратится. Признак — про сделку,
+    а не про стратегию: свободные деньги уходят следующей по порядку.
+    """
+    def _pair(card_prepay: bool):
+        card = _deal(uid="револьвер", amount=D("5000"), rate_per_year=D("0.5"),
+                     schedule=_rule(payment=D("500")), prepay=card_prepay)
+        loan = _deal(uid="заём", amount=D("5000"), rate_per_year=D("0.1"),
+                     schedule=_rule(payment=D("500")))
+        book = _book(card, loan)
+        validate(book)
+        return roll_deals(book, START, D("1000"), max_months=12)
+
+    # По стратегии первой гасится дорогая ставка — револьвер.
+    allowed = _pair(True).months[0]
+    assert allowed.balances["револьвер"] < allowed.balances["заём"]
+    # Запрет досрочки снимает его с раздачи: деньги идут займу, револьвер платит
+    # только вхождение (5 000 + 208,33 процентов − 500).
+    roll = _pair(False)
+    assert all(sp.planned is not None for dm in roll.months
+               for sp in dm.payments if sp.deal == "револьвер")
+    assert roll.months[0].prepaid == D("1000")          # досрочка ушла займу
+    assert roll.months[0].balances["револьвер"] == D("4708.33")
+    assert roll.months[0].balances["заём"] == D("3541.67")
+
+
+def test_unit_with_a_forbidden_member_is_not_prepaid():
+    """Копилка досрочится целиком — запрет участника запрещает и её.
+
+    Иначе запрет обошли бы через единицу закрытия: досрочка копилки гасит всех
+    её участников разом.
+    """
+    first = _deal(uid="первый", amount=D("600"), schedule=_rule(payment=D("300")),
+                  closure_unit="копилка")
+    second = _deal(uid="второй", amount=D("600"), schedule=_rule(payment=D("300")),
+                   closure_unit="копилка", prepay=False)
+    book = _book(first, second)
+    validate(book)
+    roll = roll_deals(book, START, D("1000"), max_months=6)
+    assert all(sp.planned is not None for dm in roll.months for sp in dm.payments)
+    assert roll.months[0].prepaid == D("0")
+    assert roll.months[0].balances["первый"] == D("600")
+
+
 def test_unknown_strategy_is_rejected():
     with pytest.raises(ValueError, match="неизвестная стратегия"):
         roll_deals(_book(_deal()), START, D(0), strategy="как-нибудь")
