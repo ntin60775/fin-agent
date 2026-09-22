@@ -2,8 +2,8 @@
 node_type: ticket
 title: Контракт — убрать старую форму
 service: _platform
-status: draft
-updated: 2026-09-13
+status: active
+updated: 2026-09-21
 links:
   part_of: [README.md]
   depends_on: [09-zone-scenarios.md]

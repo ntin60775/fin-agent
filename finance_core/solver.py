@@ -329,7 +329,7 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     for p in scenario.payments:
         if p.amount <= 0:
             raise ValueError(
-                f"платёж {p.counterparty or p.creditor!r}: сумма должна быть "
+                f"платёж {p.counterparty!r}: сумма должна быть "
                 f"положительной, а направление несут сами данные")
     for t in scenario.transfers:
         if t.amount <= 0:
@@ -342,7 +342,7 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
     if main is not None:
         refs.append((main, "основной кошелёк"))
     refs += [(i.account, "приход") for i in scenario.income]
-    refs += [(p.account, f"платёж {p.counterparty or p.creditor!r}")
+    refs += [(p.account, f"платёж {p.counterparty!r}")
              for p in scenario.payments]
     refs += [(t.from_account, "перевод (откуда)") for t in scenario.transfers]
     refs += [(t.to_account, "перевод (куда)") for t in scenario.transfers]
@@ -351,17 +351,16 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
             raise ValueError(
                 f"{what}: неизвестный кошелёк {name!r}; объявлены: {sorted(known)}")
     for p in scenario.payments:
-        if p.counterparty is None and p.creditor is None:
-            raise ValueError("платёж без контрагента: нужен уид контрагента "
-                             "или строковое имя кредитора")
+        if p.counterparty is None:
+            raise ValueError("платёж без контрагента: нужен уид контрагента")
         if p.prepaid and not p.debt:
             raise ValueError(
-                f"досрочка {p.counterparty or p.creditor!r}: досрочка всегда "
+                f"досрочка {p.counterparty!r}: досрочка всегда "
                 f"долговая — её движок направляет на долг, а долг лимитом "
                 f"не платится")
         if p.account is not None and not by_name[p.account].available:
             raise ValueError(
-                f"платёж {p.counterparty or p.creditor!r}: кошелёк {p.account!r} недоступен")
+                f"платёж {p.counterparty!r}: кошелёк {p.account!r} недоступен")
     for t in scenario.transfers:
         if not by_name[t.from_account].available:
             raise ValueError(
