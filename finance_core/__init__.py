@@ -1,10 +1,9 @@
-"""Ядро расчёта личных финансов: касса, долги и взаиморасчёты.
+"""Ядро расчёта личных финансов: касса и взаиморасчёты.
 
-Шесть сторон:
+Пять сторон:
 
 - `solver` — касса: хватит ли денег в периоде, где дыра, хватает ли остатка
   прожить до следующего прихода;
-- `debt` — старый прокат долгов: плоская модель, живёт до переезда зоны;
 - `settlements` — взаиморасчёты: контрагенты, кошельки, сделки и движения,
   остаток по сделке и сальдо по контрагенту — производные величины; правило
   графика порождает вхождения со статусами;
@@ -21,8 +20,6 @@
 from .actions import (Action, Base, Bridge, Direct, ImpossibleAction, Move,
                       Prepay, Price, Variant, applied, baseline, facts,
                       impossible, price, prices, variants)
-from .debt import (Debt, MonthSnapshot, Plan, compare_strategies,
-                   roll_forward)
 from .forecast import (Deficit, Discrepancy, FamilyTransfer, Forecast,
                        ForecastInput, Milestone, Shift, forecast,
                        forecast_shifts, widest)
@@ -53,8 +50,6 @@ __all__ = [
     "Step", "Result", "Outcome", "run", "roll_cash", "optional_cap",
     "cover_cost", "outcome", "compare",
     "Unsecured", "TransferHint",
-    # старый прокат долгов
-    "Debt", "MonthSnapshot", "Plan", "roll_forward", "compare_strategies",
     # взаиморасчёты
     "Counterparty", "Wallet", "Deal", "ScheduleRule", "FirstPayment",
     "Movement", "Assignment", "Occurrence", "OccurrenceEdit",
