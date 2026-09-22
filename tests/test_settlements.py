@@ -400,17 +400,8 @@ def test_payment_references_counterparty_and_purpose():
     assert run(scenario, main="карта").end_balance == D("700")
 
 
-def test_old_payment_style_still_works():
-    """Старый способ вызова не сломан: строка имени продолжает работать."""
-    scenario = Scenario(
-        accounts=[Account("карта", D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("300"), "Арендодатель", "карта")],
-    )
-    assert run(scenario, main="карта").end_balance == D("700")
-
-
 def test_payment_without_counterparty_is_rejected():
-    """Платёж без контрагента не бывает: нужен уид или строковое имя."""
+    """Платёж без контрагента не бывает: нужен уид контрагента."""
     scenario = Scenario(accounts=[Account("карта", D("1000"))],
                         payments=[Payment(date(2026, 1, 10), D("300"), account="карта")])
     with pytest.raises(ValueError, match="без контрагента"):
