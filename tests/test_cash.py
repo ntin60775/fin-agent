@@ -19,8 +19,8 @@ def test_events_apply_in_date_order():
     s = Scenario(
         accounts=[Account("main", D("1000"))],
         income=[Income(date(2026, 3, 20), D("500"), "main")],
-        payments=[Payment(date(2026, 3, 5), D("200"), "a", "main"),
-                  Payment(date(2026, 3, 25), D("300"), "b", "main")],
+        payments=[Payment(date(2026, 3, 5), D("200"), account="main", counterparty="a"),
+                  Payment(date(2026, 3, 25), D("300"), account="main", counterparty="b")],
     )
     r = run(s, main="main")
     assert [(x.date, x.balance_after) for x in r.timeline] == [
@@ -35,7 +35,7 @@ def test_timeline_never_goes_back_in_time():
     s = Scenario(
         accounts=[Account("main", D("1000")), Account("other", D("0"))],
         income=[Income(date(2026, 3, 20), D("500"), "main")],
-        payments=[Payment(date(2026, 3, 5), D("200"), "a", "main")],
+        payments=[Payment(date(2026, 3, 5), D("200"), account="main", counterparty="a")],
         transfers=[Transfer(date(2026, 3, 6), D("100"), "main", "other")],
     )
     dates = [x.date for x in run(s, main="main").timeline]
@@ -45,7 +45,7 @@ def test_timeline_never_goes_back_in_time():
 def test_unknown_account_gives_clear_error():
     """Опечатка в имени кошелька — понятная ошибка, а не KeyError."""
     s = Scenario(accounts=[Account("main", D("100"))],
-                 payments=[Payment(date(2026, 1, 1), D("10"), "x", "typo")])
+                 payments=[Payment(date(2026, 1, 1), D("10"), account="typo", counterparty="x")])
     with pytest.raises(ValueError, match="typo"):
         run(s, main="main")
     with pytest.raises(ValueError, match="основной кошелёк"):
@@ -62,7 +62,7 @@ def test_negative_payment_is_an_error_not_money():
     необеспеченности не было, потому что «деньги» появились.
     """
     s = Scenario(accounts=[Account("main", D("0"))],
-                payments=[Payment(date(2026, 1, 5), D("-50"), "x", "main")])
+                payments=[Payment(date(2026, 1, 5), D("-50"), account="main", counterparty="x")])
     with pytest.raises(ValueError, match="положительной"):
         run(s, main="main")
 
@@ -70,7 +70,7 @@ def test_negative_payment_is_an_error_not_money():
 def test_zero_payment_is_an_error():
     """Нулевой платёж — не деньги: он ничего не двигает, отдельного смысла нет."""
     s = Scenario(accounts=[Account("main", D("100"))],
-                payments=[Payment(date(2026, 1, 5), D("0"), "x", "main")])
+                payments=[Payment(date(2026, 1, 5), D("0"), account="main", counterparty="x")])
     with pytest.raises(ValueError, match="положительной"):
         run(s, main="main")
 
@@ -110,7 +110,7 @@ def test_zero_income_is_an_error():
 def test_negative_amounts_rejected_in_roll_cash_too():
     """Проверка одна на оба пути: `run()` и `roll_cash()` не разъезжаются."""
     s = Scenario(accounts=[Account("main", D("0"))],
-                payments=[Payment(date(2026, 1, 5), D("-50"), "x", "main")])
+                payments=[Payment(date(2026, 1, 5), D("-50"), account="main", counterparty="x")])
     with pytest.raises(ValueError, match="положительной"):
         roll_cash(s, start=date(2026, 1, 1))
     s = Scenario(accounts=[Account("a", D("0")), Account("b", D("0"))],
@@ -126,7 +126,7 @@ def test_negative_amounts_rejected_in_roll_cash_too():
 def test_scenario_without_accounts_is_an_error():
     """Сценарий без кошельков — ошибка с понятным текстом, а не StopIteration из кассы."""
     s = Scenario(accounts=[],
-                 payments=[Payment(date(2026, 1, 5), D("50"), "x", "main")])
+                 payments=[Payment(date(2026, 1, 5), D("50"), account="main", counterparty="x")])
     with pytest.raises(ValueError, match="не объявлено ни одного"):
         roll_cash(s, start=date(2026, 1, 1))
     with pytest.raises(ValueError, match="не объявлено ни одного"):
@@ -141,7 +141,7 @@ def test_payment_hits_its_funding_account():
     """
     s = Scenario(
         accounts=[Account("main", D("1000")), Account("card", D("500"))],
-        payments=[Payment(date(2026, 1, 10), D("300"), "x", "card")],
+        payments=[Payment(date(2026, 1, 10), D("300"), account="card", counterparty="x")],
     )
     r = run(s, main="main")
     assert r.balances == {"main": D("1000"), "card": D("200")}
@@ -170,7 +170,7 @@ def test_payment_does_not_pass_when_the_wallet_is_empty():
     """
     s = Scenario(
         accounts=[Account("main", D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("1200"), "x", "main")],
+        payments=[Payment(date(2026, 1, 10), D("1200"), account="main", counterparty="x")],
     )
     r = run(s, main="main")
     assert r.balances["main"] == D("1000")          # кошелёк не ушёл в минус
@@ -191,7 +191,7 @@ def test_hole_is_a_shortage_across_wallets():
     """
     elsewhere = Scenario(
         accounts=[Account("деньги", D("500")), Account("пустой", D("0"))],
-        payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")],
+        payments=[Payment(date(2026, 1, 10), D("300"), account="пустой", counterparty="x")],
     )
     r = run(elsewhere, main="деньги")
     assert r.hole == D("0")
@@ -200,7 +200,7 @@ def test_hole_is_a_shortage_across_wallets():
 
     nowhere = Scenario(
         accounts=[Account("деньги", D("100")), Account("пустой", D("0"))],
-        payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")],
+        payments=[Payment(date(2026, 1, 10), D("300"), account="пустой", counterparty="x")],
     )
     assert run(nowhere, main="деньги").hole == D("0")   # деньги на одном есть
 
@@ -221,7 +221,7 @@ def test_money_on_another_wallet_is_not_a_hole():
     s = Scenario(
         accounts=[Account("деньги", D("0")), Account("пустой", D("0"))],
         income=[Income(date(2026, 1, 1), D("500"), "деньги")],
-        payments=[Payment(date(2026, 1, 10), D("500"), "кредитор", "пустой")],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="пустой", counterparty="кредитор")],
         living_floor_monthly=D("0"),
     )
     r = run(s, main="деньги")
@@ -239,7 +239,7 @@ def test_prepayment_takes_what_the_wallet_can_give():
     """
     s = Scenario(
         accounts=[Account("main", D("100"))],
-        payments=[Payment(date(2026, 1, 10), D("400"), "x", "main", prepaid=True)],
+        payments=[Payment(date(2026, 1, 10), D("400"), account="main", counterparty="x", prepaid=True)],
     )
     r = run(s, main="main")
     assert r.balances["main"] == D("0")             # ушло ровно сто
@@ -252,7 +252,7 @@ def test_prepayment_with_nothing_to_give_pays_nothing():
     """Досрочка на пустом кошельке не платит ничего и в минус не уходит."""
     s = Scenario(
         accounts=[Account("main", D("0"))],
-        payments=[Payment(date(2026, 1, 10), D("400"), "x", "main", prepaid=True)],
+        payments=[Payment(date(2026, 1, 10), D("400"), account="main", counterparty="x", prepaid=True)],
     )
     r = run(s, main="main")
     assert r.balances["main"] == D("0")
@@ -280,7 +280,7 @@ def test_hint_does_not_promise_more_than_the_source_has():
     """Подсказка говорит, сколько можно перевести: обещать больше нечего."""
     s = Scenario(
         accounts=[Account("малый", D("50")), Account("пустой", D("0"))],
-        payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")],
+        payments=[Payment(date(2026, 1, 10), D("300"), account="пустой", counterparty="x")],
     )
     [(u,)] = [run(s, main="пустой").unsecured]
     assert u.short == D("300")
@@ -290,7 +290,7 @@ def test_hint_does_not_promise_more_than_the_source_has():
 def test_hint_is_absent_when_there_is_nowhere_to_transfer_from():
     """Переводить неоткуда — подсказки нет: это дыра, а не необеспеченность."""
     s = Scenario(accounts=[Account("пустой", D("0"))],
-                 payments=[Payment(date(2026, 1, 10), D("300"), "x", "пустой")])
+                 payments=[Payment(date(2026, 1, 10), D("300"), account="пустой", counterparty="x")])
     [(u,)] = [run(s, main="пустой").unsecured]
     assert u.hint is None
 
@@ -301,8 +301,8 @@ def test_credit_wallet_pays_a_living_expense_up_to_its_free_limit():
     """Кредитка платит жизненный расход остатком и свободным лимитом, а больше — нет."""
     s = Scenario(
         accounts=[Account("card", D("0"), is_credit=True, limit=D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("1000"), "x", "card", debt=False),
-                  Payment(date(2026, 1, 11), D("100"), "y", "card", debt=False)],
+        payments=[Payment(date(2026, 1, 10), D("1000"), account="card", counterparty="x", debt=False),
+                  Payment(date(2026, 1, 11), D("100"), account="card", counterparty="y", debt=False)],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("-1000")         # минус на кредитном — долг
@@ -318,8 +318,8 @@ def test_credit_wallet_with_debt_pays_the_rest_of_its_limit():
     """
     s = Scenario(
         accounts=[Account("card", D("-900"), is_credit=True, limit=D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("100"), "x", "card", debt=False),
-                  Payment(date(2026, 1, 11), D("50"), "y", "card", debt=False)],
+        payments=[Payment(date(2026, 1, 10), D("100"), account="card", counterparty="x", debt=False),
+                  Payment(date(2026, 1, 11), D("50"), account="card", counterparty="y", debt=False)],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("-1000")         # лимит выбран до конца
@@ -336,7 +336,7 @@ def test_credit_limit_does_not_pay_a_debt():
     s = Scenario(
         accounts=[Account("card", D("0"), is_credit=True, limit=D("1000")),
                   Account("свои", D("400"))],
-        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card")],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="card", counterparty="x")],
     )
     r = run(s, main="свои")
     assert r.balances["card"] == D("0")             # лимит не тронут
@@ -350,7 +350,7 @@ def test_credit_limit_does_not_fund_a_prepayment():
     """Досрочка долговая всегда: лимитом она не финансируется, только своими."""
     s = Scenario(
         accounts=[Account("card", D("100"), is_credit=True, limit=D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card", prepaid=True)],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="card", counterparty="x", prepaid=True)],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("0")             # ушло ровно сто — свои деньги
@@ -362,8 +362,7 @@ def test_prepayment_cannot_be_living():
     """Досрочка всегда долговая: `debt=False` у неё — противоречие, а не выбор."""
     s = Scenario(
         accounts=[Account("main", D("1000"))],
-        payments=[Payment(date(2026, 1, 10), D("500"), "x", "main",
-                          prepaid=True, debt=False)],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="main", counterparty="x", prepaid=True, debt=False)],
     )
     with pytest.raises(ValueError, match="досрочка всегда долговая"):
         run(s, main="main")
@@ -385,7 +384,7 @@ def test_unknown_limit_does_not_invent_a_refusal():
     """Лимит кредитного неизвестен — ёмкость не оценена: отказа движок не выдумывает."""
     s = Scenario(
         accounts=[Account("card", D("0"), is_credit=True)],
-        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card", debt=False)],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="card", counterparty="x", debt=False)],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("-500")
@@ -396,7 +395,7 @@ def test_unknown_limit_is_no_help_to_a_debt_payment():
     """Долговой платёж лимита не спрашивает: неизвестный его ёмкость не отменяет."""
     s = Scenario(
         accounts=[Account("card", D("100"), is_credit=True)],
-        payments=[Payment(date(2026, 1, 10), D("500"), "x", "card")],
+        payments=[Payment(date(2026, 1, 10), D("500"), account="card", counterparty="x")],
     )
     r = run(s, main="card")
     assert r.balances["card"] == D("100")           # целиком или никак: ушло ноль
@@ -407,7 +406,7 @@ def test_unknown_limit_is_no_help_to_a_debt_payment():
 def test_income_comes_before_payment_on_the_same_day():
     """В один день сначала приходит доход, потом уходит платёж — в любом порядке ввода."""
     income = Income(date(2026, 1, 10), D("500"), "main")
-    payment = Payment(date(2026, 1, 10), D("500"), "x", "main")
+    payment = Payment(date(2026, 1, 10), D("500"), account="main", counterparty="x")
 
     straight = Scenario(accounts=[Account("main", D("0"))],
                         income=[income], payments=[payment])
@@ -424,7 +423,7 @@ def test_transfer_comes_before_payment_on_the_same_day():
     """Перевод в один день с платежом уходит первым: переводят до того, как тратят."""
     s = Scenario(
         accounts=[Account("деньги", D("300")), Account("карта", D("0"))],
-        payments=[Payment(date(2026, 1, 5), D("300"), "x", "карта")],
+        payments=[Payment(date(2026, 1, 5), D("300"), account="карта", counterparty="x")],
         transfers=[Transfer(date(2026, 1, 5), D("300"), "деньги", "карта")],
     )
     r = run(s, main="деньги")
@@ -438,14 +437,14 @@ def test_transfer_comes_before_payment_on_the_same_day():
 def test_unavailable_wallet_cannot_pay():
     """С арестованной карты не заплатить — ошибка, а не тихий минус."""
     s = Scenario(accounts=[Account("main", D("1000"), available=False)],
-                 payments=[Payment(date(2026, 1, 1), D("10"), "x", "main")])
+                 payments=[Payment(date(2026, 1, 1), D("10"), account="main", counterparty="x")])
     with pytest.raises(ValueError, match="недоступен"):
         run(s, main="main")
 
 
 def test_hole_is_zero_when_balance_never_goes_negative():
     s = Scenario(accounts=[Account("main", D("500"))],
-                 payments=[Payment(date(2026, 1, 10), D("100"), "x", "main")])
+                 payments=[Payment(date(2026, 1, 10), D("100"), account="main", counterparty="x")])
     r = run(s, main="main")
     assert r.hole == D("0")
     assert r.min_balance == D("400")
@@ -457,7 +456,7 @@ def _floor_case(**kw) -> Scenario:
     base = dict(
         accounts=[Account("main", D("10000"))],
         income=[Income(date(2026, 1, 11), D("5000"), "main")],
-        payments=[Payment(date(2026, 1, 1), D("9000"), "x", "main")],
+        payments=[Payment(date(2026, 1, 1), D("9000"), account="main", counterparty="x")],
         living_floor_monthly=D("30000"),
     )
     base.update(kw)
@@ -481,7 +480,7 @@ def test_floor_gap_none_when_floor_unknown():
 def test_floor_gap_none_without_income_ahead():
     """Нет прихода впереди и нет горизонта → «не оценено», а не «нехватки нет»."""
     s = Scenario(accounts=[Account("main", D("1000"))],
-                 payments=[Payment(date(2026, 1, 1), D("100"), "x", "main")],
+                 payments=[Payment(date(2026, 1, 1), D("100"), account="main", counterparty="x")],
                  living_floor_monthly=D("30000"))
     assert run(s, main="main").floor_gap is None
 
@@ -507,7 +506,7 @@ def test_floor_gap_grows_with_the_floor():
 
 def test_optional_cap_is_balance_minus_reserve():
     s = Scenario(accounts=[Account("main", D("1000"))],
-                 payments=[Payment(date(2026, 1, 5), D("400"), "x", "main")])
+                 payments=[Payment(date(2026, 1, 5), D("400"), account="main", counterparty="x")])
     r = run(s, main="main")
     assert optional_cap(r, D("250")) == D("350")
     assert optional_cap(r, D("600")) == D("-0")   # резерв больше остатка
@@ -519,7 +518,7 @@ def test_optional_cap_reserves_what_did_not_pass():
     Платёж не отменён: деньги на него уже обещаны, хотя и лежат пока на кошельке.
     """
     s = Scenario(accounts=[Account("main", D("1000"))],
-                 payments=[Payment(date(2026, 1, 5), D("1200"), "x", "main")])
+                 payments=[Payment(date(2026, 1, 5), D("1200"), account="main", counterparty="x")])
     r = run(s, main="main")
     assert r.end_balance == D("1000")             # платёж не прошёл — деньги на месте
     assert optional_cap(r, D("0")) == D("-200")   # но они не свободны
@@ -536,7 +535,7 @@ def test_cover_cost_yearly_and_daily():
 def test_compare_returns_outcomes_in_requested_order():
     base = Scenario(accounts=[Account("main", D("1000"))])
     with_extra = dataclasses.replace(
-        base, payments=[Payment(date(2026, 1, 5), D("100"), "x", "main")])
+        base, payments=[Payment(date(2026, 1, 5), D("100"), account="main", counterparty="x")])
     rows = compare({"без траты": base, "с тратой": with_extra},
                    main="main", reserve=D("0"))
     assert [r.label for r in rows] == ["без траты", "с тратой"]
