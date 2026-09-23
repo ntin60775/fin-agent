@@ -99,7 +99,10 @@ class DealMonth:
     `balances` — остатки сделок на конец месяца. У сделки в копилке остаток не
     падает, пока единица не закроется: платежи копятся, и это видно в `units`.
     `total` — итог по сделкам первого приоритета, `interest` — начислено за
-    месяц, `paid` — ушло за месяц, из него `prepaid` — досрочки. `free` —
+    месяц, `paid` — ушло за месяц, из него `prepaid` — досрочки, `short` —
+    урезано: сколько из обязательного `want` не заплачено (сумма `want − amount`
+    по обязательным вхождениям месяца, урезанным пулом, остатком или котлом;
+    аррерис в следующий месяц не переносится). `free` —
     свободные деньги, которым не нашлось места; `offer` — сколько из них
     предлагается направить во второй приоритет. `payments` — расписание месяца:
     дата, сумма, кошелёк и контрагент каждого платежа.
@@ -112,6 +115,7 @@ class DealMonth:
     interest: Decimal
     paid: Decimal
     prepaid: Decimal
+    short: Decimal
     free: Decimal
     offer: Decimal
     payments: list[ScheduledPayment]
@@ -503,6 +507,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
         pool = baseline.get(index, Decimal(0)) + extra
         paid = Decimal(0)
         prepaid = Decimal(0)
+        short = Decimal(0)
         payments: list[ScheduledPayment] = []
 
         # 1. Проценты: до платежей месяца, по базе начисления каждой сделки.
@@ -536,6 +541,10 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
             else:
                 room = opened.balance
             amount = min(want, room, pool)
+            # Урезание видно всегда, даже когда не прошло ничего: недоплата
+            # месяца — сумма want − max(amount, 0) (в отрицательном пуле не
+            # заплачено ровно want), аррерисом она не станет.
+            short += want - max(amount, Decimal(0))
             if amount <= 0:
                 continue
             pool -= amount
@@ -593,7 +602,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
             units={uid: UnitMonth(u.target, u.pot) for uid, u in open_units.items()},
             total=sum((o.balance for o in open_deals.values() if not o.second),
                       Decimal(0)),
-            interest=interest, paid=paid, prepaid=prepaid, free=pool,
+            interest=interest, paid=paid, prepaid=prepaid, short=short, free=pool,
             offer=pool if second_open and not consent_to_second else Decimal(0),
             payments=payments,
         ))
