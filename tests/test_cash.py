@@ -208,7 +208,10 @@ def test_hole_is_a_shortage_across_wallets():
 def test_hole_comes_from_the_outside():
     """Дыра приходит снаружи — остатком, который уже в минусе.
 
-    Даты у такой дыры нет: события её не создавали.
+    Даты у такой дыры нет: события её не создавали, а в `run()` окна нет —
+    так держится общее правило даты стартовой дыры: окно есть → `window_start`
+    месяца, окна нет → None (другая половина правила —
+    `test_roll_cash_hole_on_starting_negative_balance`).
     """
     r = run(Scenario(accounts=[Account("main", D("-300"))]), main="main")
     assert r.hole == D("300")
