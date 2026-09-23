@@ -470,6 +470,25 @@ def test_floor_gap_uses_days_to_next_income():
     assert r.floor_gap_date == date(2026, 1, 1)
 
 
+def test_floor_gap_counts_the_consumed_minimum():
+    """Прожитое с начала линии вычтено из остатка: остаток события его не терял.
+
+    То же воспроизведение аудита 2026-09-22 (тикет 02), но путь `run()`: окна
+    нет, точка отсчёта — первое событие линии и накопления нет. На 15-е прожито
+    14 дней = 1 400, на руках 3 000 − 1 400 − 1 500 = 100 против требования
+    1 700 — нехватка 1 600, а не 200 от сырого остатка.
+    """
+    s = Scenario(accounts=[Account("main", D("0"))],
+                 income=[Income(date(2026, 1, 1), D("3000"), "main"),
+                         Income(date(2026, 2, 1), D("3000"), "main")],
+                 payments=[Payment(date(2026, 1, 15), D("1500"), account="main",
+                                   counterparty="c")],
+                 living_floor_monthly=D("3000"))
+    r = run(s, main="main")
+    assert r.floor_gap == D("1600.00")      # 1 700 − (3 000 − 1 400 − 1 500)
+    assert r.floor_gap_date == date(2026, 1, 15)
+
+
 def test_floor_gap_none_when_floor_unknown():
     """Минимум `?` → «не оценено», а не ноль."""
     r = run(_floor_case(living_floor_monthly=None), main="main")
