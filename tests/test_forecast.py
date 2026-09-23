@@ -77,24 +77,26 @@ def test_interest_is_the_rolls_total_and_grows_with_the_rate():
 def test_step_one_is_the_last_deficit_month_not_the_first_good_one():
     """Ступень 1 — позади последнего месяца с дефицитом, а не первый удачный месяц.
 
-    Январь прошёл без дефицита, февраль–май — с нехваткой до прожиточного
-    минимума: ступень достигнута в июне, а не в январе.
+    Январь видит голод первых четырёх чисел (кошелёк 0, приход 5-го), февраль–
+    май — с нехваткой до прожиточного минимума, июнь входит в дефицит входом
+    позади накопленного минимума: ступень достигнута в июле, а не в январе.
     """
     book = _book()
-    # Доход идёт все семь месяцев: без июльского прихода июнь не оценен —
-    # прихода в нём впереди нет, и ступень 1 осталась бы «не оценена»
+    # Доход идёт все семь месяцев: июльский приход делает свободными деньги
+    # июля — ступень 2, и отчёт кончается на ступенях
     f = forecast(_input(
         book, incomes=_incomes(D("30000"), 1, 2, 3, 4, 5, 6, 7),
         living_floor=D("20000"),
         one_offs=[Payment(date(2026, 2, 10), D("55000"), account="карта",
                           counterparty="банк")]))
-    # Нехватка считает прожитое (тикет 02): до мая минимум окна уже прожит,
-    # и дефицит держится ровно до него — январь при этом удачный месяц
-    assert [d.index for d in f.deficits] == [2, 3, 4, 5]
-    assert f.months[0].free > 0                     # удачный месяц был, ступени в нём нет
-    assert f.step1.month == date(2026, 6, 1)
-    assert f.step2.month == date(2026, 6, 1)        # ступень 2 — сверх ступени 1
-    assert len(f.months) == 6                       # отчёт кончается на ступенях
+    # Тикет 02: прожитое вычтено — дефицит февраля–мая растёт с накоплением;
+    # тикет 03: январь получает голод первых чисел, июнь — вход позади
+    # минимума (95 000 против 100 666,68)
+    assert [d.index for d in f.deficits] == [1, 2, 3, 4, 5, 6]
+    assert f.months[0].free > 0     # январь по деньгам удачен, ступени в нём нет
+    assert f.step1.month == date(2026, 7, 1)
+    assert f.step2.month == date(2026, 7, 1)        # ступень 2 — сверх ступени 1
+    assert len(f.months) == 7                       # отчёт кончается на ступенях
 
 
 def test_step_two_is_the_first_month_with_free_money():
@@ -105,7 +107,9 @@ def test_step_two_is_the_first_month_with_free_money():
     f = forecast(_input(book, incomes=[*_incomes(D("15000"), 1, 2, 3, 4),
                                        *_incomes(D("60000"), 5, 6, 7, 8)],
                         living_floor=D("20000")))
-    assert [d.index for d in f.deficits] == [1, 2, 3, 4]
+    # Май в дефиците: его вход позади накопленного минимума (тикет 03) —
+    # 57 000 против 80 000,01 прожитых январём–апрелем, и до прихода 4 дня
+    assert [d.index for d in f.deficits] == [1, 2, 3, 4, 5]
     # Нехватка считает прожитое (тикет 02): январь–апрель минимум окна уже
     # прожит, худший шаг — 20-е, платёж сделки: 10 666,67 − (14 000 − 12 666,67)
     assert f.deficits[0].floor_gap == D("9333.34")
@@ -115,8 +119,8 @@ def test_step_two_is_the_first_month_with_free_money():
     assert f.months[0].prepay_budget == D("0")
     # Накопленный минимум окна: прожитые январь–февраль вычтены из остатка
     assert f.months[1].free == D("-11333.34")       # 28 000 − 39 333.34
-    assert f.step1.month == date(2026, 5, 1)        # нехватка держится до апреля
-    assert f.step2.month == date(2026, 5, 1)        # первый месяц с плюсом
+    assert f.step1.month == date(2026, 6, 1)        # нехватка держится до мая
+    assert f.step2.month == date(2026, 6, 1)        # сверх ступени 1: июнь
     assert f.reached
 
 
@@ -204,11 +208,11 @@ def test_unknowns_are_taken_one_at_a_time():
     shifts = forecast_shifts(base, {"living_floor": D("33000"),
                                     "obligation_reserve": D("100000")})
     assert [s.label for s in shifts] == ["living_floor", "obligation_reserve"]
-    # минимум 33 000 держит дефицит до конца окна — ступени в нём не достигнуты
-    # (месяц 8 не оценен: прихода впереди не видно); резерв ступень 1 не
-    # трогает, но держит бюджет дольше
+    # минимум 33 000 держит дефицит до конца окна — ступени в нём не
+    # достигнуты; резерв ступень 1 не трогает, но держит бюджет дольше:
+    # база развернулась в июне (май позади минимума на входе) — сдвиг +2
     assert (shifts[0].step1_shift, shifts[0].step2_shift) == (None, None)
-    assert (shifts[1].step1_shift, shifts[1].step2_shift) == (0, 3)
+    assert (shifts[1].step1_shift, shifts[1].step2_shift) == (0, 2)
     assert shifts[0].step1 is None
     assert shifts[1].step2 == date(2026, 8, 1)
     assert widest(shifts).label == "obligation_reserve"
@@ -232,8 +236,9 @@ def test_earlier_shift_widens_the_fork_too():
                   living_floor=D("20000"))
     shifts = forecast_shifts(base, {"living_floor": D("5000"),
                                     "obligation_reserve": D("1000")})
-    # минимум 5 000 гасит дефициты вовсе и делает деньги свободными с января;
-    # резерв в 1 000 вилку не двигает — ступени на месте: май и май
+    # минимум 5 000 гасит дефициты с февраля и делает деньги свободными с
+    # января (в январе виден голод первых четырёх чисел при пустом кошельке);
+    # резерв в 1 000 вилку не двигает — ступени на месте: июнь и июнь
     assert (shifts[0].step1_shift, shifts[0].step2_shift) == (-4, -4)
     assert (shifts[1].step1_shift, shifts[1].step2_shift) == (0, 0)
     assert widest(shifts).label == "living_floor"
