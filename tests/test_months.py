@@ -269,8 +269,8 @@ def test_roll_cash_floor_gap_subtracts_the_consumed_minimum():
     прожито 14 дней = 1 400: на руках 3 000 − 1 400 − 1 500 = 100 против
     требования 1 700 — нехватка 1 600, а не 200 от сырого остатка. Прожитое
     второго месяца накоплено тем же счётчиком, что и свободные деньги: в
-    феврале прожит январский минимум 3 100, и шаг первого февраля меряется
-    остатком уже без него.
+    феврале прожит январский минимум 3 100 — худшая точка февраля теперь его
+    вход, где остаток позади минимума (тикет 03: вход окна участвует в оценке).
     """
     s = Scenario(
         accounts=[Account("main", D("0"))],
@@ -283,8 +283,9 @@ def test_roll_cash_floor_gap_subtracts_the_consumed_minimum():
     # 3 000 × 17/30 − (3 000 − 1 400 − 1 500) = 1 700 − 100
     assert months[0].floor_gap == D("1600.00")
     assert months[0].floor_gap_date == date(2026, 1, 15)
-    # 3 000 × 28/30 − (4 500 − 3 100) = 2 800 − 1 400
-    assert months[1].floor_gap == D("1400.00")
+    # вход февраля позади минимума: 0 − (1 500 − 3 100) — январский минимум
+    # остаток не терял; шаг того же дня мягче (2 800 − (4 500 − 3 100) = 1 400)
+    assert months[1].floor_gap == D("1600.00")
     assert months[1].floor_gap_date == date(2026, 2, 1)
 
 
@@ -299,6 +300,46 @@ def test_roll_cash_floor_gap_at_the_window_start_counts_nothing():
     # 3 000 × 31/30 − 3 000 = 3 100 − 3 000: прожитого в самой точке окна нет
     assert months[0].floor_gap == D("100.00")
     assert months[0].floor_gap_date == date(2026, 1, 1)
+
+
+def test_roll_cash_floor_gap_sees_the_starving_start_of_the_window():
+    """Вход окна участвует в оценке: голод до первого прихода виден (тикет 03).
+
+    Воспроизведение аудита 2026-09-22: кошелёк 0, приход 25-го числа, минимум
+    3 000 — месяц обязан показывать нехватку первых 24 чисел, а не ноль
+    «оценено и покрыто» и не None.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        income=[Income(date(2026, 1, 25), D("3000"), "main")],
+        living_floor_monthly=D("3000"),
+    )
+    months = roll_cash(s, START, max_months=1, main="main")
+    # 3 000 × 24/30 − 0 = 2 400: до прихода 24 дня, денег нет
+    assert months[0].floor_gap == D("2400.00")
+    assert months[0].floor_gap_date == date(2026, 1, 1)
+
+
+def test_roll_cash_floor_gap_a_month_without_events_gets_a_number():
+    """Месяц без событий получает оценку по входу, а не None (тикет 03).
+
+    В феврале нет ни одного события, но мартовский приход впереди — вход
+    оценивается, и февраль получает число. После последнего прихода судить
+    нечем: апрель остаётся «не оценено», а не «нехватки нет».
+    """
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        income=[Income(date(2026, m, 5), D("3000"), "main") for m in (1, 3)],
+        living_floor_monthly=D("3000"),
+    )
+    months = roll_cash(s, START, max_months=4, main="main")
+    # февраль: вход 3 000 минус прожитый январь 3 100, до прихода 5 марта
+    # 32 дня — 3 200 − (3 000 − 3 100) = 3 300
+    assert months[1].floor_gap == D("3300.00")
+    assert months[1].floor_gap_date == date(2026, 2, 1)
+    # апрель: прихода впереди не видно — «не оценено», а не ноль
+    assert months[3].floor_gap is None
+    assert months[3].floor_gap_date is None
 
 
 def test_roll_cash_free_money_can_be_negative():
