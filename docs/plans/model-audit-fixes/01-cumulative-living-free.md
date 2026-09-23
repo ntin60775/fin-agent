@@ -2,7 +2,7 @@
 node_type: ticket
 title: Свободные деньги: минимум окна, а не месяца
 service: _platform
-status: active
+status: archived
 updated: 2026-09-23
 links:
   part_of: [README.md]
