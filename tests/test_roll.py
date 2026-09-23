@@ -515,6 +515,66 @@ def test_percent_minimum_counts_from_the_month_start():
     assert jan.balances["заём"] == D("0.00")
 
 
+# --- урезанный обязательный платёж ------------------------------------------
+
+def test_cut_percent_payment_names_the_shortfall():
+    """Минималка процентом урезана пулом: недоплата — число в месяце, не молчание."""
+    deal = _deal(amount=D("10000"), rate_per_year=D("0.36"),
+                 schedule=_rule(percent=D("0.1")))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=2)
+    jan, feb = roll.months
+    assert jan.interest == D("300.00")       # 10 000 × 36 % / 12
+    assert jan.paid == D("1000")             # пул: 10 % от остатка на старте проката
+    assert jan.short == D("30.00")           # want 1 030 − 1 000
+    assert feb.short == D(0)                 # месяц без урезания — ноль
+
+
+def test_short_is_zero_when_pool_covers_want():
+    """Пул покрывает want: урезания нет — short ноль, paid прежний."""
+    deal = _deal(amount=D("100000"), schedule=_rule(percent=D("0.05")))
+    book = _book(deal)
+    validate(book)
+    jan = roll_deals(book, START, D(0), max_months=1).months[0]
+    assert jan.short == D(0)
+    assert jan.paid == D("5000.00")
+
+
+def test_short_sees_balance_cut_after_prepayment():
+    """Досрочка съела остаток: фиксированный платёж урезан по остатку — видно."""
+    deal = _deal(amount=D("10000"),
+                 schedule=_rule(payment=D("3000"), count=4, start=START))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D("5000"), max_months=3)
+    assert roll.months[0].short == D(0)          # январь: пул покрыл и досрочил
+    assert roll.months[1].short == D("1000.00")  # февраль: want 3 000 при остатке 2 000
+
+
+def test_short_sees_the_piggy_bank_room():
+    """Копилка: платёж крупнее свободного котла — урезание по котлу названо числом."""
+    first = _deal(uid="первый", amount=D("1000"), closure_unit="копилка",
+                  schedule=_rule(payment=D("1500")))
+    second = _deal(uid="второй", amount=D("1000"), closure_unit="копилка",
+                   schedule=_rule(payment=D("1500")))
+    book = _book(first, second)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=2)
+    assert [m.short for m in roll.months] == [D("1000.00")]   # want 1 500 при котле 500
+
+
+def test_short_never_exceeds_want_on_a_negative_pool():
+    """Отрицательный бюджет: не заплачено ровно want — недоплата не больше него."""
+    deal = _deal(amount=D("10000"), rate_per_year=D("0.36"),
+                 schedule=_rule(percent=D("0.1")))
+    book = _book(deal)
+    validate(book)
+    jan = roll_deals(book, START, D("-2000"), max_months=1).months[0]
+    assert jan.paid == D(0)
+    assert jan.short == D("1030.00")           # want целиком, а не 1 030 + пул
+
+
 # --- пробелы ---------------------------------------------------------------
 
 def test_unknown_rate_is_a_gap_not_zero():
