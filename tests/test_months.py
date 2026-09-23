@@ -200,13 +200,30 @@ def test_both_paths_agree_on_the_credit_limit():
 
 
 def test_roll_cash_hole_on_starting_negative_balance():
-    """Дыра: кошелёк начинается с отрицательного остатка — дыра видна без событий."""
+    """Дыра: кошелёк начинается с отрицательного остатка — дыра видна без событий.
+
+    Дата — `START`, потому что окно известно: так держится общее правило даты
+    стартовой дыры, вторая его половина — None в `run()`
+    (`test_hole_comes_from_the_outside`).
+    """
     s = Scenario(
         accounts=[Account("main", D("-100"))],
     )
     months = roll_cash(s, START, max_months=1, main="main")
     assert months[0].hole == D("100")
     assert months[0].hole_date == START
+
+
+def test_roll_cash_start_hole_of_a_later_month_is_dated_first_of_month():
+    """Правило даты: у стартовой дыры месяца ≥ 2 дата — 1-е число, а не `start`.
+
+    Окно известно, «когда началась» отвечает `window_start` месяца: минус
+    перешёл остатками, события нового месяца дыру не создавали.
+    """
+    s = Scenario(accounts=[Account("main", D("-100"))])
+    months = roll_cash(s, START, max_months=2, main="main")
+    assert months[1].hole == D("100")
+    assert months[1].hole_date == date(2026, 2, 1)
 
 
 def test_roll_cash_credit_negative_is_not_hole():
