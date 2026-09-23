@@ -377,6 +377,10 @@ def run(scenario: Scenario, main: str) -> Result:
     видна в `Result.unsecured`. Долговой платёж лимитом не платится: свободный
     лимит идёт только под жизненный расход (`Payment.debt`). Дыра при этом не
     создаётся: она приходит снаружи, остатками, которые уже в минусе.
+    Нехватка до прожиточного минимума считается от начала линии: прожитое с
+    первого события до даты шага уже израсходовано, но остаток события его не
+    терял — требование сравнивается с остатком за вычетом прожитого. Раньше
+    первого события позиция неизвестна: движок не спрашивает «сегодня».
     """
     _validate(scenario, main)
     bal: dict[str, Decimal] = {a.name: a.balance for a in scenario.accounts}
@@ -412,14 +416,44 @@ def run(scenario: Scenario, main: str) -> Result:
     else:
         min_balance, min_date = bal[main], None
 
-    floor_gap, floor_gap_date = _assess_floor(scenario, main_steps)
+    # Прожитое: в линии окна нет — точка отсчёта одна на всю линию, её начало.
+    # Раньше первого события позиция неизвестна, и движок её не выдумывает.
+    floor_gap, floor_gap_date = _assess_floor(
+        scenario, main_steps, since=events[0].date if events else None)
     return Result(min_balance, min_date, bal[main], dict(bal), timeline,
                   floor_gap, floor_gap_date, hole, hole_date, unsecured)
 
 
+def _consumed(monthly: Decimal, since: date | None, day: date) -> Decimal:
+    """Прожитое от точки отсчёта до дня шага: `F × дней / 30` вверх до копейки.
+
+    Дни — разность дат: день отсчёта не прожит целиком, поэтому в самой точке
+    отсчёта прожитого ещё нет. Точки отсчёта нет — нет и прожитого: без линии
+    (`run()`) шагов с оценкой не бывает вовсе.
+    """
+    if since is None or day <= since:
+        return Decimal(0)
+    days = (day - since).days
+    return (monthly * Decimal(days) / DAYS_IN_MONTH).quantize(KOPEK,
+                                                             rounding=ROUND_CEILING)
+
+
 def _assess_floor(scenario: Scenario,
-                  main_steps: list[Step]) -> tuple[Decimal | None, date | None]:
-    """Худшая нехватка остатка до прожиточного минимума за линию."""
+                  main_steps: list[Step],
+                  *,
+                  since: date | None = None,
+                  accrued: Decimal = Decimal(0),
+                  ) -> tuple[Decimal | None, date | None]:
+    """Худшая нехватка остатка до прожиточного минимума за линию.
+
+    Прожитое с точки отсчёта уже израсходовано, но остаток события его не терял:
+    требование до прихода сравнивается с остатком за вычетом прожитого, иначе
+    нехватка занижена ровно на эту сумму. Точка отсчёта — `since`, прожитое до
+    неё — `accrued`: в прокате это начало месяца окна (первого — сам `start`) и
+    накопленный минимум прошлых месяцев, в `run()` — первое событие линии, без
+    накопления. Прожитое — та же пропорция `F × дней / 30` с округлением до
+    копейки вверх, что и накопленный минимум окна: два учёта не расходятся.
+    """
     monthly = scenario.living_floor_monthly
     if monthly is None:
         return None, None  # прожиточный минимум неизвестен — честное «не оценено»
@@ -433,7 +467,8 @@ def _assess_floor(scenario: Scenario,
         assessed += 1
         required = (monthly * days / DAYS_IN_MONTH).quantize(KOPEK,
                                                             rounding=ROUND_CEILING)
-        gap = required - step.balance_after
+        consumed = accrued + _consumed(monthly, since, step.date)
+        gap = required - (step.balance_after - consumed)
         if gap > 0 and (worst is None or gap > worst[0]):
             worst = (gap, step.date)
     if assessed == 0:
@@ -522,6 +557,11 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
     слагаемое каждого — `F × дней / 30` вверх до копейки по самому месяцу.
     Прожитое прошлых месяцев переносимые остатки не теряют — без накопления
     минимума свободные деньги месяцев ≥ 2 завышались ровно на его сумму.
+    Нехватка до прожиточного минимума считает то же прожитое: точка отсчёта —
+    начало месяца окна (первого — сам `start`), прожито = накопленный минимум
+    месяцев окна до текущего плюс частичный месяц до даты шага, и требование
+    до прихода сравнивается с остатком за вычетом прожитого. Шаг в самой точке
+    отсчёта прожитого ещё не имеет.
     Из свободных денег вычитается и резерв обязательств
     (`Scenario.obligation_reserve`) — деньги, оставленные под платежи начала
     следующего месяца. Свободные деньги — состояние месяца и могут быть
@@ -592,9 +632,13 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
                 hole, hole_date = gap, event.date
 
         # Нехватка до прожиточного минимума: по обязательным событиям месяца —
-        # досрочка тратится уже после того, как на жизнь отложено.
+        # досрочка тратится уже после того, как на жизнь отложено. Прожитое —
+        # точка отсчёта `window_start` (первого месяца — `start` окна) плюс
+        # накопленный минимум месяцев до текущего (`living_accrued`), частичный
+        # месяц до даты шага считает `_assess_floor`.
         main_steps = [s for s in timeline if s.account == main]
-        floor_gap, floor_gap_date = _assess_floor(scenario, main_steps)
+        floor_gap, floor_gap_date = _assess_floor(
+            scenario, main_steps, since=window_start, accrued=living_accrued)
 
         # Свободные деньги: доступные остатки минус накопленный по окну
         # прожиточный минимум — все месяцы окна до текущего включительно:
