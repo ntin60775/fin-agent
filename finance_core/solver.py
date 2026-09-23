@@ -383,8 +383,9 @@ def run(scenario: Scenario, main: str) -> Result:
     лимит идёт только под жизненный расход (`Payment.debt`). Дыра при этом не
     создаётся: она приходит снаружи, остатками, которые уже в минусе.
     Нехватка до прожиточного минимума считается от начала линии: прожитое с
-    первого события до даты шага уже израсходовано, но остаток события его не
-    терял — требование сравнивается с остатком за вычетом прожитого. Раньше
+    первого события до даты шага уже израсходовано, но ликвидность его не
+    теряла — требование сравнивается с совокупной доступной ликвидностью всех
+    кошельков за вычетом прожитого. Оценивается каждое событие линии. Раньше
     первого события позиция неизвестна: движок не спрашивает «сегодня».
     """
     _validate(scenario, main)
@@ -408,9 +409,15 @@ def run(scenario: Scenario, main: str) -> Result:
     unsecured: list[Unsecured] = []
     # Дыра на старте события не создавали: даты у неё нет.
     hole, hole_date = _shortage(scenario, bal), None
+    # Точки оценки floor — зеркало дыры: каждое событие линии меряется по
+    # совокупной доступной ликвидности всех кошельков после него. Одна
+    # агрегация на событие: и дыра, и точка оценки floor.
+    floor_points: list[tuple[date, Decimal]] = []
     for event in events:
         timeline += _apply_event(scenario, bal, event, unsecured)
-        gap = _shortage(scenario, bal)
+        total = _money_total(scenario, bal)
+        floor_points.append((event.date, total))
+        gap = max(-total, Decimal(0))
         if gap > hole:
             hole, hole_date = gap, event.date
 
@@ -424,7 +431,7 @@ def run(scenario: Scenario, main: str) -> Result:
     # Прожитое: в линии окна нет — точка отсчёта одна на всю линию, её начало.
     # Раньше первого события позиция неизвестна, и движок её не выдумывает.
     floor_gap, floor_gap_date = _assess_floor(
-        scenario, main_steps, since=events[0].date if events else None)
+        scenario, floor_points, since=events[0].date if events else None)
     return Result(min_balance, min_date, bal[main], dict(bal), timeline,
                   floor_gap, floor_gap_date, hole, hole_date, unsecured)
 
@@ -444,27 +451,33 @@ def _consumed(monthly: Decimal, since: date | None, day: date) -> Decimal:
 
 
 def _assess_floor(scenario: Scenario,
-                  main_steps: list[Step],
+                  event_points: list[tuple[date, Decimal]],
                   *,
                   since: date | None = None,
                   accrued: Decimal = Decimal(0),
                   entry: Decimal | None = None,
                   ) -> tuple[Decimal | None, date | None]:
-    """Худшая нехватка остатка до прожиточного минимума за линию.
+    """Худшая нехватка доступной ликвидности до прожиточного минимума за линию.
 
-    Прожитое с точки отсчёта уже израсходовано, но остаток события его не терял:
-    требование до прихода сравнивается с остатком за вычетом прожитого, иначе
-    нехватка занижена ровно на эту сумму. Точка отсчёта — `since`, прожитое до
-    неё — `accrued`: в прокате это начало месяца окна (первого — сам `start`) и
-    накопленный минимум прошлых месяцев, в `run()` — первое событие линии, без
-    накопления. Прожитое — та же пропорция `F × дней / 30` с округлением до
-    копейки вверх, что и накопленный минимум окна: два учёта не расходятся.
+    Базис — совокупная доступная ликвидность всех кошельков (`_money_total`,
+    тот же `wallet_money`, что у дыры и свободных денег): прожить на деньгах
+    другого кошелька можно, а основной кошелёк — метрика, а не весь мир.
+    Прожитое с точки отсчёта уже израсходовано, но ликвидность его не теряла:
+    требование до прихода сравнивается с ликвидностью за вычетом прожитого,
+    иначе нехватка занижена ровно на эту сумму. Точка отсчёта — `since`,
+    прожитое до неё — `accrued`: в прокате это начало месяца окна (первого —
+    сам `start`) и накопленный минимум прошлых месяцев, в `run()` — первое
+    событие линии, без накопления. Прожитое — та же пропорция `F × дней / 30`
+    с округлением до копейки вверх, что и накопленный минимум окна: два учёта
+    не расходятся.
 
-    Оцениваются два вида точек: шаги основного кошелька и — когда заданы и
-    `entry`, и `since` — вход месяца точкой `since` с входным остатком: месяц
-    без событий получает оценку по входу, а голод до первого прихода виден
-    сразу, как дыра. Приход в сам день входа считается сегодняшним (0 дней
-    впереди): голодать не перед чем, остаток дня оценивает шаг после прихода.
+    Оцениваются два вида точек: события списком `event_points` (ликвидность
+    после каждого обязательного события, зеркало дыры; в `run()` — после
+    каждого события линии) и — когда заданы и `entry`, и `since` — вход месяца
+    точкой `since` с входной ликвидностью: месяц без событий получает оценку
+    по входу, а голод до первого прихода виден сразу, как дыра. Приход в сам
+    день входа считается сегодняшним (0 дней впереди): голодать не перед чем,
+    ликвидность дня оценивает событие после прихода.
     """
     monthly = scenario.living_floor_monthly
     if monthly is None:
@@ -473,11 +486,11 @@ def _assess_floor(scenario: Scenario,
     points: list[tuple[date, Decimal, bool]] = []
     if entry is not None and since is not None:
         points.append((since, entry, True))
-    points.extend((s.date, s.balance_after, False) for s in main_steps)
+    points.extend((day, money, False) for day, money in event_points)
 
     worst: tuple[Decimal, date] | None = None
     assessed = 0
-    for day, balance, today in points:
+    for day, liquidity, today in points:
         days = _days_to_next_income(scenario, day, today=today)
         if days is None:
             continue
@@ -485,7 +498,7 @@ def _assess_floor(scenario: Scenario,
         required = (monthly * days / DAYS_IN_MONTH).quantize(KOPEK,
                                                             rounding=ROUND_CEILING)
         consumed = accrued + _consumed(monthly, since, day)
-        gap = required - (balance - consumed)
+        gap = required - (liquidity - consumed)
         if gap > 0 and (worst is None or gap > worst[0]):
             worst = (gap, day)
     if assessed == 0:
@@ -577,10 +590,13 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
     Нехватка до прожиточного минимума считает то же прожитое: точка отсчёта —
     начало месяца окна (первого — сам `start`), прожито = накопленный минимум
     месяцев окна до текущего плюс частичный месяц до даты шага, и требование
-    до прихода сравнивается с остатком за вычетом прожитого. Оцениваются вход
-    месяца (входной остаток до событий — так месяц без событий получает число,
-    а не None) и шаги основного кошелька; приход в самый день входа считается
-    сегодняшним. Шаг в самой точке отсчёта прожитого ещё не имеет.
+    до прихода сравнивается с совокупной доступной ликвидностью всех кошельков
+    за вычетом прожитого — тот же базис, что у дыры и свободных денег.
+    Оцениваются вход месяца (ликвидность до событий — так месяц без событий
+    получает число, а не None) и каждое обязательное событие после него —
+    зеркало дыры; досрочка после отложенного на жизнь точкой не становится.
+    Приход в самый день входа считается сегодняшним. Событие в самой точке
+    отсчёта прожитого ещё не имеет.
     Из свободных денег вычитается и резерв обязательств
     (`Scenario.obligation_reserve`) — деньги, оставленные под платежи начала
     следующего месяца. Свободные деньги — состояние месяца и могут быть
@@ -642,27 +658,30 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
         unsecured: list[Unsecured] = []
         timeline: list[Step] = []
         # Дыра месяца: нехватка приходит снаружи — остатками на начало месяца.
-        hole = _shortage(scenario, bal)
+        # Вход месяца — первая точка оценки floor: та же агрегатная ликвидность
+        # до событий. Одна агрегация на момент: и дыра, и floor.
+        start_total = _money_total(scenario, bal)
+        hole = max(-start_total, Decimal(0))
         hole_date = window_start if hole > 0 else None
-        # Вход месяца — точка оценки floor: остаток основного кошелька до
-        # событий месяца, как у дыры.
-        entry_balance = bal[main]
+        # Точки оценки floor — зеркало дыры: каждое обязательное событие меряется
+        # по совокупной ликвидности после него. Досрочка не входит: она тратит
+        # уже отложенное на жизнь и оценивается после обязательных.
+        floor_points: list[tuple[date, Decimal]] = []
         for event in regular:
             timeline += _apply_event(scenario, bal, event, unsecured)
-            gap = _shortage(scenario, bal)
+            total = _money_total(scenario, bal)
+            floor_points.append((event.date, total))
+            gap = max(-total, Decimal(0))
             if gap > hole:
                 hole, hole_date = gap, event.date
 
         # Нехватка до прожиточного минимума: точка отсчёта — `window_start`
         # (первого месяца — `start` окна) плюс накопленный минимум месяцев до
         # текущего (`living_accrued`), частичный месяц до даты шага считает
-        # `_assess_floor`. Оцениваются вход месяца (входной остаток до
-        # событий — зеркало дыры) и обязательные шаги основного кошелька —
-        # досрочка тратится уже после того, как на жизнь отложено.
-        main_steps = [s for s in timeline if s.account == main]
+        # `_assess_floor`; вход месяца оценивается по `start_total`.
         floor_gap, floor_gap_date = _assess_floor(
-            scenario, main_steps, since=window_start, accrued=living_accrued,
-            entry=entry_balance)
+            scenario, floor_points, since=window_start, accrued=living_accrued,
+            entry=start_total)
 
         # Свободные деньги: доступные остатки минус накопленный по окну
         # прожиточный минимум — все месяцы окна до текущего включительно:
