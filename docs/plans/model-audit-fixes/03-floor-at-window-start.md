@@ -2,8 +2,8 @@
 node_type: ticket
 title: Оценка floor в начале окна
 service: _platform
-status: draft
-updated: 2026-09-22
+status: active
+updated: 2026-09-23
 links:
   part_of: [README.md]
   depends_on: [02-floor-gap-consumed.md]
