@@ -125,7 +125,7 @@ links:
 | # | Тикет | Блокируют | Статус |
 |---|---|---|---|
 | 01 | [Свободные деньги: минимум окна, а не месяца](01-cumulative-living-free.md) | — | archived |
-| 02 | [Floor gap считает прожитое](02-floor-gap-consumed.md) | 01 | draft |
+| 02 | [Floor gap считает прожитое](02-floor-gap-consumed.md) | 01 | archived |
 | 03 | [Оценка floor в начале окна](03-floor-at-window-start.md) | 02 | draft |
 | 04 | [Единый базис ликвидности для floor gap](04-floor-wallet-basis.md) | 02, 03 | draft |
 | 05 | [Правило даты дыры](05-hole-date-rule.md) | — | draft |
