@@ -342,6 +342,69 @@ def test_roll_cash_floor_gap_a_month_without_events_gets_a_number():
     assert months[3].floor_gap_date is None
 
 
+def test_roll_cash_floor_gap_counts_money_on_another_wallet():
+    """Деньги на другом кошельке — ликвидность: фантомной нехватки нет (тикет 04).
+
+    Раньше основной показывал 23 000 нехватки, пока free месяца был 100 000:
+    свободные деньги видели чужие деньги, а floor — нет.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("1000")), Account("other", D("100000"))],
+        income=[Income(date(2026, 1, 25), D("30000"), "main")],
+        living_floor_monthly=D("30000"),
+    )
+    m = roll_cash(s, START, max_months=1, main="main")[0]
+    assert m.floor_gap == D("0")       # 101 000 против требования 24 000
+    assert m.floor_gap_date is None
+    assert m.free > D("0")             # «свободны, но голодаем» больше нет
+
+
+def test_roll_cash_floor_gap_ignores_unavailable_wallet_money():
+    """Недоступный кошелёк в базис не входит: арестованные деньги не кушают."""
+    s = Scenario(
+        accounts=[Account("main", D("1000")),
+                  Account("other", D("100000"), available=False)],
+        income=[Income(date(2026, 1, 25), D("30000"), "main")],
+        living_floor_monthly=D("30000"),
+    )
+    m = roll_cash(s, START, max_months=1, main="main")[0]
+    # 30 000 × 24/30 − 1 000: чужие закрытые деньги базис не делают
+    assert m.floor_gap == D("23000.00")
+    assert m.floor_gap_date == date(2026, 1, 1)
+
+
+def test_roll_cash_floor_gap_free_credit_limit_is_not_money():
+    """Свободный лимит кредитки — не деньги и в базисе floor не деньги."""
+    s = Scenario(
+        accounts=[Account("main", D("1000")),
+                  Account("credit", D("0"), is_credit=True, limit=D("100000"))],
+        income=[Income(date(2026, 1, 25), D("30000"), "main")],
+        living_floor_monthly=D("30000"),
+    )
+    m = roll_cash(s, START, max_months=1, main="main")[0]
+    assert m.floor_gap == D("23000.00")
+
+
+def test_roll_cash_floor_gap_points_stop_before_prepay():
+    """Оценка идёт до досрочки: досрочка точкой оценки не становится (тикет 04).
+
+    Досрочка опустошает кошелёк — если бы её результат оценивали, месяц
+    показал бы нехватку, которой до досрочки не было.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("40000"))],
+        income=[Income(date(2026, 1, 25), D("30000"), "main"),
+                Income(date(2026, 2, 25), D("30000"), "main")],
+        payments=[Payment(date(2026, 1, 20), D("70000"), account="main",
+                          counterparty="x", prepaid=True)],
+        living_floor_monthly=D("30000"),
+    )
+    m = roll_cash(s, START, max_months=1, main="main")[0]
+    assert m.balances["main"] == D("0")  # досрочка прошла и опустошила кошелёк
+    assert m.floor_gap == D("0")         # оценка — до досрочки
+    assert m.floor_gap_date is None
+
+
 def test_roll_cash_free_money_can_be_negative():
     """Свободные деньги — состояние месяца: без денег величина отрицательна.
 

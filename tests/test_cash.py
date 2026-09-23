@@ -521,6 +521,69 @@ def test_floor_gap_grows_with_the_floor():
     assert gaps[0] < gaps[-1]
 
 
+def test_floor_gap_counts_money_on_other_wallet():
+    """Ликвидность всех кошельков — базис: деньги на другом кошельке не голодают.
+
+    Платёж опустошает основной, но 100 000 на другом покрывают остаток месяца:
+    раньше floor_gap считал только основной и показывал 22 000 нехватки,
+    которых не было (тикет 04). `min_balance`/`end_balance` — метрики основного
+    кошелька и не изменились.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("1000")), Account("other", D("100000"))],
+        income=[Income(date(2026, 1, 3), D("5000"), "main"),
+                Income(date(2026, 1, 25), D("30000"), "main")],
+        payments=[Payment(date(2026, 1, 5), D("6000"), account="main",
+                          counterparty="x")],
+        living_floor_monthly=D("30000"),
+    )
+    r = run(s, main="main")
+    assert r.floor_gap == D("0")
+    assert r.floor_gap_date is None
+    assert r.min_balance == D("0")          # основной так и опустел
+    assert r.end_balance == D("30000")
+
+
+def test_floor_gap_point_is_every_event_of_the_line():
+    """Каждое событие линии — точка оценки: провал на другом кошельке виден.
+
+    Событий на основном нет вовсе: без точки на платеже другого кошелька
+    оценки не было бы вовсе (None), а голод до прихода реален.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("0")), Account("other", D("1000"))],
+        payments=[Payment(date(2026, 1, 20), D("1000"), account="other",
+                          counterparty="x")],
+        income=[Income(date(2026, 1, 25), D("30000"), "main")],
+        living_floor_monthly=D("30000"),
+    )
+    r = run(s, main="main")
+    # 30 000 × 5/30 = 5 000 до прихода 25-го, денег ноль
+    assert r.floor_gap == D("5000.00")
+    assert r.floor_gap_date == date(2026, 1, 20)
+
+
+def test_floor_gap_keeps_the_balance_raw_despite_promise():
+    """Обещанное из floor_gap не вычитается: остаток сырой (тикет 04).
+
+    Непрошедший платёж виден в `unsecured` — floor не вычитает его из
+    ликвидности второй раз.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("1000"))],
+        payments=[Payment(date(2026, 1, 3), D("5000"), account="main",
+                          counterparty="x")],
+        income=[Income(date(2026, 1, 20), D("30000"), "main")],
+        living_floor_monthly=D("30000"),
+    )
+    r = run(s, main="main")
+    assert r.unsecured_total == D("5000")   # деньги не прошли, обещанное видно
+    # 30 000 × 17/30 = 17 000 против сырых 1 000; вычет обещанного дал бы
+    # 21 000 — непрошедшие деньги ещё на кошельке, прожить на них можно
+    assert r.floor_gap == D("16000.00")
+    assert r.floor_gap_date == date(2026, 1, 3)
+
+
 # --- производные величины -------------------------------------------------
 
 def test_optional_cap_is_balance_minus_reserve():
