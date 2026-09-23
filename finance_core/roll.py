@@ -652,7 +652,9 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
     Сделка с `prepay=False` в список не попадает: досрочка ей запрещена, и
     свободные деньги идут дальше по стратегии. Копилка досрочится вся целиком,
     поэтому запрет любого её участника запрещает и копилку: иначе досрочка
-    обошла бы запрет через единицу закрытия.
+    обошла бы запрет через единицу закрытия. Ставка копилки — максимальная
+    ставка участника; она участвует только в ранжировании (`_order`), на суммы
+    не влияет.
     """
     rows: list[_Target] = []
     for uid, opened in open_deals.items():
@@ -668,7 +670,10 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
             continue
         if any(not open_deals[member].deal.prepay for member in unit.members):
             continue                       # запрет участника запрещает копилку
-        rows.append(_Target(uid, Decimal(0), unit.remaining, unit.pay))
+        # Ставка копилки — максимальная ставка участника: дорогая копилка
+        # гасится первой, а не после любой standalone-сделки с ненулевой ставкой.
+        rate = max(_rate(open_deals[member].deal) for member in unit.members)
+        rows.append(_Target(uid, rate, unit.remaining, unit.pay))
     return rows
 
 
