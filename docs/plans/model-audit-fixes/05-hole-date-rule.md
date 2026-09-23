@@ -2,8 +2,8 @@
 node_type: ticket
 title: Правило даты дыры
 service: _platform
-status: draft
-updated: 2026-09-22
+status: active
+updated: 2026-09-23
 links:
   part_of: [README.md]
   documents: [../../../finance_core/solver.py]
