@@ -2,7 +2,7 @@
 node_type: ticket
 title: Оценка floor в начале окна
 service: _platform
-status: active
+status: archived
 updated: 2026-09-23
 links:
   part_of: [README.md]
