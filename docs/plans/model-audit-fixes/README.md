@@ -128,7 +128,7 @@ links:
 | 02 | [Floor gap считает прожитое](02-floor-gap-consumed.md) | 01 | archived |
 | 03 | [Оценка floor в начале окна](03-floor-at-window-start.md) | 02 | archived |
 | 04 | [Единый базис ликвидности для floor gap](04-floor-wallet-basis.md) | 02, 03 | archived |
-| 05 | [Правило даты дыры](05-hole-date-rule.md) | — | active |
+| 05 | [Правило даты дыры](05-hole-date-rule.md) | — | archived |
 | 06 | [Урезанный процентный платёж виден](06-percent-shortfall-visible.md) | — | draft |
 | 07 | [Лавина ранжирует копилку по ставке участников](07-avalanche-unit-rate.md) | — | draft |
 | 08 | [Контракт минимума и семейных передач](08-living-floor-family.md) | — | draft |
