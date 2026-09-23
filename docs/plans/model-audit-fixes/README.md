@@ -3,7 +3,7 @@ node_type: plan
 title: Аудит математической модели — устранение недостатков
 service: _platform
 status: active
-updated: 2026-09-23
+updated: 2026-09-24
 links:
   documents: [../../../finance_core/solver.py, ../../../finance_core/roll.py, ../../../finance_core/actions.py]
   depends_on: [../../decisions/unknown-is-not-zero.md, ../../decisions/what-means-out.md, ../../decisions/wallet-pays-what-it-has.md]
@@ -129,7 +129,7 @@ links:
 | 03 | [Оценка floor в начале окна](03-floor-at-window-start.md) | 02 | archived |
 | 04 | [Единый базис ликвидности для floor gap](04-floor-wallet-basis.md) | 02, 03 | archived |
 | 05 | [Правило даты дыры](05-hole-date-rule.md) | — | archived |
-| 06 | [Урезанный процентный платёж виден](06-percent-shortfall-visible.md) | — | draft |
+| 06 | [Урезанный процентный платёж виден](06-percent-shortfall-visible.md) | — | active |
 | 07 | [Лавина ранжирует копилку по ставке участников](07-avalanche-unit-rate.md) | — | draft |
 | 08 | [Контракт минимума и семейных передач](08-living-floor-family.md) | — | draft |
 | 09 | [Досрочка на деньги, освобождённые переносом](09-prepay-freed-by-move.md) | 01 | draft |
