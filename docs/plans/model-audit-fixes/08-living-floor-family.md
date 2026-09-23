@@ -2,8 +2,8 @@
 node_type: ticket
 title: Контракт минимума и семейных передач
 service: _platform
-status: draft
-updated: 2026-09-22
+status: active
+updated: 2026-09-24
 links:
   part_of: [README.md]
   documents: [../../../CONTEXT.md]
