@@ -261,6 +261,46 @@ def test_roll_cash_unknown_floor_gives_none_gap():
     assert months[0].floor_gap_date is None
 
 
+def test_roll_cash_floor_gap_subtracts_the_consumed_minimum():
+    """Нехватка до минимума считает прожитое: остаток события его не терял.
+
+    Воспроизведение аудита 2026-09-22 (тикет 02): минимум 3 000/мес, приход
+    3 000 первого, платёж 1 500 пятнадцатого, следующий приход первого. На 15-е
+    прожито 14 дней = 1 400: на руках 3 000 − 1 400 − 1 500 = 100 против
+    требования 1 700 — нехватка 1 600, а не 200 от сырого остатка. Прожитое
+    второго месяца накоплено тем же счётчиком, что и свободные деньги: в
+    феврале прожит январский минимум 3 100, и шаг первого февраля меряется
+    остатком уже без него.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        income=[Income(date(2026, m, 1), D("3000"), "main") for m in (1, 2, 3)],
+        payments=[Payment(date(2026, 1, 15), D("1500"), account="main",
+                          counterparty="c")],
+        living_floor_monthly=D("3000"),
+    )
+    months = roll_cash(s, START, max_months=2, main="main")
+    # 3 000 × 17/30 − (3 000 − 1 400 − 1 500) = 1 700 − 100
+    assert months[0].floor_gap == D("1600.00")
+    assert months[0].floor_gap_date == date(2026, 1, 15)
+    # 3 000 × 28/30 − (4 500 − 3 100) = 2 800 − 1 400
+    assert months[1].floor_gap == D("1400.00")
+    assert months[1].floor_gap_date == date(2026, 2, 1)
+
+
+def test_roll_cash_floor_gap_at_the_window_start_counts_nothing():
+    """Шаг в точке отсчёта прожитого ещё не имеет — нехватка считается как раньше."""
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        income=[Income(date(2026, m, 1), D("3000"), "main") for m in (1, 2)],
+        living_floor_monthly=D("3000"),
+    )
+    months = roll_cash(s, START, max_months=1, main="main")
+    # 3 000 × 31/30 − 3 000 = 3 100 − 3 000: прожитого в самой точке окна нет
+    assert months[0].floor_gap == D("100.00")
+    assert months[0].floor_gap_date == date(2026, 1, 1)
+
+
 def test_roll_cash_free_money_can_be_negative():
     """Свободные деньги — состояние месяца: без денег величина отрицательна.
 
