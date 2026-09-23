@@ -130,7 +130,7 @@ links:
 | 04 | [Единый базис ликвидности для floor gap](04-floor-wallet-basis.md) | 02, 03 | archived |
 | 05 | [Правило даты дыры](05-hole-date-rule.md) | — | archived |
 | 06 | [Урезанный процентный платёж виден](06-percent-shortfall-visible.md) | — | archived |
-| 07 | [Лавина ранжирует копилку по ставке участников](07-avalanche-unit-rate.md) | — | draft |
+| 07 | [Лавина ранжирует копилку по ставке участников](07-avalanche-unit-rate.md) | — | active |
 | 08 | [Контракт минимума и семейных передач](08-living-floor-family.md) | — | draft |
 | 09 | [Досрочка на деньги, освобождённые переносом](09-prepay-freed-by-move.md) | 01 | draft |
 
