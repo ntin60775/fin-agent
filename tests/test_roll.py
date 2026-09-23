@@ -703,6 +703,30 @@ def test_avalanche_is_cheaper_than_snowball():
     assert avalanche.start_total == snowball.start_total == D("140000")
 
 
+def test_avalanche_ranks_the_pot_by_its_dearest_member():
+    """Лавина ранжирует копилку по самой дорогой ставке участника, а не нулём.
+
+    Копилка под 40 % и гасится в лавине раньше standalone-сделки под 10 %
+    при равном прочем; нулевая «ставка» не отправляет её в конец очереди
+    после любой сделки с ненулевой ставкой. Ставка копилки участвует только
+    в ранжировании — порядок досрочек месяца это и показывает.
+    """
+    member = _deal(uid="участник", amount=D("1000"), rate_per_year=D("0.4"),
+                   closure_unit="копилка", schedule=_rule(payment=D("100")))
+    plain = _deal(uid="одиночная", amount=D("1000"), rate_per_year=D("0.1"),
+                  schedule=_rule(payment=D("100")))
+    book = _book(member, plain)
+    validate(book)
+    roll = roll_deals(book, START, D("1500"), max_months=12)
+    jan = roll.months[0]
+    assert [sp.deal for sp in jan.payments if sp.planned is None] == [
+        "участник", "одиночная"]                  # копилка гасится раньше
+    assert jan.prepaid == D("1500")               # пул месяца разошёлся целиком
+    assert jan.units["копилка"].pot == D("1000")  # цель набрана, копилка закрыта
+    assert jan.balances["участник"] == D("0")     # закрытие разом, остатка нет
+    assert jan.balances["одиночная"] == D("308.33")  # хвост: 1000 + 8,33 − 100 − 600
+
+
 def test_prepay_can_be_forbidden_for_one_deal():
     """`prepay=False`: свободные деньги сделку не трогают — она идёт своим графиком.
 
