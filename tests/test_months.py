@@ -277,6 +277,27 @@ def test_roll_cash_free_money_can_be_negative():
     assert months[0].prepay_budget == D("0")
 
 
+def test_roll_cash_free_subtracts_the_minimum_of_the_whole_window():
+    """Свободные деньги вычитают минимум всех месяцев окна, а не текущего.
+
+    Аудит 2026-09-22 (воспроизведение тикета 01): остатки не теряют прожитый
+    минимум прошлых месяцев, поэтому free месяцев ≥ 2 завышен ровно на его
+    сумму. Кошелёк 0, приход 6 000 пятое число январь–март, минимум 3 000:
+    к февралю уже прожиты январские 3 100.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        income=[Income(date(2026, m, 5), D("6000"), "main") for m in (1, 2, 3)],
+        living_floor_monthly=D("3000"),
+    )
+    months = roll_cash(s, START, max_months=3, main="main")
+    assert months[0].free == D("2900")              # месяц 1 не меняется: 6 000 − 3 100
+    assert months[1].free == D("6100")              # 12 000 − 3 100 − 2 800
+    assert months[2].free == D("9000")              # 18 000 − 9 000
+    # бюджет досрочек из тех же свободных денег — прожитого в нём нет
+    assert months[1].prepay_budget == D("6100")
+
+
 # --- roll_months -----------------------------------------------------------
 
 def test_roll_months_converges():

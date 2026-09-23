@@ -110,7 +110,8 @@ class CashMonth:
     floor_gap: Decimal | None
     floor_gap_date: date | None
     #: Свободные деньги месяца — состояние месяца: доступные остатки минус
-    #: прожиточный минимум, резерв обязательств и обещанное. Может быть
+    #: накопленный по окну прожиточный минимум (все месяцы окна до текущего
+    #: включительно), резерв обязательств и обещанное. Может быть
     #: отрицательным: нагрузка больше денег — это нехватка, а не бюджет. Где
     #: величина становится бюджетом досрочек, берётся `prepay_budget`.
     free: Decimal
@@ -516,11 +517,16 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
     вызывающим по тем же правилам: кламп на конец месяца и сдвиг с выходного.
 
     Платёж с `prepaid=True` — досрочка: она уходит после обязательных платежей
-    месяца, поэтому свободные деньги считаются до неё. Из свободных денег
-    вычитается и резерв обязательств (`Scenario.obligation_reserve`) — деньги,
-    оставленные под платежи начала следующего месяца. Свободные деньги — состояние
-    месяца и могут быть отрицательными, когда нагрузка больше денег; бюджет
-    досрочек из них делает `CashMonth.prepay_budget` — не меньше нуля.
+    месяца, поэтому свободные деньги считаются до неё. Вычитается прожиточный
+    минимум, накопленный по окну: все месяцы окна до текущего включительно,
+    слагаемое каждого — `F × дней / 30` вверх до копейки по самому месяцу.
+    Прожитое прошлых месяцев переносимые остатки не теряют — без накопления
+    минимума свободные деньги месяцев ≥ 2 завышались ровно на его сумму.
+    Из свободных денег вычитается и резерв обязательств
+    (`Scenario.obligation_reserve`) — деньги, оставленные под платежи начала
+    следующего месяца. Свободные деньги — состояние месяца и могут быть
+    отрицательными, когда нагрузка больше денег; бюджет досрочек из них делает
+    `CashMonth.prepay_budget` — не меньше нуля.
     Неизвестный прожиточный минимум даёт `floor_gap = None` («не оценено»),
     а не ноль. Платёж и перевод,
     которым не хватило ёмкости своего кошелька, не проходят: они видны в
@@ -542,6 +548,10 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
     transfers = sorted(scenario.transfers, key=lambda t: t.date)
 
     months: list[CashMonth] = []
+    # Накопленный прожиточный минимум окна: слагаемое каждого месяца копится
+    # в цикле — вычитается из свободных денег всех месяцев до текущего
+    # включительно. Неизвестный минимум (None) накопления не заводит.
+    living_accrued = Decimal(0)
     for index in range(1, max_months + 1):
         month = _month_start(start, index - 1)
         end = _month_end(month)
@@ -586,7 +596,10 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
         main_steps = [s for s in timeline if s.account == main]
         floor_gap, floor_gap_date = _assess_floor(scenario, main_steps)
 
-        # Свободные деньги: доступные остатки минус прожиточный минимум месяца,
+        # Свободные деньги: доступные остатки минус накопленный по окну
+        # прожиточный минимум — все месяцы окна до текущего включительно:
+        # прожитое прошлых месяцев остатки не теряют, и без накопления
+        # свободные деньги месяцев ≥ 2 завышались ровно на его сумму. Дальше
         # минус резерв обязательств и минус то, что не прошло: непрошедшее
         # обязательство не отменено — деньги на него уже обещаны. Считаются до
         # досрочек. Это состояние месяца: может быть отрицательным — нагрузка
@@ -598,9 +611,9 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
         reserved = scenario.obligation_reserve or Decimal(0)
         if scenario.living_floor_monthly is not None:
             days = (end - window_start).days + 1
-            monthly_living = (scenario.living_floor_monthly * Decimal(days)
-                              / DAYS_IN_MONTH).quantize(KOPEK, rounding=ROUND_CEILING)
-            free = total_money - monthly_living - reserved
+            living_accrued += (scenario.living_floor_monthly * Decimal(days)
+                               / DAYS_IN_MONTH).quantize(KOPEK, rounding=ROUND_CEILING)
+            free = total_money - living_accrued - reserved
         else:
             free = total_money - reserved
 
