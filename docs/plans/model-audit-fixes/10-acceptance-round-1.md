@@ -2,7 +2,7 @@
 node_type: ticket
 title: Разбор: два красных сценарных теста потребителя (floor_gap)
 service: _platform
-status: draft
+status: active
 updated: 2026-09-24
 links:
   part_of: [README.md]
