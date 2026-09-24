@@ -1,6 +1,6 @@
 ---
 node_type: ticket
-title: Разбор: два красных сценарных тестов потребителя (floor_gap)
+title: Разбор: два красных сценарных теста потребителя (floor_gap)
 service: _platform
 status: archived
 updated: 2026-09-24
