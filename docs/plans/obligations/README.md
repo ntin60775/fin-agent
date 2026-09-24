@@ -3,7 +3,7 @@ node_type: plan
 title: Взаиморасчёты и прогноз — единая модель контрагентов, сделок и кассы
 service: _platform
 status: active
-updated: 2026-09-20
+updated: 2026-09-24
 links:
   depends_on: [../../decisions/counterparty-model.md, ../../decisions/derived-balances.md, ../../decisions/schedule-to-cash.md, ../../decisions/what-means-out.md, ../../decisions/card-schemas.md, ../../decisions/wallet-pays-what-it-has.md]
   relates_to: [../zone-split.md]
@@ -184,7 +184,9 @@ links:
   параметра отдельно — так видно, что задаёт ширину, а комбинированная вилка смешала
   бы причины. Прожиточный минимум: сначала оценка владельца, потом замена фактом —
   источник факта появляется здесь же: передачи внутри семьи с назначением и свои
-  траты. Передачи входят в минимум, а не прибавляются к нему — иначе еда дважды.
+  траты. В число минимума входит только не-событие: передачи в число не берутся —
+  они уже уменьшили остаток, иначе еда дважды
+  ([floor-excludes-events.md](../../decisions/floor-excludes-events.md)).
 
 ## Тикеты
 
