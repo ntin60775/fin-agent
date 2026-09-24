@@ -2,7 +2,7 @@
 node_type: ticket
 title: Досрочка на деньги, освобождённые переносом
 service: _platform
-status: active
+status: archived
 updated: 2026-09-24
 links:
   part_of: [README.md]
