@@ -71,6 +71,17 @@ def _income(month: int, account: str = "карта") -> Income:
     return Income(date(2026, month, 25), D("20000"), account)
 
 
+def _tight_base() -> Base:
+    """Январь под досрочку тесен: 15 000 − 3 500 нагрузки − 8 000 резерва = 3 500."""
+    wallets = [_wallet("карта", D("15000"))]
+    inp = _inp(_book(_deal(uid="заём", amount=D("10000")),
+                     _deal(uid="долг", amount=D("5000"),
+                           schedule=ScheduleRule(days=(10,), payment=D("500"))),
+                     wallets=wallets),
+               wallets=wallets, obligation_reserve=D("8000"))
+    return baseline(inp)
+
+
 # --- действия --------------------------------------------------------------
 
 def test_action_is_an_object_and_all_four_kinds_are_supported():
@@ -153,6 +164,71 @@ def test_prepayments_are_checked_together_not_one_by_one():
         Prepay(deal="заём", date=date(2026, 1, 25), amount=D("4000")),
     ))
     assert impossible(base, fits) is None
+
+
+def test_a_move_frees_the_month_and_a_prepay_from_its_budget_is_possible():
+    """Перенос выводит платёж из месяца — досрочка из освободившихся денег проходит.
+
+    Бюджет меряется по входу варианта: в базе январь оставляет под досрочку
+    3 500, после переноса платежа заём в феврале — 6 500. Досрочка на 5 000 по
+    базе отклонялась как «больше свободных денег месяца» — отказ по строгости
+    выдавался за невозможное.
+    """
+    base = _tight_base()
+    assert base.forecast.months[0].free == D("3500")     # 15 000 − 3 500 − 8 000
+    before = [(m.month, m.free, m.hole) for m in base.forecast.months]
+
+    variant = Variant("перенос и досрочка", (
+        Move(deal="заём", planned=date(2026, 1, 20), to=date(2026, 2, 20)),
+        Prepay(deal="долг", date=date(2026, 1, 15), amount=D("5000")),
+    ))
+    assert impossible(base, variant) is None
+    moved = applied(base, variant)
+    assert [m.amount for m in moved.book.movements] == [D("5000")]
+    price(base, variant)                                # цена по тому же входу
+    # База не тронута: ни applied(), ни price() не переписывают её прогноз.
+    assert [(m.month, m.free, m.hole) for m in base.forecast.months] == before
+
+
+def test_the_prepay_budget_is_the_entry_and_the_order_does_not_matter():
+    """Бюджет — по входу (база + все действия, кроме всех досрочек): порядок не влияет."""
+    base = _tight_base()
+    move = Move(deal="заём", planned=date(2026, 1, 20), to=date(2026, 2, 20))
+    first = Prepay(deal="долг", date=date(2026, 1, 15), amount=D("2500"))
+    second = Prepay(deal="долг", date=date(2026, 1, 25), amount=D("2500"))
+    both = (first, second)
+
+    # Месяц, где ничего не освобождалось: вместе 5 000 больше бюджета 3 500.
+    no_move = Variant("досрочки без переноса", both)
+    assert "вместе больше свободных денег" in impossible(base, no_move)
+    with pytest.raises(ImpossibleAction, match="вместе больше свободных денег"):
+        applied(base, no_move)
+
+    # Тот же месяц с переносом: по входу бюджет 6 500, вместе 5 000 по силам,
+    # и порядок действий на проверку не влияет.
+    assert impossible(base, Variant("перенос, потом досрочки",
+                                    (move, *both))) is None
+    assert impossible(base, Variant("досрочки, потом перенос",
+                                    (*both, move))) is None
+
+    # А вместе больше бюджета входа по-прежнему нельзя.
+    over = Variant("вместе сверх входа", (
+        move, *both, Prepay(deal="заём", date=date(2026, 1, 27),
+                            amount=D("1600"))))
+    assert "вместе больше свободных денег" in impossible(base, over)
+
+
+def test_a_structurally_invalid_action_is_named_before_the_entry_is_built():
+    """Смешанный вариант: сломанный мост назван причиной, а не ошибкой сборки."""
+    base = _tight_base()
+    broken = Variant("досрочка и сломанный мост", (
+        Prepay(deal="долг", date=date(2026, 1, 15), amount=D("1000")),
+        Bridge(counterparty="банк", wallet="карта", date=START,
+               amount=D("0"), days=10, rate_per_day=D("0.001")),
+    ))
+    assert impossible(base, broken) == "мост: сумма должна быть положительной"
+    with pytest.raises(ImpossibleAction, match="сумма должна быть положительной"):
+        applied(base, broken)
 
 
 def test_two_bridges_from_one_wallet_are_checked_against_its_limit_together():
@@ -282,13 +358,7 @@ def test_a_variant_that_promises_money_it_does_not_have_shows_it():
 
 def test_a_prepay_takes_the_months_free_money_and_more_is_impossible():
     """Досрочка берёт из свободного остатка месяца; больше остатка — невозможно."""
-    wallets = [_wallet("карта", D("15000"))]
-    inp = _inp(_book(_deal(uid="заём", amount=D("10000")),
-                     _deal(uid="долг", amount=D("5000"),
-                           schedule=ScheduleRule(days=(10,), payment=D("500"))),
-                     wallets=wallets),
-               wallets=wallets, obligation_reserve=D("8000"))
-    base = baseline(inp)
+    base = _tight_base()
     free = base.forecast.months[0].free
     assert free == D("3500")                        # 15 000 − 3 500 нагрузки − 8 000
 
