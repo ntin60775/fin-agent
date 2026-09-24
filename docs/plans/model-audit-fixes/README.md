@@ -2,7 +2,7 @@
 node_type: plan
 title: Аудит математической модели — устранение недостатков
 service: _platform
-status: active
+status: archived
 updated: 2026-09-24
 links:
   documents: [../../../finance_core/solver.py, ../../../finance_core/roll.py, ../../../finance_core/actions.py]
