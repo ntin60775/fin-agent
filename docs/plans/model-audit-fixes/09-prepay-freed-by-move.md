@@ -2,8 +2,8 @@
 node_type: ticket
 title: Досрочка на деньги, освобождённые переносом
 service: _platform
-status: draft
-updated: 2026-09-22
+status: active
+updated: 2026-09-24
 links:
   part_of: [README.md]
   depends_on: [01-cumulative-living-free.md]
