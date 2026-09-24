@@ -12,9 +12,11 @@
 минус дыра, у моста — рубли процентов.
 
 Движок отклоняет только **невозможное** (`impossible`): сдвиг за горизонт, мост без
-дыры, мост больше доступного лимита кошелька, досрочка больше свободного остатка
-месяца, конфликт действий внутри варианта. Невыгодное не отклоняется — оно
-показывается ценой, а решение принимает человек.
+дыры, мост больше доступного лимита кошелька, досрочка больше остатка сделки,
+конфликт действий внутри варианта. Бюджет досрочки меряется не по базе, а по
+**входу варианта** — база плюс все действия, кроме всех досрочек: перенос,
+освободивший деньги месяца, идёт в зачёт, и порядок действий не влияет.
+Невыгодное не отклоняется — оно показывается ценой, а решение принимает человек.
 
 Сам движок перебирает узкий набор (`variants`): сдвиги платежей в окне и мост под
 дыру. Широкое планирование — по запросу: список действий собирается снаружи, числа
@@ -136,7 +138,11 @@ def impossible(base: Base, variant: Variant) -> str | None:
     """Почему вариант невозможен; None — возможен.
 
     Отклоняется только невозможное; невыгодное считается и показывается ценой.
-    Первая причина и возвращается: дальше проверять нечего.
+    Порядок: конфликт, сами действия, затем бюджет досрочек — по входу варианта
+    (`_entry_forecast`): перенос, освободивший деньги месяца, идёт в зачёт, а
+    вход не собирается, пока действия не прошли проверку — невалидное действие
+    названо причиной, а не ошибкой сборки. Первая причина и возвращается:
+    дальше проверять нечего.
     """
     conflict = _conflict(variant)
     if conflict is not None:
@@ -145,15 +151,39 @@ def impossible(base: Base, variant: Variant) -> str | None:
         reason = _reason(base, action)
         if reason is not None:
             return reason
-    return _totals(base, variant)
+    entry = _entry_forecast(base, variant)
+    for action in variant.actions:
+        if isinstance(action, Prepay):
+            reason = _prepay_budget_reason(action, entry)
+            if reason is not None:
+                return reason
+    return _totals(base, variant, entry)
 
 
-def _totals(base: Base, variant: Variant) -> str | None:
+def _entry_forecast(base: Base, variant: Variant) -> Forecast | None:
+    """Прогноз входа варианта — по нему меряется бюджет досрочек; None — досрочек нет.
+
+    Вход — база плюс все действия, кроме всех досрочек: исключены все разом,
+    поэтому бюджет не зависит от порядка действий. Досрочки одни — вход это сама
+    база, прогноз уже посчитан; лишний прогноз заводится только когда вариант
+    что-то двигает кроме досрочек. Вызывается после проверки действий: вход
+    собирается только из действий, уже названных возможными.
+    """
+    actions = tuple(a for a in variant.actions if not isinstance(a, Prepay))
+    if len(actions) == len(variant.actions):
+        return None
+    if not actions:
+        return base.forecast
+    return forecast(_variant_input(base, actions))
+
+
+def _totals(base: Base, variant: Variant, entry: Forecast | None) -> str | None:
     """Проверка по сумме: вместе действия обещают больше, чем каждое по силам.
 
     Каждая досрочка по отдельности может укладываться в остаток сделки и в
-    свободные деньги месяца, а вместе они обещают больше, чем есть: вариант
-    применяется целиком, поэтому и проверяется целиком.
+    бюджет месяца, а вместе они обещают больше, чем есть: вариант применяется
+    целиком, поэтому и проверяется целиком. Бюджет месяца — по входу варианта,
+    как и у проверки одной досрочки (`_budget_at`).
     """
     book = base.inp.book
     by_deal: dict[str, Decimal] = {}
@@ -175,7 +205,7 @@ def _totals(base: Base, variant: Variant) -> str | None:
             return (f"досрочки по сделке {deal_uid!r} вместе больше остатка "
                     f"({remaining})")
     for month, total in by_month.items():
-        free = _budget_at(base, month)
+        free = _budget_at(entry, month)
         if free is not None and total > free:
             return (f"досрочки месяца {month} вместе больше свободных денег "
                     f"({free})")
@@ -278,12 +308,10 @@ def _bridge_reason(base: Base, action: Bridge) -> str | None:
 
 
 def _prepay_reason(base: Base, action: Prepay) -> str | None:
-    """Досрочка: остаток сделки, свободные деньги месяца и кошелёк.
+    """Досрочка: положительная сумма, остаток сделки и кошелёк.
 
-    Свободные деньги берутся из базы: освободившееся от переноса движок в зачёт
-    не берёт — иначе понадобился бы второй расчёт кассы внутри проверки. Вариант,
-    который переносом освобождает деньги и тут же их досрочит, движок отклонит:
-    это отказ по строгости, а не по невозможности.
+    Бюджет месяца здесь не при чём: он меряется по входу варианта
+    (`_prepay_budget_reason`) и в этом порядке — после проверки всех действий.
     """
     book = base.inp.book
     if action.amount <= 0:
@@ -304,7 +332,17 @@ def _prepay_reason(base: Base, action: Prepay) -> str | None:
     if action.amount > remaining:
         return (f"досрочка {action.deal!r}: {action.amount} больше остатка "
                 f"({remaining})")
-    free = _budget_at(base, action.date)
+    return None
+
+
+def _prepay_budget_reason(action: Prepay, entry: Forecast | None) -> str | None:
+    """Бюджет одной досрочки — по прогнозу входа варианта.
+
+    Вход — база плюс все действия, кроме всех досрочек: перенос, освободивший
+    деньги месяца, идёт в зачёт, а исключённые все досрочки разом делают
+    проверку независимой от порядка действий.
+    """
+    free = _budget_at(entry, action.date)
     if free is None:
         return (f"досрочка {action.deal!r}: месяц {action.date} за отчётом — "
                 f"свободных денег не видно")
@@ -325,10 +363,18 @@ def applied(base: Base, variant: Variant) -> ForecastInput:
     reason = impossible(base, variant)
     if reason is not None:
         raise ImpossibleAction(f"{variant.label}: {reason}")
+    return _variant_input(base, variant.actions)
 
+
+def _variant_input(base: Base, actions: tuple[Action, ...]) -> ForecastInput:
+    """Сборка входа: база плюс переданные действия — целиком и без правки базы.
+
+    Общая для применённого варианта и его входа без досрочек (`_entry_forecast`):
+    проверка и применение собирают вход одним и тем же кодом.
+    """
     book, one_offs, incomes = base.inp.book, list(base.inp.one_offs), list(base.inp.incomes)
     consent = base.inp.consent_to_second
-    for action in variant.actions:
+    for action in actions:
         if isinstance(action, Move):
             book = replace(book, edits=[*book.edits, _move_edit(action)])
         elif isinstance(action, Prepay):
@@ -632,13 +678,17 @@ def _remaining(book: Settlements, deal: Deal, on: date) -> Decimal:
     return deal_balance(book, deal.uid, on) or Decimal(0)
 
 
-def _budget_at(base: Base, when: date) -> Decimal | None:
-    """Бюджет досрочек месяца, в котором стоит дата; None — месяц за отчётом.
+def _budget_at(fc: Forecast | None, when: date) -> Decimal | None:
+    """Бюджет досрочек месяца в прогнозе входа; None — месяц не виден в окне входа.
 
     Бюджет, а не свободные деньги: отрицательные свободные деньги — нехватка, и
-    досрочке они ничего не дают (`CashMonth.prepay_budget`).
+    досрочке они ничего не дают (`CashMonth.prepay_budget`). Окно — у самого
+    входа: месяц за его отчётом не виден, а не нулевой — отказ по неизвестному,
+    а не разрешение.
     """
-    for cm in base.forecast.months:
+    if fc is None:
+        return None
+    for cm in fc.months:
         if cm.month == when.replace(day=1):
             return cm.prepay_budget
     return None
