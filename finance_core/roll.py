@@ -3,8 +3,11 @@
 Отвечает на вопрос «когда я выйду из долгов», считая вперёд по месяцам: проценты
 по базе начисления сделки, обязательные вхождения по графику и свободные деньги по
 выбранной стратегии. По дням внутри месяца деньги считает касса (`solver`): прокат
-сделок отдаёт ей расписание, а обратно получает бюджет досрочек — связывает их
-функция-композиция без состояния (`docs/decisions/schedule-to-cash.md`).
+сделок отдаёт ей расписание (`DealMonth.payments`), а обратно получает бюджет
+досрочек — чередует шаги сторон драйвер прохода по месяцам, и состояние каждой
+стороны между вызовами объявлено явно (`_DealsRoll` в `roll`,
+`_CashRoll`/`_CashMonth` в `solver`; `docs/decisions/schedule-to-cash.md`,
+`docs/decisions/month-by-month-convergence.md`).
 
 Правила, запертые здесь:
 
@@ -45,7 +48,7 @@ from .settlements import (I_OWE, OWED_TO_ME, Deal, Occurrence, Settlements,
                           Wallet, accrued_interest, deal_amount_at,
                           deal_balance, deal_holder_at, funding_wallet,
                           occurrences, planned_date)
-from .solver import roll_cash
+from .solver import _CashMonth, _CashRoll
 
 DAYS_IN_YEAR = Decimal(365)
 
@@ -555,149 +558,226 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
     if strategy not in STRATEGIES:
         raise ValueError(f"неизвестная стратегия: {strategy!r}")
 
-    # Срок по графику: тот же прокат сделок, но без бюджета досрочек. Окно у него
-    # своё — по графику и `max_months`: окно кассы (конец видимых доходов) его не
-    # сужает, иначе у долга, переживающего доходы, даты бы не было. Даты в этом
-    # проходе не считаны (`None`): срок по графику — это его `freedom`, а пара
-    # «дата и причина» собирается здесь и уходит в основной прокат.
-    graph = _roll_pass(book, start, Decimal(0), strategy, max_months,
-                       consent_to_second, budgets=None, income_horizon=None,
-                       window=None, payoff_by_graph=None,
-                       payoff_by_graph_reason=None)
-    if graph.start_total <= 0 and not graph.gaps:
-        # Закрывать было нечего: долг погашен до начала проката. Пробел сюда не
-        # попадает: не смоделированный долг — не закрытый, а не посчитанный.
-        payoff, reason = _month_start(start, 0), PAYOFF_CLOSED_BEFORE
-    elif graph.start_total <= 0 or graph.freedom is None:
-        # Пробелы вместо прокатываемых долгов либо долг не закрылся за
-        # отведённые месяцы: даты нет, причина названа рядом.
-        payoff, reason = None, PAYOFF_NOT_CLOSED
-    else:
-        payoff, reason = graph.freedom, None
+    # Срок по графику — отдельный проход без бюджета досрочек; он считается
+    # один раз на весь прокат, а не повторяется внутри связки с кассой.
+    graph = _graph_pass(book, start, strategy, max_months, consent_to_second)
+    payoff, reason = _payoff_pair(graph, start)
 
     return _roll_pass(book, start, monthly_extra, strategy, max_months,
                       consent_to_second, budgets, income_horizon, window,
                       payoff, reason)
 
 
-def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
-               strategy: str, max_months: int, consent_to_second: bool,
-               budgets: Mapping[int, Decimal] | None,
-               income_horizon: date | None, window: Window | None,
-               payoff_by_graph: date | None,
-               payoff_by_graph_reason: str | None) -> DealRoll:
-    """Один прокат сделок: обе даты приходят снаружи — их считает `roll_deals`."""
-    if strategy not in STRATEGIES:
-        raise ValueError(f"неизвестная стратегия: {strategy!r}")
+def _graph_pass(book: Settlements, start: date, strategy: str,
+                max_months: int, consent_to_second: bool) -> DealRoll:
+    """Срок по графику: тот же прокат сделок, но без бюджета досрочек.
 
-    closed, reasons = _rollable(book, start)
-    win = window if window is not None else roll_window(
-        book, start, max_months, income_horizon=income_horizon,
-        consent_to_second=consent_to_second)
+    Окно у него своё — по графику и `max_months`: окно кассы (конец видимых
+    доходов) его не сужает, иначе у долга, переживающего доходы, даты бы не
+    было. Даты в этом проходе не считаны (`None`): срок по графику — это его
+    `freedom`, а пара «дата и причина» собирается `_payoff_pair`.
+    """
+    return _roll_pass(book, start, Decimal(0), strategy, max_months,
+                      consent_to_second, budgets=None, income_horizon=None,
+                      window=None, payoff_by_graph=None,
+                      payoff_by_graph_reason=None)
 
-    gaps: list[Gap] = []
-    open_deals: dict[str, _Open] = {}
-    open_units: dict[str, _Unit] = {}
-    receivables: list[Deal] = []
 
-    for deal in book.deals:
-        if deal.uid in closed:
-            continue                       # уже закрыта: прокатывать нечего
-        reason = reasons[deal.uid]
-        if reason is not None:
-            gaps.append(Gap(deal.uid, reason))
-            continue
-        if deal.direction == OWED_TO_ME:
-            receivables.append(deal)
-            continue
-        open_deals[deal.uid] = _Open(
-            deal, deal_balance(book, deal.uid, _facts_at(book, deal.uid, start))
-            or Decimal(0), deal.closure_unit, deal.second_priority)
+def _payoff_pair(graph: DealRoll, start: date) -> tuple[date | None, str | None]:
+    """Дата и причина срока по графику — по прокату с нулевым бюджетом."""
+    if graph.start_total <= 0 and not graph.gaps:
+        # Закрывать было нечего: долг погашен до начала проката. Пробел сюда не
+        # попадает: не смоделированный долг — не закрытый, а не посчитанный.
+        return _month_start(start, 0), PAYOFF_CLOSED_BEFORE
+    if graph.start_total <= 0 or graph.freedom is None:
+        # Пробелы вместо прокатываемых долгов либо долг не закрылся за
+        # отведённые месяцы: даты нет, причина названа рядом.
+        return None, PAYOFF_NOT_CLOSED
+    return graph.freedom, None
 
-    for uid, opened in open_deals.items():
-        unit = opened.unit
-        if unit is None:
-            continue
-        if unit not in open_units:
-            open_units[unit] = _Unit(uid=unit, target=Decimal(0),
-                                     second=opened.deal.second_priority)
-        target = open_units[unit]
-        on = _facts_at(book, uid, start)
-        amount = deal_amount_at(book, uid, on) or Decimal(0)
-        target.members.append(uid)
-        target.target += amount
-        target.second = target.second and opened.deal.second_priority
-        # Котёл начинается с того, что уже накоплено: остаток сделки — это
-        # цель минус накопленное, поэтому накопленное — цель минус остаток.
-        target.pot += max(amount - opened.balance, Decimal(0))
 
-    for uid, unit in open_units.items():
-        unit.pot = min(unit.pot, unit.target)
-        for member in unit.members:
-            # В копилке остаток сделки не падает: он стоит, пока единица не
-            # закроется, — платежи копятся в котёл, а не в остаток.
-            open_deals[member].balance = (deal_amount_at(book, member,
-                                                         _facts_at(book, member, start))
-                                          or Decimal(0))
-            if unit.closed:
-                open_deals[member].balance = Decimal(0)
+@dataclass
+class _DealsEntry:
+    """Снимок состояния сделок на входе месяца: повтор шага начинается с него."""
+    balances: dict[str, Decimal]
+    pots: dict[str, Decimal]
+    total_interest: Decimal
 
-    until = win.until
 
-    # Вхождения: окно от начала графика и самых ранних правок — правка может
-    # увести вхождение в прокатываемый месяц из-за его начала.
-    plan: dict[str, list[Occurrence]] = {}
-    for uid, opened in open_deals.items():
-        since = start
-        rule = opened.deal.schedule
-        if rule is not None:
-            if rule.start is not None:
-                since = min(since, rule.start)
-            if rule.first is not None:
-                since = min(since, rule.first.date)
-        for edit in book.edits:
-            if edit.deal == uid:
-                since = min(since, edit.planned)
-        plan[uid] = occurrences(book, uid, since, until)
+@dataclass
+class _MonthLoad:
+    """Шаг месяца сделок: обязательные платежи и остаток пула до досрочек.
 
-    # Бюджет: обязательная нагрузка по месяцам, посчитанная на начало проката.
-    baseline: dict[int, Decimal] = {}
-    due: dict[int, list[tuple[date, str, Occurrence]]] = {}
-    for uid, found in plan.items():
-        opened = open_deals[uid]
-        if opened.second:
-            continue            # второй приоритет платится не по графику, а из свободных
-        for occ in found:
-            if not occ.payable:
+    `pool` — зафиксированная нагрузка месяца плюс бюджет: из него платятся
+    обязательные вхождения, остаток уходит в досрочки (`finish`). `paid` —
+    уплачено на этом шаге, `short` — урезано из обязательного, `interest` —
+    начислено процентов, `payments` — расписание месяца на этом шаге.
+    """
+    index: int
+    month: date
+    pool: Decimal
+    paid: Decimal
+    short: Decimal
+    interest: Decimal
+    payments: list[ScheduledPayment]
+
+
+class _DealsRoll:
+    """Прокат сделок: явное состояние между месяцами.
+
+    Состояние — открытые остатки (`open_deals`), котлы (`open_units`) и
+    зафиксированная нагрузка (`baseline` и `due`, посчитанные один раз на
+    старте). Шаг месяца разделён на два вызова: `begin()` считает проценты и
+    обязательные вхождения (их суммы зависят от остатков сделок и пула),
+    `finish()` — досрочки и итог месяца. Между ними драйвер спрашивает кассу,
+    сколько денег свободно: бюджет месяца приходит из кассы того же месяца.
+    Состояние объявлено полями — его видно глазами и можно проверить тестом,
+    а не спрятано в замыкании.
+    """
+
+    def __init__(self, book: Settlements, start: date, *, strategy: str,
+                 consent_to_second: bool, max_months: int = 600,
+                 income_horizon: date | None = None,
+                 window: Window | None = None) -> None:
+        self.book = book
+        self.start = start
+        self.strategy = strategy
+        self.consent_to_second = consent_to_second
+
+        closed, reasons = _rollable(book, start)
+        self.window = window if window is not None else roll_window(
+            book, start, max_months, income_horizon=income_horizon,
+            consent_to_second=consent_to_second)
+        # Шаг текущего месяца: его читает драйвер, если предохранитель
+        # внутреннего круга сработал и шаг остался незаконченным.
+        self.load: _MonthLoad | None = None
+
+        self.gaps: list[Gap] = []
+        self.open_deals: dict[str, _Open] = {}
+        self.open_units: dict[str, _Unit] = {}
+        self.receivables: list[Deal] = []
+
+        for deal in book.deals:
+            if deal.uid in closed:
+                continue                       # уже закрыта: прокатывать нечего
+            reason = reasons[deal.uid]
+            if reason is not None:
+                self.gaps.append(Gap(deal.uid, reason))
                 continue
-            when = _service_date(opened.deal, occ.due, start)
-            index = _month_index(start, when)
-            if index > win.months:
+            if deal.direction == OWED_TO_ME:
+                self.receivables.append(deal)
                 continue
-            due.setdefault(index, []).append((when, uid, occ))
-            baseline[index] = (baseline.get(index, Decimal(0))
-                               + _payment_amount(opened.deal, occ, opened.balance))
-    for rows in due.values():
-        rows.sort(key=lambda row: (row[0], row[1]))
+            self.open_deals[deal.uid] = _Open(
+                deal, deal_balance(book, deal.uid, _facts_at(book, deal.uid, start))
+                or Decimal(0), deal.closure_unit, deal.second_priority)
 
-    months: list[DealMonth] = []
-    total_interest = Decimal(0)
-    freedom: date | None = None
-    second_freedom: date | None = None
-    stalled = False
-    start_total = sum((o.balance for o in open_deals.values() if not o.second),
-                      Decimal(0))
-    # Второй приоритет был открыт на начало проката: закрытие пустого приоритета
-    # датой не объявляется.
-    second_start = _second_open(open_deals, open_units)
+        for uid, opened in self.open_deals.items():
+            unit = opened.unit
+            if unit is None:
+                continue
+            if unit not in self.open_units:
+                self.open_units[unit] = _Unit(uid=unit, target=Decimal(0),
+                                              second=opened.deal.second_priority)
+            target = self.open_units[unit]
+            on = _facts_at(book, uid, start)
+            amount = deal_amount_at(book, uid, on) or Decimal(0)
+            target.members.append(uid)
+            target.target += amount
+            target.second = target.second and opened.deal.second_priority
+            # Котёл начинается с того, что уже накоплено: остаток сделки — это
+            # цель минус накопленное, поэтому накопленное — цель минус остаток.
+            target.pot += max(amount - opened.balance, Decimal(0))
 
-    for index in range(1, win.months + 1):
-        month = _month_start(start, index - 1)
-        rows = due.get(index, [])
-        extra = budgets.get(index, Decimal(0)) if budgets is not None else monthly_extra
-        pool = baseline.get(index, Decimal(0)) + extra
+        for uid, unit in self.open_units.items():
+            unit.pot = min(unit.pot, unit.target)
+            for member in unit.members:
+                # В копилке остаток сделки не падает: он стоит, пока единица не
+                # закроется, — платежи копятся в котёл, а не в остаток.
+                self.open_deals[member].balance = (deal_amount_at(book, member,
+                                                                  _facts_at(book, member, start))
+                                                   or Decimal(0))
+                if unit.closed:
+                    self.open_deals[member].balance = Decimal(0)
+
+        until = self.window.until
+
+        # Вхождения: окно от начала графика и самых ранних правок — правка может
+        # увести вхождение в прокатываемый месяц из-за его начала.
+        plan: dict[str, list[Occurrence]] = {}
+        for uid, opened in self.open_deals.items():
+            since = start
+            rule = opened.deal.schedule
+            if rule is not None:
+                if rule.start is not None:
+                    since = min(since, rule.start)
+                if rule.first is not None:
+                    since = min(since, rule.first.date)
+            for edit in book.edits:
+                if edit.deal == uid:
+                    since = min(since, edit.planned)
+            plan[uid] = occurrences(book, uid, since, until)
+
+        # Зафиксированная нагрузка: обязательная нагрузка по месяцам,
+        # посчитанная на начало проката. Бюджет месяца её не пересчитывает —
+        # суммы обязательного берутся из остатков сделок.
+        baseline: dict[int, Decimal] = {}
+        due: dict[int, list[tuple[date, str, Occurrence]]] = {}
+        for uid, found in plan.items():
+            opened = self.open_deals[uid]
+            if opened.second:
+                continue            # второй приоритет платится не по графику, а из свободных
+            for occ in found:
+                if not occ.payable:
+                    continue
+                when = _service_date(opened.deal, occ.due, start)
+                index = _month_index(start, when)
+                if index > self.window.months:
+                    continue
+                due.setdefault(index, []).append((when, uid, occ))
+                baseline[index] = (baseline.get(index, Decimal(0))
+                                   + _payment_amount(opened.deal, occ, opened.balance))
+        for rows in due.values():
+            rows.sort(key=lambda row: (row[0], row[1]))
+        self.baseline = baseline
+        self.due = due
+
+        self.months: list[DealMonth] = []
+        self.total_interest = Decimal(0)
+        self.freedom: date | None = None
+        self.second_freedom: date | None = None
+        self.done = False
+        self.start_total = sum((o.balance for o in self.open_deals.values()
+                                if not o.second), Decimal(0))
+        # Второй приоритет был открыт на начало проката: закрытие пустого
+        # приоритета датой не объявляется.
+        self.second_start = _second_open(self.open_deals, self.open_units)
+
+    def entry(self) -> _DealsEntry:
+        """Снимок состояния на входе месяца: повтор шага начинается с него."""
+        return _DealsEntry(
+            {uid: o.balance for uid, o in self.open_deals.items()},
+            {uid: u.pot for uid, u in self.open_units.items()},
+            self.total_interest)
+
+    def restore(self, snap: _DealsEntry) -> None:
+        """Вернуть состояние к снимку: внутренний круг месяца начинается заново."""
+        for uid, balance in snap.balances.items():
+            self.open_deals[uid].balance = balance
+        for uid, pot in snap.pots.items():
+            self.open_units[uid].pot = pot
+        self.total_interest = snap.total_interest
+
+    def begin(self, index: int, extra: Decimal) -> _MonthLoad:
+        """Шаг месяца: проценты по базе начисления и обязательные вхождения.
+
+        Суммы обязательного берутся из остатков сделок и пула —
+        зафиксированная нагрузка месяца плюс `extra` (бюджет месяца, он
+        приходит от кассы). Шаг повторяется с новым бюджетом после `restore()`.
+        """
+        month = _month_start(self.start, index - 1)
+        rows = self.due.get(index, [])
+        pool = self.baseline.get(index, Decimal(0)) + extra
         paid = Decimal(0)
-        prepaid = Decimal(0)
         short = Decimal(0)
         payments: list[ScheduledPayment] = []
 
@@ -705,7 +785,7 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
         # Их считает settlements (`accrued_interest`): слагаемые округлены
         # там, второй раз проценты здесь не округляются.
         interest = Decimal(0)
-        for uid, opened in open_deals.items():
+        for uid, opened in self.open_deals.items():
             if opened.unit is not None or opened.balance <= 0:
                 continue                   # внутри копилки проценты не идут
             # Платежи месяца — с суммой вхождения на начало месяца: на них
@@ -717,15 +797,16 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
                                        _month_end(month), month_payments)
             opened.balance += accrued
             interest += accrued
-        total_interest += interest
+        self.total_interest += interest
         # Остаток на начало месяца: от него считается обязательный платёж процентом —
         # платёж дня на неё не влияет.
-        month_start = {uid: o.balance for uid, o in open_deals.items()}
+        month_start = {uid: o.balance for uid, o in self.open_deals.items()}
 
         # 2. Обязательные вхождения месяца — по датам, из общего бюджета.
         for when, uid, occ in rows:
-            opened = open_deals[uid]
-            unit = open_units[opened.unit] if opened.unit is not None else None
+            opened = self.open_deals[uid]
+            unit = (self.open_units[opened.unit]
+                    if opened.unit is not None else None)
             want = _payment_amount(opened.deal, occ, month_start[uid])
             if unit is not None:
                 room = unit.remaining
@@ -748,14 +829,33 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
                 opened.pay(amount)
             payments.append(ScheduledPayment(
                 date=when, amount=amount, deal=uid,
-                counterparty=deal_holder_at(book, uid, when),
+                counterparty=deal_holder_at(self.book, uid, when),
                 wallet=funding_wallet(opened.deal), planned=occ.planned,
                 unit=opened.unit,
                 # Сделка с остатком — долг, регулярный расход — жизнь.
                 debt=opened.deal.amount is not None))
+        self.load = _MonthLoad(index, month, pool, paid, short, interest,
+                               payments)
+        return self.load
+
+    def finish(self, load: _MonthLoad) -> list[ScheduledPayment]:
+        """Шаг месяца: досрочки по стратегии, второй приоритет и итог месяца.
+
+        Досрочки идут из остатка пула — обязательные уже заплачены, а
+        освободившийся платёж остаётся в бюджете. Возвращает досрочки месяца:
+        их касса проведёт после обязательных, когда деньги месяца уже
+        посчитаны.
+        """
+        month = load.month
+        pool, paid = load.pool, load.paid
+        prepaid = Decimal(0)
+        prepayments: list[ScheduledPayment] = []
+        open_deals, open_units = self.open_deals, self.open_units
+        consent = self.consent_to_second
 
         # 3. Свободные деньги — по стратегии, сначала обязательный график.
-        for target in _order(_targets(open_deals, open_units, False), strategy):
+        for target in _order(_targets(open_deals, open_units, False),
+                             self.strategy):
             if target.remaining <= 0:
                 continue
             amount = min(target.remaining, pool)
@@ -765,13 +865,16 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
             pool -= amount
             paid += amount
             prepaid += amount
-            payments.append(_prepayment(book, open_deals, open_units, target,
-                                        amount, month))
+            payment = _prepayment(self.book, open_deals, open_units, target,
+                                  amount, month)
+            load.payments.append(payment)
+            prepayments.append(payment)
 
         # 4. Второй приоритет: сам не платится — предлагается.
         second_open = _second_open(open_deals, open_units)
-        if consent_to_second:
-            for target in _order(_targets(open_deals, open_units, True), strategy):
+        if consent:
+            for target in _order(_targets(open_deals, open_units, True),
+                                 self.strategy):
                 if target.remaining <= 0:
                     continue
                 amount = min(target.remaining, pool)
@@ -781,42 +884,74 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
                 pool -= amount
                 paid += amount
                 prepaid += amount
-                payments.append(_prepayment(book, open_deals, open_units, target,
-                                            amount, month))
+                payment = _prepayment(self.book, open_deals, open_units, target,
+                                      amount, month)
+                load.payments.append(payment)
+                prepayments.append(payment)
 
         for unit in open_units.values():
             if unit.closed:
                 for member in unit.members:
                     open_deals[member].balance = Decimal(0)
 
-        months.append(DealMonth(
-            index=index, month=month,
+        self.months.append(DealMonth(
+            index=load.index, month=month,
             balances={uid: o.balance for uid, o in open_deals.items()},
             units={uid: UnitMonth(u.target, u.pot) for uid, u in open_units.items()},
             total=sum((o.balance for o in open_deals.values() if not o.second),
                       Decimal(0)),
-            interest=interest, paid=paid, prepaid=prepaid, short=short, free=pool,
-            offer=pool if second_open and not consent_to_second else Decimal(0),
-            payments=payments,
+            interest=load.interest, paid=paid, prepaid=prepaid,
+            short=load.short, free=pool,
+            offer=pool if second_open and not consent else Decimal(0),
+            payments=load.payments,
         ))
 
         first_done = _all_closed(open_deals, open_units)
         second_done = not _second_open(open_deals, open_units)
-        if first_done and freedom is None:
-            freedom = month
-        if second_start and second_done and second_freedom is None:
-            second_freedom = month
-        if first_done and (second_done or not consent_to_second):
-            break
-    else:
-        # Прокат кончился без свободы первого приоритета: закрывать было нечего
-        # или не удалось. Второй приоритет сюда не входит — о нём говорит
-        # `second_freedom`.
-        stalled = freedom is None
+        if first_done and self.freedom is None:
+            self.freedom = month
+        if self.second_start and second_done and self.second_freedom is None:
+            self.second_freedom = month
+        self.done = first_done and (second_done or not consent)
+        return prepayments
 
-    return _result(book, months, total_interest, freedom, payoff_by_graph,
-                   payoff_by_graph_reason, start_total, stalled,
-                   receivables, gaps, start, win, second_freedom)
+    def result(self, payoff_by_graph: date | None,
+               payoff_by_graph_reason: str | None) -> DealRoll:
+        """Собрать прокат: месяцы плюс то, что в них не входило.
+
+        `stalled` — прокат кончился без свободы первого приоритета: закрывать
+        было нечего или не удалось. Второй приоритет сюда не входит — о нём
+        говорит `second_freedom`.
+        """
+        return _result(self.book, self.months, self.total_interest,
+                       self.freedom, payoff_by_graph, payoff_by_graph_reason,
+                       self.start_total, self.freedom is None,
+                       self.receivables, self.gaps, self.start, self.window,
+                       self.second_freedom)
+
+
+def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
+               strategy: str, max_months: int, consent_to_second: bool,
+               budgets: Mapping[int, Decimal] | None,
+               income_horizon: date | None, window: Window | None,
+               payoff_by_graph: date | None,
+               payoff_by_graph_reason: str | None) -> DealRoll:
+    """Один прокат сделок: обе даты приходят снаружи — их считает `roll_deals`."""
+    if strategy not in STRATEGIES:
+        raise ValueError(f"неизвестная стратегия: {strategy!r}")
+
+    deals = _DealsRoll(book, start, strategy=strategy,
+                       consent_to_second=consent_to_second,
+                       max_months=max_months, income_horizon=income_horizon,
+                       window=window)
+    for index in range(1, deals.window.months + 1):
+        # Бюджет месяца приходит снаружи: из словаря связки или одним числом.
+        extra = (budgets.get(index, Decimal(0)) if budgets is not None
+                 else monthly_extra)
+        deals.finish(deals.begin(index, extra))
+        if deals.done:
+            break
+    return deals.result(payoff_by_graph, payoff_by_graph_reason)
 
 
 def _prepayment(book: Settlements, open_deals: dict[str, _Open],
@@ -916,18 +1051,42 @@ def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
                     expectations, gaps, window, second_freedom)
 
 
+#: Внутренний предел итераций месяца: бюджет месяца ↔ непрошедшее ↔ свободные
+#: деньги связаны через обещанное (непрошедший платёж не отменён, деньги на
+#: него уже обещаны), поэтому круг внутри месяца считается, а не угадывается.
+#: Предел мал: исчерпание — сигнал патологии внутри месяца, а не длинного графика.
+_MONTH_PASSES = 10
+
+
+class ConvergenceError(Exception):
+    """Внутренний круг месяца не сошёлся за предел итераций.
+
+    Это предохранитель: он ловит патологию связки внутри месяца, а не длинный
+    график. Драйвер ловит его и превращает в признак результата
+    (`MonthsRoll.unconverged`) — расчёт не роняется исключением, а прогноз
+    становится неполным.
+    """
+
+
 @dataclass
 class MonthsRoll:
-    """Прокат месяцев: долги + касса, до сходимости.
+    """Прокат месяцев: долги + касса, месяц за месяцем.
 
-    `deal_roll` — прокат сделок; `cash_months` — касса по месяцам.
-    `iterations` — сколько итераций до сходимости; `assumed` — месяцы,
-    посчитанные на допущении (после дыры прокат не останавливается).
+    `deal_roll` — прокат сделок; `cash_months` — касса по месяцам; `assumed` —
+    месяцы, посчитанные на допущении (после дыры прокат не останавливается);
+    `unconverged` — месяцы, которые не сошлись за внутренний предел: признак
+    несходимости живёт в результате и делает прогноз неполным, а расчёт не
+    роняется исключением.
     """
     deal_roll: DealRoll
     cash_months: list["CashMonth"]
-    iterations: int
     assumed: list[int] = field(default_factory=list)
+    unconverged: list[int] = field(default_factory=list)
+
+    @property
+    def converged(self) -> bool:
+        """Сошёлся ли расчёт: False — хотя бы один месяц не сошёлся за предел."""
+        return not self.unconverged
 
     @property
     def unsecured_total(self) -> Decimal:
@@ -945,8 +1104,55 @@ class MonthsRoll:
         return self.deal_roll.window
 
 
-class ConvergenceError(Exception):
-    """Расчёт не сошёлся за отведённое число итераций."""
+def _as_payment(sp: ScheduledPayment) -> Payment:
+    """Платёж проката в модели кассы: кошелёк, контрагент и признаки платежа."""
+    return Payment(
+        date=sp.date,
+        amount=sp.amount,
+        account=sp.wallet,
+        counterparty=sp.counterparty,
+        prepaid=sp.planned is None,
+        debt=sp.debt,
+    )
+
+
+def _converge_month(deals: _DealsRoll, cash: _CashRoll,
+                    index: int) -> tuple[_MonthLoad, _CashMonth]:
+    """Сходимость одного месяца: бюджет кассы ↔ обязательные сделок.
+
+    Порядок внутри месяца задан: обязательные вхождения считаются от остатков
+    сделок, касса по ним считает свободные деньги, бюджет месяца берётся из
+    кассы **того же** месяца. Бюджет входит в пул обязательных, поэтому связка
+    замкнута: бюджет → обязательные → касса → бюджет, и круг повторяется, пока
+    бюджет не перестанет меняться.
+
+    Не сошлось за `_MONTH_PASSES` шагов — внутренний предел исчерпан, и
+    `ConvergenceError` (предохранитель) ловит патологию внутри месяца. Шаг
+    остаётся в состоянии сторон (`deals.load`, `cash.step`): драйвер читает
+    оттуда последний проход и помечает месяц, а расчёт не роняет.
+    """
+    entry = deals.entry()
+    cash_entry = cash.entry()
+    budget = Decimal(0)
+    seen: list[ScheduledPayment] | None = None
+    for _ in range(_MONTH_PASSES):
+        deals.restore(entry)
+        load = deals.begin(index, extra=budget)
+        if load.payments != seen:
+            # Платежи месяца изменились — касса считает месяц заново с
+            # состояния на входе месяца; не изменились — результат прошлого
+            # прохода верен и кассу трогать не нужно.
+            cash.restore(cash_entry)
+            step = cash.month(index, [_as_payment(p) for p in load.payments])
+            step.regular()
+            seen = load.payments
+        new_budget = step.prepay_budget
+        if new_budget == budget:
+            return load, step
+        budget = new_budget
+    raise ConvergenceError(
+        f"месяц {index}: расчёт не сошёлся за {_MONTH_PASSES} итераций; "
+        f"последний бюджет: {budget}")
 
 
 def roll_months(book: Settlements, start: date,
@@ -959,15 +1165,24 @@ def roll_months(book: Settlements, start: date,
                 income_horizon: date | None = None,
                 strategy: str = AVALANCHE,
                 max_months: int = 600,
-                max_iterations: int = 100,
                 consent_to_second: bool = False,
                 main: str | None = None,
                 window: Window | None = None) -> MonthsRoll:
-    """Прокатить месяцы: долги отдают расписание, касса возвращает бюджет досрочек.
+    """Прокатить месяцы: драйвер идёт месяц за месяцем, обе стороны — шагами.
 
-    Связка замкнута: свободные деньги месяца становятся бюджетом досрочек,
-    обязательства пересчитываются — и так до сходимости. Если не сошлось —
-    ошибка с понятной причиной.
+    Порядок внутри месяца строг: обязательные вхождения сделок → касса месяца
+    (сколько денег свободно) → досрочки из этих денег → пересчёт кассы (деньги
+    ушли). Бюджет месяца приходит из кассы **того же** месяца, а не из
+    прошлого: правка бюджета не раскатывается вперёд на десятки итераций, и
+    связка стоит одного прохода по графику. Публичного предела итераций нет —
+    у зоны один предел, `max_months`.
+
+    Внутри месяца сходимость остаётся: бюджет, непрошедшее и свободные деньги
+    связаны через обещанное (непрошедший платёж не отменён, деньги на него уже
+    обещаны). Круг считает `_converge_month`; за внутренний предел не сошлось —
+    срабатывает `ConvergenceError`, драйвер ловит его и помечает месяц:
+    признак несходимости живёт в результате (`MonthsRoll.unconverged`) и
+    делает прогноз неполным, а расчёт не роняется исключением.
 
     В бюджет досрочек идёт `CashMonth.prepay_budget`, а не `free`: отрицательные
     свободные деньги — нехватка, а не бюджет, и пул месяца они не уменьшают.
@@ -1000,60 +1215,58 @@ def roll_months(book: Settlements, start: date,
     ]
     if main is None and wallets:
         main = wallets[0].uid
+    scenario = Scenario(
+        accounts=accounts,
+        income=list(incomes),
+        payments=list(one_offs),
+        transfers=list(transfers),
+        living_floor_monthly=living_floor,
+        obligation_reserve=obligation_reserve,
+        income_horizon=income_horizon,
+    )
 
-    budgets: dict[int, Decimal] = {}
-    deal_roll: DealRoll | None = None
+    # Срок по графику — отдельный проход без бюджета досрочек и без кассы; он
+    # считается один раз на весь прокат, а не повторяется на каждой
+    # сходимости, как повторяла его прежняя глобальная петля.
+    graph = _graph_pass(book, start, strategy, max_months, consent_to_second)
+    payoff, reason = _payoff_pair(graph, start)
+
+    deals = _DealsRoll(book, start, strategy=strategy,
+                       consent_to_second=consent_to_second,
+                       max_months=max_months, income_horizon=income_horizon,
+                       window=window)
+    # Касса идёт по тому же окну, что и долги: за окном вопрос кончился, и
+    # месяц за ним был бы выдумкой (600 месяцев кассы на 24-месячный долг) —
+    # окно держит драйвер ниже.
+    cash = _CashRoll(scenario, start, main)
+
     cash_months: list["CashMonth"] = []
+    unconverged: list[int] = []
+    deals_done = False
+    for index in range(1, deals.window.months + 1):
+        if deals_done:
+            # Долги закрыты: событий от сделок больше нет — касса идёт одна.
+            step = cash.month(index)
+            step.regular()
+            cash_months.append(step.finish())
+            continue
 
-    for iteration in range(1, max_iterations + 1):
-        deal_roll = roll_deals(
-            book, start, Decimal(0), strategy=strategy,
-            max_months=max_months,
-            consent_to_second=consent_to_second,
-            budgets=budgets,
-            income_horizon=income_horizon,
-            window=window,
-        )
+        try:
+            load, step = _converge_month(deals, cash, index)
+        except ConvergenceError:
+            # Признак несходимости живёт в результате: прогноз становится
+            # неполным, а расчёт не роняется исключением. Незаконченный шаг
+            # стороны читают из своего состояния — это последний проход месяца.
+            unconverged.append(index)
+            load, step = deals.load, cash.step
 
-        # Собрать платежи расписания в сценарий кассы
-        payments: list[Payment] = list(one_offs)
-        for dm in deal_roll.months:
-            for sp in dm.payments:
-                payments.append(Payment(
-                    date=sp.date,
-                    amount=sp.amount,
-                    account=sp.wallet,
-                    counterparty=sp.counterparty,
-                    prepaid=sp.planned is None,
-                    debt=sp.debt,
-                ))
+        # Досрочки уходят из остатка пула — обязательные уже заплачены, — а
+        # касса проводит их после обязательных: деньги месяца уже посчитаны.
+        prepayments = deals.finish(load)
+        deals_done = deals.done
+        cash_months.append(step.finish([_as_payment(p) for p in prepayments]))
 
-        scenario = Scenario(
-            accounts=accounts,
-            income=list(incomes),
-            payments=payments,
-            transfers=list(transfers),
-            living_floor_monthly=living_floor,
-            obligation_reserve=obligation_reserve,
-            income_horizon=income_horizon,
-        )
-        # Касса катается по тому же окну, что и долги: за окном вопрос кончился,
-        # и месяц за ним был бы выдумкой (600 месяцев кассы на 24-месячный долг).
-        cash_months = roll_cash(scenario, start,
-                                max_months=deal_roll.window.months, main=main)
-
-        # Бюджет досрочек не бывает отрицательным: свободные деньги месяца —
-        # состояние месяца и могут быть нехваткой; `prepay_budget` клампит их нулём.
-        new_budgets = {cm.index: cm.prepay_budget for cm in cash_months}
-        # Сходимость: бюджеты не изменились
-        if new_budgets == budgets:
-            break
-        budgets = new_budgets
-    else:
-        raise ConvergenceError(
-            f"расчёт не сошёлся за {max_iterations} итераций; "
-            f"последний бюджет: {budgets}"
-        )
+    deal_roll = deals.result(payoff, reason)
 
     # Месяцы после дыры — на допущении
     assumed: list[int] = []
@@ -1064,7 +1277,7 @@ def roll_months(book: Settlements, start: date,
         if hole_seen:
             assumed.append(cm.index)
 
-    return MonthsRoll(deal_roll, cash_months, iteration, assumed)
+    return MonthsRoll(deal_roll, cash_months, assumed, unconverged)
 
 
 def compare_deal_strategies(book: Settlements, start: date, monthly_extra: Decimal,

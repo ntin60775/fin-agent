@@ -26,7 +26,7 @@
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
@@ -577,6 +577,214 @@ def _month_end(day: date) -> date:
     return date(day.year, day.month, calendar.monthrange(day.year, day.month)[1])
 
 
+# --- прокат по месяцам: явное состояние -------------------------------------
+
+@dataclass
+class _CashState:
+    """Явное состояние кассы между месяцами: остатки кошельков и накопленный минимум.
+
+    Драйвер держит его между вызовами шага и показывает глазами: повтор месяца
+    (внутренняя сходимость) восстанавливает снимок `snapshot()` и начинает шаг
+    заново. Непрошедшее живёт в шаге месяца (`_CashMonth.unsecured`) — оно своё
+    у месяца и в следующий не переносится: деньги остались на кошельке, а
+    обещание кончилось вместе с месяцем.
+    """
+    balances: dict[str, Decimal]
+    living_accrued: Decimal = Decimal(0)
+
+    def snapshot(self) -> "_CashState":
+        """Снимок состояния на входе месяца: повтор начинается с него."""
+        return _CashState(dict(self.balances), self.living_accrued)
+
+    def restore(self, snap: "_CashState") -> None:
+        self.balances.clear()
+        self.balances.update(snap.balances)
+        self.living_accrued = snap.living_accrued
+
+
+class _CashRoll:
+    """Прокат кассы: месяц за месяцем, состояние переносится явно.
+
+    `month()` собирает события месяца и отдаёт шаг (`_CashMonth`); шаг
+    разбит на два вызова — обязательные события дают свободные деньги,
+    досрочки уходят после них. Прокат (`roll_cash`) гоняет шаги подряд;
+    связка с сделками (`roll_months`) вставляет между ними расчёт сделок.
+    """
+
+    def __init__(self, scenario: Scenario, start: date,
+                 main: str | None = None) -> None:
+        _validate(scenario, main)
+        self.scenario = scenario
+        self.start = start
+        self.state = _CashState({a.name: a.balance for a in scenario.accounts})
+        self.main = main if main is not None else next(iter(self.state.balances))
+        # Шаг текущего месяца: его читает драйвер, если предохранитель
+        # внутреннего круга сработал и шаг остался незаконченным.
+        self.step: "_CashMonth" | None = None
+        # Доходы: даты вычислены вызывающим по тем же правилам, что и платежи
+        self.incomes = sorted(scenario.income, key=lambda i: i.date)
+        self.payments = sorted(scenario.payments, key=lambda p: p.date)
+        self.transfers = sorted(scenario.transfers, key=lambda t: t.date)
+
+    def entry(self) -> _CashState:
+        """Снимок состояния на входе месяца."""
+        return self.state.snapshot()
+
+    def restore(self, snap: _CashState) -> None:
+        """Вернуть состояние к снимку: повтор месяца начинается с него."""
+        self.state.restore(snap)
+
+    def month(self, index: int,
+              payments: Sequence[Payment] = ()) -> "_CashMonth":
+        """Шаг месяца: события сценария в его окне плюс переданные платежи.
+
+        Шаг кладёт и в состояние (`self.step`): его читает драйвер, если
+        предохранитель внутреннего круга месяца сработал.
+        """
+        self.step = _CashMonth(self, index, payments)
+        return self.step
+
+
+class _CashMonth:
+    """Шаг одного месяца кассы: обязательные события → свободные деньги → досрочки.
+
+    Порядок задан и не меняется: `regular()` проводит обязательные события и
+    считает свободные деньги **до** досрочек — это и есть бюджет месяца;
+    `finish()` проводит досрочки (деньги уже уходят) и собирает итог месяца.
+    Между вызовами шаг держит явное состояние месяца: непрошедшее
+    (`unsecured`), дыру, оценку прожитого и свободные деньги — его видно
+    глазами и можно проверить тестом.
+    """
+
+    def __init__(self, roll: _CashRoll, index: int,
+                 payments: Sequence[Payment] = ()) -> None:
+        self.roll = roll
+        scenario = roll.scenario
+        self.index = index
+        self.month = _month_start(roll.start, index - 1)
+        self.end = _month_end(self.month)
+        self.window_start = roll.start if index == 1 else self.month
+        self.unsecured: list[Unsecured] = []
+        self.timeline: list[Step] = []
+        self.hole = Decimal(0)
+        self.hole_date: date | None = None
+        self.floor_gap: Decimal | None = None
+        self.floor_gap_date: date | None = None
+        self.free = Decimal(0)
+        # Переданные шагу платежи не входят в проверенный сценарий — они
+        # приходят месяца от месяца, и правило к ним применяется здесь.
+        if payments:
+            _validate(Scenario(accounts=list(scenario.accounts),
+                               payments=list(payments)))
+
+        regular: list[_Event] = []
+        prepaid: list[_Event] = []
+        for i in roll.incomes:
+            if self.window_start <= i.date <= self.end:
+                regular.append(_Event(i.date, KIND_INCOME, i.account, i.amount))
+        for t in roll.transfers:
+            if self.window_start <= t.date <= self.end:
+                regular.append(_Event(t.date, KIND_TRANSFER, t.from_account,
+                                      t.amount, t.to_account,
+                                      debt=False))       # перевод — не долг
+        for source in (roll.payments, payments):
+            for p in source:
+                if not self.window_start <= p.date <= self.end:
+                    continue
+                kind = KIND_PREPAID if p.prepaid else KIND_PAYMENT
+                (prepaid if p.prepaid else regular).append(
+                    _Event(p.date, kind, p.account, p.amount, debt=p.debt))
+        regular.sort(key=lambda e: (e.date, _day_order(e.kind)))
+        prepaid.sort(key=lambda e: e.date)
+        self.regular_events = regular
+        self.prepaid_events = prepaid
+
+    def regular(self) -> Decimal:
+        """Обязательные события месяца: дыра, прожитое и свободные деньги до досрочек."""
+        roll = self.roll
+        scenario = roll.scenario
+        bal = roll.state.balances
+        # Дыра месяца: нехватка приходит снаружи — остатками на начало месяца.
+        # Вход месяца — первая точка оценки floor: та же агрегатная ликвидность
+        # до событий. Одна агрегация на момент: и дыра, и floor.
+        start_total = _money_total(scenario, bal)
+        self.hole = max(-start_total, Decimal(0))
+        self.hole_date = self.window_start if self.hole > 0 else None
+        # Точки оценки floor — зеркало дыры: каждое обязательное событие меряется
+        # по совокупной ликвидности после него. Досрочка не входит: она тратит
+        # уже отложенное на жизнь и оценивается после обязательных.
+        floor_points: list[tuple[date, Decimal]] = []
+        for event in self.regular_events:
+            self.timeline += _apply_event(scenario, bal, event, self.unsecured)
+            total = _money_total(scenario, bal)
+            floor_points.append((event.date, total))
+            gap = max(-total, Decimal(0))
+            if gap > self.hole:
+                self.hole, self.hole_date = gap, event.date
+
+        # Нехватка до прожиточного минимума: точка отсчёта — `window_start`
+        # (первого месяца — `start` окна) плюс накопленный минимум месяцев до
+        # текущего (`living_accrued`), частичный месяц до даты шага считает
+        # `_assess_floor`; вход месяца оценивается по `start_total`.
+        self.floor_gap, self.floor_gap_date = _assess_floor(
+            scenario, floor_points, since=self.window_start,
+            accrued=roll.state.living_accrued, entry=start_total)
+
+        # Свободные деньги: доступные остатки минус накопленный по окну
+        # прожиточный минимум — все месяцы окна до текущего включительно: в
+        # таком порядке и копится. Дальше минус резерв обязательств и минус то,
+        # что не прошло: непрошедшее обязательство не отменено — деньги на него
+        # уже обещаны. Считаются до досрочек. Это состояние месяца: может быть
+        # отрицательным — нагрузка больше денег. Бюджетом досрочек величина
+        # становится не здесь, а через `prepay_budget`: он не бывает
+        # отрицательным. По всем кошелькам: владелец видит свои деньги целиком,
+        # а недосягаемое для кошелька сделки показывается необеспеченностью с
+        # подсказкой перевода.
+        total_money = _money_total(scenario, bal) - _unpaid(self.unsecured)
+        reserved = scenario.obligation_reserve or Decimal(0)
+        if scenario.living_floor_monthly is not None:
+            days = (self.end - self.window_start).days + 1
+            roll.state.living_accrued += (
+                scenario.living_floor_monthly * Decimal(days)
+                / DAYS_IN_MONTH).quantize(KOPEK, rounding=ROUND_CEILING)
+            self.free = total_money - roll.state.living_accrued - reserved
+        else:
+            self.free = total_money - reserved
+        return self.free
+
+    @property
+    def prepay_budget(self) -> Decimal:
+        """Бюджет досрочек месяца: свободные деньги, но не меньше нуля."""
+        return max(self.free, Decimal(0))
+
+    def finish(self, prepaid: Sequence[Payment] = ()) -> CashMonth:
+        """Досрочки месяца: свободные деньги уже посчитаны, теперь они уходят."""
+        roll = self.roll
+        scenario = roll.scenario
+        bal = roll.state.balances
+        # Досрочки приходят месяца от месяца, а не из проверенного сценария —
+        # правило к ним применяется здесь же, как и к платежам шага.
+        if prepaid:
+            _validate(Scenario(accounts=list(scenario.accounts),
+                               payments=list(prepaid)))
+        events = list(self.prepaid_events)
+        for p in prepaid:
+            if not self.window_start <= p.date <= self.end:
+                continue
+            events.append(_Event(p.date, KIND_PREPAID, p.account, p.amount,
+                                 debt=p.debt))
+        events.sort(key=lambda e: e.date)
+        for event in events:
+            self.timeline += _apply_event(scenario, bal, event, self.unsecured)
+            gap = _shortage(scenario, bal)
+            if gap > self.hole:
+                self.hole, self.hole_date = gap, event.date
+        return CashMonth(
+            index=self.index, month=self.month, balances=dict(bal),
+            hole=self.hole, hole_date=self.hole_date,
+            floor_gap=self.floor_gap, floor_gap_date=self.floor_gap_date,
+            free=self.free, unsecured=self.unsecured)
+
 
 def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
               main: str | None = None) -> list[CashMonth]:
@@ -615,114 +823,10 @@ def roll_cash(scenario: Scenario, start: date, max_months: int = 600,
     Свободный лимит кредитного кошелька идёт только под жизненный расход:
     долговой платёж (`Payment.debt`) лимитом не финансируется.
     """
-    _validate(scenario)
-    bal: dict[str, Decimal] = {a.name: a.balance for a in scenario.accounts}
-    if main is None:
-        main = next(iter(bal))
-    elif main not in bal:
-        raise ValueError(
-            f"основной кошелёк: неизвестный кошелёк {main!r}; объявлены: {sorted(bal)}")
-
-    # Доходы: даты вычислены вызывающим по тем же правилам, что и платежи
-    incomes = sorted(scenario.income, key=lambda i: i.date)
-    payments = sorted(scenario.payments, key=lambda p: p.date)
-    transfers = sorted(scenario.transfers, key=lambda t: t.date)
-
+    roll = _CashRoll(scenario, start, main)
     months: list[CashMonth] = []
-    # Накопленный прожиточный минимум окна: слагаемое каждого месяца копится
-    # в цикле — вычитается из свободных денег всех месяцев до текущего
-    # включительно. Неизвестный минимум (None) накопления не заводит.
-    living_accrued = Decimal(0)
     for index in range(1, max_months + 1):
-        month = _month_start(start, index - 1)
-        end = _month_end(month)
-        window_start = start if index == 1 else month
-
-        # События месяца: доход, перевод и платёж идут по порядку дня; досрочки —
-        # после обязательных: свободные деньги становятся известны, когда месяц
-        # прожит.
-        regular: list[_Event] = []
-        prepaid: list[_Event] = []
-        for i in incomes:
-            if window_start <= i.date <= end:
-                regular.append(_Event(i.date, KIND_INCOME, i.account, i.amount))
-        for t in transfers:
-            if window_start <= t.date <= end:
-                regular.append(_Event(t.date, KIND_TRANSFER, t.from_account,
-                                      t.amount, t.to_account,
-                                      debt=False))       # перевод — не долг
-        for p in payments:
-            if not window_start <= p.date <= end:
-                continue
-            kind = KIND_PREPAID if p.prepaid else KIND_PAYMENT
-            (prepaid if p.prepaid else regular).append(
-                _Event(p.date, kind, p.account, p.amount, debt=p.debt))
-
-        regular.sort(key=lambda e: (e.date, _day_order(e.kind)))
-        prepaid.sort(key=lambda e: e.date)
-
-        unsecured: list[Unsecured] = []
-        timeline: list[Step] = []
-        # Дыра месяца: нехватка приходит снаружи — остатками на начало месяца.
-        # Вход месяца — первая точка оценки floor: та же агрегатная ликвидность
-        # до событий. Одна агрегация на момент: и дыра, и floor.
-        start_total = _money_total(scenario, bal)
-        hole = max(-start_total, Decimal(0))
-        hole_date = window_start if hole > 0 else None
-        # Точки оценки floor — зеркало дыры: каждое обязательное событие меряется
-        # по совокупной ликвидности после него. Досрочка не входит: она тратит
-        # уже отложенное на жизнь и оценивается после обязательных.
-        floor_points: list[tuple[date, Decimal]] = []
-        for event in regular:
-            timeline += _apply_event(scenario, bal, event, unsecured)
-            total = _money_total(scenario, bal)
-            floor_points.append((event.date, total))
-            gap = max(-total, Decimal(0))
-            if gap > hole:
-                hole, hole_date = gap, event.date
-
-        # Нехватка до прожиточного минимума: точка отсчёта — `window_start`
-        # (первого месяца — `start` окна) плюс накопленный минимум месяцев до
-        # текущего (`living_accrued`), частичный месяц до даты шага считает
-        # `_assess_floor`; вход месяца оценивается по `start_total`.
-        floor_gap, floor_gap_date = _assess_floor(
-            scenario, floor_points, since=window_start, accrued=living_accrued,
-            entry=start_total)
-
-        # Свободные деньги: доступные остатки минус накопленный по окну
-        # прожиточный минимум — все месяцы окна до текущего включительно:
-        # прожитое прошлых месяцев остатки не теряют, и без накопления
-        # свободные деньги месяцев ≥ 2 завышались ровно на его сумму. Дальше
-        # минус резерв обязательств и минус то, что не прошло: непрошедшее
-        # обязательство не отменено — деньги на него уже обещаны. Считаются до
-        # досрочек. Это состояние месяца: может быть отрицательным — нагрузка
-        # больше денег. Бюджетом досрочек величина становится не здесь, а через
-        # `CashMonth.prepay_budget`: он не бывает отрицательным.
-        # По всем кошелькам: владелец видит свои деньги целиком, а недосягаемое
-        # для кошелька сделки показывается необеспеченностью с подсказкой перевода.
-        total_money = _money_total(scenario, bal) - _unpaid(unsecured)
-        reserved = scenario.obligation_reserve or Decimal(0)
-        if scenario.living_floor_monthly is not None:
-            days = (end - window_start).days + 1
-            living_accrued += (scenario.living_floor_monthly * Decimal(days)
-                               / DAYS_IN_MONTH).quantize(KOPEK, rounding=ROUND_CEILING)
-            free = total_money - living_accrued - reserved
-        else:
-            free = total_money - reserved
-
-        # Досрочки — после обязательных: свободные деньги уже посчитаны, второй
-        # раз в бюджет они не попадут, а касса увидит, что деньги ушли.
-        for event in prepaid:
-            timeline += _apply_event(scenario, bal, event, unsecured)
-            gap = _shortage(scenario, bal)
-            if gap > hole:
-                hole, hole_date = gap, event.date
-
-        months.append(CashMonth(
-            index=index, month=month, balances=dict(bal),
-            hole=hole, hole_date=hole_date,
-            floor_gap=floor_gap, floor_gap_date=floor_gap_date,
-            free=free, unsecured=unsecured,
-        ))
-
+        step = roll.month(index)
+        step.regular()
+        months.append(step.finish())
     return months
