@@ -2,9 +2,10 @@
 node_type: ticket
 title: Проход по месяцам — сходимость без глобальной петли
 service: _platform
-status: draft
+status: archived
 updated: 2026-09-25
 links:
+  documents: [../../../finance_core/roll.py, ../../../finance_core/solver.py, ../../../finance_core/forecast.py, ../../../finance_core/actions.py, ../../../finance_core/README.md, ../../../CONTEXT.md, ../../decisions/README.md, ../../decisions/schedule-to-cash.md, ../../decisions/month-by-month-convergence.md, ../../../tests/test_months.py, ../../../tests/test_forecast.py]
   part_of: [README.md]
   depends_on: [01-window-end-reason.md, 02-payoff-by-graph.md, 03-accrual-one-function.md]
 ---
@@ -61,9 +62,40 @@ links:
 **Blocked by:** 01 (окно), 02 (обе даты), 03 (функция начисления) — чтобы не переписывать связку
 дважды.
 
-- [ ] Синтетика: 20-летний долг со свободными деньгами (окно 240 месяцев) считается и даёт дату закрытия; сегодня тот же сценарий падает с «расчёт не сошёлся».
-- [ ] Время линейно по месяцам: прокат на 240 месяцах укладывается в 0,5 с, а время на 240 месяцах не больше чем вдвое превышает время на 120 (сегодня с досрочками — 10,1 с при квадратичном росте).
-- [ ] Признак несходимости виден в результате и делает прогноз неполным; тест на предохранитель остаётся и по-прежнему зелёный.
-- [ ] Предел итераций исчез из публичного входа: зона не может его задать.
-- [ ] Сходимость месяца проверена тестом: непрошедшее уменьшает свободные деньги, бюджет месяца сходится, досрочки уходят из остатка.
-- [ ] `python3 -m pytest tests/` зелёные; `finance_core/README.md` описывает проход по месяцам вместо петли; решение о сходимости записано в `docs/decisions/`.
+## Приёмка
+
+Пройдено: `python3 -m pytest tests/` — 281 passed, `gitmark lint` — чисто, доки
+(`finance_core/README.md`, `CONTEXT.md`) синхронизированы с кодом.
+
+- [x] Синтетика: 20-летний долг со свободными деньгами (окно 240 месяцев) считается и даёт дату закрытия; сегодня тот же сценарий падает с «расчёт не сошёлся».
+  — `tests/test_months.py::test_twenty_year_debt_with_free_money_gives_the_closing_date`
+  (свобода 2034-10-01, окно 240, признак сходимости чист); на main тот же сценарий падал
+  `ConvergenceError: расчёт не сошёлся за 100 итераций`
+- [x] Время линейно по месяцам: прокат на 240 месяцах укладывается в 0,5 с, а время на 240 месяцах не больше чем вдвое превышает время на 120 (сегодня с досрочками — 10,1 с при квадратичном росте).
+  — `tests/test_months.py::test_roll_time_is_linear_in_months`; замеры ревьюера:
+  t(120)=0,0202 с, t(240)=0,0332 с, отношение 1,65 — оба условия приёмки выполнены
+- [x] Признак несходимости виден в результате и делает прогноз неполным; тест на предохранитель остаётся и по-прежнему зелёный.
+  — `tests/test_months.py::test_roll_months_marks_no_convergence` (признак в результате,
+  прокат досчитан, а не брошен), `tests/test_months.py::test_month_fuse_raises_when_the_inner_limit_is_exhausted`
+  (`ConvergenceError` на внутреннем пределе месяца),
+  `tests/test_forecast.py::test_non_convergence_makes_the_forecast_incomplete`
+  (прогноз с признаком неполон); предохранитель достижим без monkeypatch — процент 5 % +
+  ставка 12 % + деньги впритык: 10 проходов месяца, `unconverged=[1]`, расчёт доведён
+  (`tests/test_months.py::test_changed_payments_recompute_the_month_cash_from_its_entry`)
+- [x] Предел итераций исчез из публичного входа: зона не может его задать.
+  — `tests/test_months.py::test_iteration_limit_is_gone_from_the_entry`:
+  `roll_months()` и `ForecastInput` отвергают `max_iterations` с `TypeError`
+- [x] Сходимость месяца проверена тестом: непрошедшее уменьшает свободные деньги, бюджет месяца сходится, досрочки уходят из остатка.
+  — `tests/test_months.py::test_month_budget_comes_from_the_cash_of_the_same_month`
+  (бюджет равен свободным деньгам кассы того же месяца, досрочка уходит из остатка,
+  непрошедшее уменьшает `free`),
+  `tests/test_months.py::test_roll_months_prepayment_leaves_the_cash`,
+  `tests/test_months.py::test_roll_cash_prepaid_comes_after_free`
+- [x] `python3 -m pytest tests/` зелёные; `finance_core/README.md` описывает проход по месяцам вместо петли; решение о сходимости записано в `docs/decisions/`.
+  — 281 passed; раздел «Прокат месяцев» описывает шаги сторон и порядок внутри месяца;
+  решение — `docs/decisions/month-by-month-convergence.md`, проиндексировано
+  (`docs/decisions/README.md`), линт KB чист
+
+Независимо подтверждено: 27 сценариев ДО/ПОСЛЕ без числовых расхождений; три длинных
+окна (120/240/600), падавших на main с `ConvergenceError`, считаются; проход по графику —
+1 вызов за прогон.
