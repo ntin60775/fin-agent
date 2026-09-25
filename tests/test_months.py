@@ -31,7 +31,7 @@ def _wallet(uid: str = "main", balance: D = D("0"), **kw) -> Wallet:
 def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     from finance_core import ScheduleRule
     base = dict(uid=uid, title="Заём", counterparty="банк", amount=amount,
-                rate_per_year=D("0"), wallet="main")
+                start=START, rate_per_year=D("0"), wallet="main")
     base.update(kw)
     return Deal(**base)
 

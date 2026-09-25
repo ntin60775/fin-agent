@@ -11,7 +11,7 @@ from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           SKIPPED, Counterparty, Deal, FirstPayment,
                           Movement, OccurrenceEdit, ScheduleRule, Settlements,
                           Wallet, accrued_interest, compare_deal_strategies,
-                          occurrences, roll_deals, validate)
+                          deal_balance, occurrences, roll_deals, validate)
 from finance_core import (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
                           WINDOW_MONTH_CAP, roll_window)
 
@@ -26,7 +26,7 @@ def _counterparty(uid: str = "банк", name: str = "Банк", **kw) -> Counte
 
 def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     base = dict(uid=uid, title="Заём", counterparty="банк", amount=amount,
-                rate_per_year=D("0"), wallet="карта")
+                start=START, rate_per_year=D("0"), wallet="карта")
     base.update(kw)
     return Deal(**base)
 
@@ -404,6 +404,43 @@ def test_unit_is_incomplete_when_a_member_is_a_gap():
     assert "ставка" in reasons["первый"]            # у кого пробел — своя причина
     assert "единица закрытия" in reasons["второй"]  # а чистого тянет за собой единица
     assert roll.months[0].total == D("0")
+
+
+def test_unit_pot_on_opening_is_what_was_paid():
+    """Котёл на открытие окна — уплаченное по участнику, а не цель минус канон.
+
+    Участник с историей платежей и ставкой: канон включает проценты, а в
+    копилку проценты не копятся — туда идут деньги. Поэтому котёл считается от
+    тела на открытие окна, той же датой, что и остаток участника.
+    """
+    deal = _deal(uid="участник", amount=D("20000"), start=date(2025, 6, 1),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 closure_unit="копилка", schedule=_rule(payment=D("1000")))
+    book = _book(deal, movements=[Movement(date(2025, 12, 15), D("5000"),
+                                           "участник")])
+    validate(book)
+    # Канон на конец декабря: 20 000 − 5 000 + проценты 2 973,70.
+    assert deal_balance(book, "участник", date(2025, 12, 31)) == D("17973.70")
+    roll = roll_deals(book, START, D(0), max_months=1)
+    unit = roll.months[0].units["копилка"]
+    assert unit.target == D("20000")
+    assert unit.pot == D("6000")            # 5 000 уплачено до окна + 1 000 января
+    assert unit.remaining == D("14000")
+
+
+def test_unit_pot_takes_an_in_window_movement_in_its_own_month():
+    """Движение внутри окна входит в котёл своим месяцем — и ровно один раз."""
+    deal = _deal(uid="участник", amount=D("20000"), start=date(2025, 6, 1),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 closure_unit="копилка", schedule=_rule(payment=D("1000")))
+    book = _book(deal,
+                 movements=[Movement(date(2025, 12, 15), D("5000"), "участник"),
+                            Movement(date(2026, 1, 10), D("500"), "участник")])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=1)
+    unit = roll.months[0].units["копилка"]
+    assert unit.pot == D("6500")            # 5 000 + 500 января + 1 000 платежа
+    assert unit.remaining == D("13500")
 
 
 # --- требования и приоритеты -----------------------------------------------
@@ -865,6 +902,121 @@ def test_a_full_month_through_the_function_equals_the_roll_number():
         seen.append(roll.months[0].interest)
     # Прежние числа проката: 11 × 100 + 20 × 50 по дневной и 120 000 × 0,24 / 12.
     assert seen == [D("2100.00"), D("2400.00")]
+
+
+# --- канон остатка ---------------------------------------------------------
+
+def test_roll_balance_and_the_canon_are_one_number_at_the_month_end():
+    """Остаток проката на конец месяца — то же число, что расчётный остаток.
+
+    Долг 100 000 под 24 %, платёж 5 000 двенадцать раз: до канона числа
+    расходились ровно на накопленные проценты (59 763,73 против 40 000),
+    потому что расчётный остаток ставку не читал.
+    """
+    deal = _deal(amount=D("100000"), start=START, rate_per_year=D("0.24"),
+                 rate_per_day=None,
+                 schedule=_rule(days=(12,), payment=D("5000"), count=12,
+                                start=START, shift_weekend=False))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=12)
+    assert roll.months[11].balances["заём"] == D("59763.73")
+    # Платежи проката записываются движениями — так их записывает зона, и на
+    # них уже не прокат считает, а канон остатка.
+    for month in roll.months:
+        for payment in month.payments:
+            book.movements.append(Movement(payment.date, payment.amount, "заём",
+                                           occurrence=payment.planned))
+    assert deal_balance(book, "заём", date(2026, 12, 31)) == D("59763.73")
+    assert deal_balance(book, "заём", date(2026, 12, 31)) == \
+        roll.months[11].balances["заём"]
+
+
+def test_the_roll_opens_with_the_canon_and_a_mid_month_date_accrues_by_days():
+    """Прокат открывается каноном на начало окна; дата внутри месяца — по дням.
+
+    Долг начался раньше окна (01.06.2025), поэтому в основании проката лежит
+    канон с начисленным за прошедшие месяцы. Второй приоритет без согласия не
+    платится — прокату остаётся начисление, и оба числа видны насквозь.
+    """
+    deal = _deal(amount=D("100000"), start=date(2025, 6, 1),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 second_priority=True, schedule=_rule(days=(20,), payment=D("1000")))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=1)
+    # Основание проката — канон на конец декабря: 100 000 плюс начисленное
+    # за семь месяцев (окно открывается 01.01, сам январь прокат начислит).
+    assert deal_balance(book, "заём", date(2025, 12, 31)) == D("114868.56")
+    # Январь начисляется на этом основании: 114 868,56 × 0,24 / 12.
+    assert roll.months[0].interest == D("2297.37")
+    # Дата внутри месяца — пропорционально дням: 15 из 31 дня января.
+    assert deal_balance(book, "заём", date(2026, 1, 15)) == D("115980.19")
+    # Месяц на границе — ровно то число, что дал прокат.
+    assert roll.months[0].balances["заём"] == D("117165.93")
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == \
+        roll.months[0].balances["заём"]
+
+
+def test_a_debt_start_inside_the_window_accrues_only_from_it():
+    """Долг начался внутри окна — до его начала начисленного нет, а не ошибка.
+
+    `Deal.start` (15.04) и `ScheduleRule.start` (01.06) — разные вопросы:
+    ряд платежей начинается позже, а долг существует с середины апреля, и до
+    этой даты баланс равен телу.
+    """
+    deal = _deal(amount=D("100000"), start=date(2026, 4, 15),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 schedule=_rule(days=(20,), payment=D("1000"),
+                                start=date(2026, 6, 1)))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=5)
+    # До начала долга баланс равен телу, начисленного нет.
+    assert deal_balance(book, "заём", date(2026, 3, 31)) == D("100000")
+    assert [m.interest for m in roll.months[:3]] == [D("0"), D("0"), D("0")]
+    # Апрель начисляет с 15-го: 16 дней из 30, и это тот же отрезок в каноне.
+    assert roll.months[3].interest == D("1066.67")
+    assert deal_balance(book, "заём", date(2026, 4, 30)) == \
+        roll.months[3].balances["заём"]
+    assert deal_balance(book, "заём", date(2026, 5, 31)) == \
+        roll.months[4].balances["заём"]
+
+
+def test_a_payment_before_the_debt_start_stays_in_the_accrual_base():
+    """Платёж до начала долга в том же месяце уменьшает базу — как в каноне.
+
+    Долг начался 31-го, а платёж 20-го уже уменьшил тело: проценты за 31-е
+    идут на 99 000, а не на 100 000, и прокат берёт ту же базу.
+    """
+    deal = _deal(amount=D("100000"), start=date(2026, 1, 31),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 schedule=_rule(days=(20,), payment=D("1000")))
+    book = _book(deal, movements=[Movement(date(2026, 1, 20), D("1000"), "заём",
+                                           occurrence=date(2026, 1, 20))])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=1)
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == D("99063.87")
+    assert roll.months[0].balances["заём"] == \
+        deal_balance(book, "заём", date(2026, 1, 31))
+
+
+def test_an_in_window_movement_enters_the_months_accrual():
+    """Движение месяца участвует в базе дневной ставки, а не только в остатке.
+
+    Января без вхождений: платёж 5-го уменьшает базу с этого дня, и прокат
+    считает те же 4 × 100 плюс 27 × 99, что и канон.
+    """
+    deal = _deal(amount=D("100000"), start=START, rate_per_year=None,
+                 rate_per_day=D("0.001"),
+                 schedule=_rule(days=(20,), payment=D("5000"),
+                                start=date(2026, 2, 1)))
+    book = _book(deal, movements=[Movement(date(2026, 1, 5), D("1000"), "заём")])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=1)
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == D("102073")
+    assert roll.months[0].balances["заём"] == \
+        deal_balance(book, "заём", date(2026, 1, 31))
 
 
 # --- месяц целиком ---------------------------------------------------------

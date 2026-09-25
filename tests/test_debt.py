@@ -20,7 +20,7 @@ def _counterparty(uid: str = "банк", name: str = "Банк", **kw) -> Counte
 
 def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     base = dict(uid=uid, title="Заём", counterparty="банк", amount=amount,
-                rate_per_year=D("0"), wallet="карта")
+                start=START, rate_per_year=D("0"), wallet="карта")
     base.update(kw)
     return Deal(**base)
 
@@ -69,10 +69,13 @@ def test_daily_rate_uses_calendar_days():
                  schedule=_rule(payment=D("20000")))
     jan = roll_deals(_book(deal), date(2026, 1, 1), D(0), max_months=1)
     feb = roll_deals(_book(deal), date(2026, 2, 1), D(0), max_months=1)
-    # Платёж 20-го числа сдвигает остаток на день начисления:
-    # январь — 19×100 + 12×80 = 2860, февраль — 19×100 + 9×80 = 2620.
+    # Платёж 20-го числа сдвигает остаток на день начисления: январь —
+    # 19×100 + 12×80 = 2860. Февральский прокат стартует с канона на конец
+    # января, а в книге движений нет (январский платёж — дело самого проката),
+    # поэтому база — 100 000 + 31×100 = 103 100, и февраль —
+    # 19×103,10 + 9×83,10 = 2706,80: январь всё так дороже февраля.
     assert jan.months[0].interest == D("2860.00")
-    assert feb.months[0].interest == D("2620.00")
+    assert feb.months[0].interest == D("2706.80")
 
 
 def test_annual_rate_normalizes_daily_debt():

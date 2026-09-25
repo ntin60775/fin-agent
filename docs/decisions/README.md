@@ -3,7 +3,7 @@ node_type: index
 title: Решения
 service: _platform
 status: active
-updated: 2026-09-25
+updated: 2026-09-26
 links:
   part_of: [../README.md]
 ---
@@ -22,6 +22,7 @@ links:
 - [movement-settles-occurrence.md](movement-settles-occurrence.md) — факт по вхождению несёт движение, а не правка
 - [schedule-to-cash.md](schedule-to-cash.md) — долги отдают кассе расписание, касса возвращает бюджет досрочек
 - [month-by-month-convergence.md](month-by-month-convergence.md) — сходимость связки — проходом по месяцам, а не глобальной петлёй
+- [deal-balance-canon.md](deal-balance-canon.md) — остаток сделки один: долг на дату = тело − движения + начисленное
 - [single-free-money-basis.md](single-free-money-basis.md) — свободные деньги — одно число на одном базисе: потолок и остаток бюджета снесены, предложение — срез
 - [card-schemas.md](card-schemas.md) — карточки покрыты схемами через frontmatter, проза свободна
 - [what-means-out.md](what-means-out.md) — «выбрался» — это покрытые расходы, а не закрытые долги
