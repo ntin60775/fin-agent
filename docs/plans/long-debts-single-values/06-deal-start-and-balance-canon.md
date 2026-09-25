@@ -3,8 +3,9 @@ node_type: ticket
 title: Начало долга и канон остатка
 service: _platform
 status: draft
-updated: 2026-09-25
+updated: 2026-09-26
 links:
+  documents: [../../../finance_core/settlements.py, ../../../finance_core/roll.py, ../../../finance_core/actions.py, ../../../finance_core/README.md, ../../../CONTEXT.md, ../../decisions/README.md, ../../decisions/deal-balance-canon.md, ../../../tests/test_roll.py, ../../../tests/test_settlements.py, ../../../tests/test_debt.py, ../../../tests/test_actions.py]
   part_of: [README.md]
   depends_on: [03-accrual-one-function.md, 04-month-by-month-roll.md]
 ---
@@ -66,9 +67,77 @@ links:
 **Blocked by:** 03 (функция начисления), 04 (перестроенный прокат, в котором меняется
 инициализация).
 
-- [ ] Синтетика: долг со ставкой — остаток проката на конец месяца и расчётный остаток на ту же дату совпадают до копейки (сегодня расходятся на 19 763,73 при теле 100 000 и ставке 24 %).
-- [ ] Синтетика: дата внутри месяца — начислено пропорционально дням, и месяц на границе даёт ровно то же число, что прокат.
-- [ ] Проверка падает с понятным текстом на сделке со ставкой без начала долга.
-- [ ] Беспроцентная сделка и регулярный расход считаются без начала долга, и это не ошибка.
-- [ ] Синтетика: передача долга не двигает начало долга и не сбрасывает накопленное начисление.
-- [ ] `python3 -m pytest tests/` зелёные; `finance_core/README.md`, `CONTEXT.md` («Начало долга» и его отличие от начала ряда платежей) и решение в `docs/decisions/`.
+## Приёмка
+
+Пройдено: `python3 -m pytest tests/` — 300 passed (288 на main + 12 новых),
+`gitmark lint` — чисто, доки (`finance_core/README.md`, `CONTEXT.md`) синхронизированы
+с кодом, решение записано и проиндексировано.
+
+- [x] Синтетика: долг со ставкой — остаток проката на конец месяца и расчётный остаток на ту же дату совпадают до копейки (сегодня расходятся на 19 763,73 при теле 100 000 и ставке 24 %).
+  — расхождение воспроизведено на main: прокат 59 763,73 против `deal_balance` 40 000
+  (разница ровно 19 763,73); после правки оба числа 59 763,73 —
+  `tests/test_roll.py::test_roll_balance_and_the_canon_are_one_number_at_the_month_end`
+- [x] Синтетика: дата внутри месяца — начислено пропорционально дням, и месяц на границе даёт ровно то же число, что прокат.
+  — `tests/test_roll.py::test_the_roll_opens_with_the_canon_and_a_mid_month_date_accrues_by_days`:
+  15.01 → 115 980,19 (15/31 января от основания 114 868,56), 31.01 → 117 165,93 =
+  `roll.months[0].balances`; там же `test_a_debt_start_inside_the_window_accrues_only_from_it`
+  (долг с 15.04: январь–март — 0, апрель — 16/30 дня)
+- [x] Проверка падает с понятным текстом на сделке со ставкой без начала долга.
+  — `tests/test_settlements.py::test_a_rated_deal_without_a_debt_start_falls_with_a_clear_text`:
+  «сделка 'заём': ставка и сумма есть, а начала долга нет — без него долг на дату не
+  считается…»
+- [x] Беспроцентная сделка и регулярный расход считаются без начала долга, и это не ошибка.
+  — `tests/test_settlements.py::test_a_free_deal_and_a_regular_expense_never_ask_for_a_debt_start`:
+  `validate` проходит, канон беспроцентной — тело минус движения (7 000), у регулярного
+  расхода остатка нет (`None`)
+- [x] Синтетика: передача долга не двигает начало долга и не сбрасывает накопленное начисление.
+  — `tests/test_settlements.py::test_an_assignment_neither_moves_the_debt_start_nor_resets_the_accrual`:
+  `start` 01.06.2025 не изменился, 28.02 → 119 509,25, 31.03 → 142 299,44 — дельта
+  01.03 входит в базу марта (перезапуск от даты передачи дал бы 122 400,00)
+- [x] `python3 -m pytest tests/` зелёные; `finance_core/README.md`, `CONTEXT.md` («Начало долга» и его отличие от начала ряда платежей) и решение в `docs/decisions/`.
+  — 300 passed; `CONTEXT.md` — термин «Начало долга» рядом с «Правилом графика» и
+  обновлённый «Расчётный остаток»; обещание тикета 03 в `finance_core/README.md` и в
+  докстринге `accrued_interest` приведено к настоящему времени; решение —
+  `docs/decisions/deal-balance-canon.md`, строка в `docs/decisions/README.md`
+
+**Механические правки фикстур:** `start=START` в хелперах `_deal` пяти файлов тестов
+(`test_roll`, `test_debt`, `test_months`, `test_forecast`, `test_actions`), `start=START` у
+ставной сделки в `test_the_model_holds_together`, `start=action.date` у сделки-моста
+(`finance_core/actions.py` — её создаёт движок).
+
+**Правленые ожидания (следствие канона, не зелень):** `deal_balance` теперь читает ставку —
+`test_a_prepay_takes_the_months_free_money_and_more_is_impossible` 1 500 → 1 857,50 (тело
+5 000 − досрочка 3 500 + 15 дней дневной ставки); `test_the_model_holds_together` 50 000 →
+50 026,88 (долг начался в этот же день — на конец дня уже день начисления). Прокат открывается
+каноном, поэтому в его основании теперь накопленное до окна —
+`test_daily_rate_uses_calendar_days` февраль 2 620,00 → 2 706,80. Досрочка сверх остатка
+меряется тем же каноном — `test_a_prepay_respects_the_closure_unit` просит «больше остатка»
+для 1 076 при остатке 1 075,00: прежние 1 001 в канон не упирались, сумма вернула
+минимальность порога (2 000 не меняло сути, но и не проверяло границу).
+
+**Раунд ревью (блокирующие B1, B2 и хвосты N1–N6)** — правки в том же ворктри:
+
+- B1: котёл копилки инициализируется уплаченным (цель минус тело на открытие
+  окна), а не каноном — `finance_core/roll.py`, `_DealsRoll.__init__`; тесты
+  `tests/test_roll.py::test_unit_pot_on_opening_is_what_was_paid` (котёл 6 000,
+  остаток до цели 14 000) и `test_unit_pot_takes_an_in_window_movement_in_its_own_month`
+  (6 500 / 13 500 — движение внутри окна входит один раз).
+- B2: дельта передачи входит в базу `accrued_interest` по своей дате
+  (`deltas`) и проводится в баланс проката в месяц передачи —
+  `finance_core/settlements.py`, `finance_core/roll.py`; тесты
+  `tests/test_settlements.py::test_an_assignment_before_the_window_enters_the_accrual_base`
+  (136 517,21 на открытии, 138 247,55 на 31.01) и
+  `test_an_assignment_inside_the_window_enters_the_accrual_of_its_month`
+  (139 239,04 на 31.03 у обоих носителей).
+- N1: платежи до начала долга вычитаются из базы и в прокате —
+  `tests/test_roll.py::test_a_payment_before_the_debt_start_stays_in_the_accrual_base`
+  (99 063,87 = 99 063,87).
+- N3: движение внутри окна входит в базу дневной ставки —
+  `tests/test_roll.py::test_an_in_window_movement_enters_the_months_accrual`
+  (102 073 = 102 073).
+- N2: докстринг `_facts_at` (`finance_core/roll.py`) назвал все три своих
+  употребления — закрытость, цель копилки, плоский остаток участника.
+- N4: исключение про участника копилки названо в `finance_core/README.md` и в
+  `docs/decisions/deal-balance-canon.md`; N5 — в «Последствиях» решения
+  сказано, что поля `start` в зоне пока нет и сценарные тесты зоны упадут на
+  валидации; N6 — порог досрочки вернул минимальность (1 076).

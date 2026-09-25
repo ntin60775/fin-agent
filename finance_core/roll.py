@@ -41,14 +41,14 @@ from __future__ import annotations
 import calendar
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from .model import Account, Income, Payment, Scenario, Transfer, kopek
 from .settlements import (I_OWE, OWED_TO_ME, Deal, Occurrence, Settlements,
-                          Wallet, accrued_interest, deal_amount_at,
-                          deal_balance, deal_holder_at, funding_wallet,
-                          occurrences, planned_date)
+                          Wallet, _principal_left, _signed, accrued_interest,
+                          deal_amount_at, deal_balance, deal_holder_at,
+                          funding_wallet, occurrences, planned_date)
 from .solver import _CashMonth, _CashRoll
 
 DAYS_IN_YEAR = Decimal(365)
@@ -365,15 +365,37 @@ def _broken_units(book: Settlements, reasons: dict[str, str | None]) -> dict[str
 def _facts_at(book: Settlements, deal_uid: str, start: date) -> date:
     """Дата, на которую остаток сделки — факт: движения это факт, когда бы ни случились.
 
-    Прокат считает вперёд от `start`, но платёж, случившийся позже начала (начало
-    месяца, а платёж — в середине), уже факт: остаток на начало обязан его видеть,
-    иначе вхождение, исполненное заранее, посчитается дважды.
+    Нужна там, где важен **последний известный факт, а не момент окна**:
+    закрытость сделки (`_rollable` — съедено ли тело к последнему движению),
+    цель копилки и плоский остаток участника (их считают от тела на ту же
+    дату). Состояние открытой сделки при этом считается не здесь, а каноном на
+    открытие окна (`_opened_balance`): закрытость отвечает на вопрос «есть ли
+    что прокатывать», состояние — на вопрос «сколько долгу».
     """
     on = start
     for m in book.movements:
         if m.deal == deal_uid and m.date > on:
             on = m.date
     return on
+
+
+def _opening(start: date) -> date:
+    """Момент открытия окна — конец дня перед первым месяцем окна.
+
+    Первый месяц прокат начисляет целиком (с его первого числа), поэтому в
+    остатке на входе лежит всё, что прокату ещё предстоит начислить само. Для
+    окна, начинающегося с первого числа, это и есть конец дня до начала окна.
+    """
+    return _month_start(start, 0) - timedelta(days=1)
+
+
+def _opened_balance(book: Settlements, deal_uid: str, start: date) -> Decimal:
+    """Остаток на открытие окна — тот же канон, что и у расчётного остатка.
+
+    Канон на дату последнего движения дал бы состояние, не равное канону ни на
+    одну дату окна, — оно и не канон вовсе.
+    """
+    return deal_balance(book, deal_uid, _opening(start)) or Decimal(0)
 
 
 # --- окно проката -----------------------------------------------------------
@@ -442,10 +464,17 @@ def _rollable(book: Settlements,
     Закрытое прокатывать нечего — и пробелом оно не считается: сначала
     закрытость, потом всё остальное. Иначе погашенная сделка без ставки
     объявила бы пробелом всю свою копилку и живые долги не прокатались бы.
+
+    Закрытость решается по телу (`_principal_left`), а не по канону остатка:
+    вхождения гасят тело, а начисленное вхождением не является. Сделка с
+    съеденным телом не возвращается в прокат даже с несписанными процентами —
+    иначе у неё не осталось бы вхождения, которым их заплатить, и прокат
+    тянул бы её до предела месяцев. «Сколько долгу на дату» — другой вопрос,
+    и на него отвечает `deal_balance`.
     """
     closed = {d.uid for d in book.deals
               if d.amount is not None and d.direction == I_OWE
-              and (deal_balance(book, d.uid, _facts_at(book, d.uid, start))
+              and (_principal_left(book, d.uid, _facts_at(book, d.uid, start))
                    or Decimal(0)) <= 0}
     reasons: dict[str, str | None] = {
         d.uid: (None if d.uid in closed else _gap_reason(d)) for d in book.deals}
@@ -667,8 +696,8 @@ class _DealsRoll:
                 self.receivables.append(deal)
                 continue
             self.open_deals[deal.uid] = _Open(
-                deal, deal_balance(book, deal.uid, _facts_at(book, deal.uid, start))
-                or Decimal(0), deal.closure_unit, deal.second_priority)
+                deal, _opened_balance(book, deal.uid, start),
+                deal.closure_unit, deal.second_priority)
 
         for uid, opened in self.open_deals.items():
             unit = opened.unit
@@ -683,9 +712,15 @@ class _DealsRoll:
             target.members.append(uid)
             target.target += amount
             target.second = target.second and opened.deal.second_priority
-            # Котёл начинается с того, что уже накоплено: остаток сделки — это
-            # цель минус накопленное, поэтому накопленное — цель минус остаток.
-            target.pot += max(amount - opened.balance, Decimal(0))
+            # Котёл начинается с уже накопленного, а накопленное — уплаченное:
+            # цель минус тело, не минус канон. Проценты в копилку не копятся
+            # (платятся они остатком участника, а не котлом), дата — та же, что
+            # у открытия окна: движения внутри окна придут в котёл своим
+            # месяцем через `unit.pay`, второй раз их считать нельзя.
+            body = deal_amount_at(book, uid, _opening(start)) or Decimal(0)
+            target.pot += max(
+                body - (_principal_left(book, uid, _opening(start)) or Decimal(0)),
+                Decimal(0))
 
         for uid, unit in self.open_units.items():
             unit.pot = min(unit.pot, unit.target)
@@ -782,20 +817,70 @@ class _DealsRoll:
 
         # 1. Проценты: до платежей месяца, по базе начисления каждой сделки.
         # Их считает settlements (`accrued_interest`): слагаемые округлены
-        # там, второй раз проценты здесь не округляются.
+        # там, второй раз проценты здесь не округляются. Начало долга позже
+        # начала окна — не ошибка: до него начисления нет, и отрезок месяца
+        # берётся с него.
         interest = Decimal(0)
+        month_end = _month_end(month)
+        # Движения месяца по сделкам — один проход, а не поиск на каждую сделку.
+        moves_by_deal: dict[str, list[tuple[date, Decimal]]] = {}
+        for m in self.book.movements:
+            opened = self.open_deals.get(m.deal)
+            if opened is None or not month <= m.date <= month_end:
+                continue
+            moves_by_deal.setdefault(m.deal, []).append(
+                (m.date, _signed(opened.deal, m)))
+        # Смены версии тела (передача долга) — своим месяцем, как движения:
+        # долг вырос, и проценты обязаны идти на новое тело.
+        shifts_by_deal: dict[str, list[tuple[date, Decimal]]] = {}
+        for a in self.book.assignments:
+            opened = self.open_deals.get(a.deal)
+            if opened is None or not month <= a.date <= month_end:
+                continue
+            shifts_by_deal.setdefault(a.deal, []).append((a.date, a.delta))
         for uid, opened in self.open_deals.items():
-            if opened.unit is not None or opened.balance <= 0:
-                continue                   # внутри копилки проценты не идут
-            # Платежи месяца — с суммой вхождения на начало месяца: на них
-            # считается дневная база, а платится по шагу 2 сколько выйдет.
-            month_payments = [
-                (when, _payment_amount(opened.deal, occ, opened.balance))
-                for when, row_uid, occ in rows if row_uid == uid]
-            accrued = accrued_interest(opened.deal, opened.balance, month,
-                                       _month_end(month), month_payments)
-            opened.balance += accrued
-            interest += accrued
+            moves = moves_by_deal.get(uid, ())
+            shifts = shifts_by_deal.get(uid, ())
+            if opened.unit is not None:
+                # Движение участника идёт в котёл, а не в остаток: остаток
+                # участника стоит, пока единица не закроется.
+                for _, signed in moves:
+                    self.open_units[opened.unit].pay(signed)
+                continue
+            if opened.balance > 0:
+                # Платежи месяца — с суммой вхождения на начало месяца: на них
+                # считается дневная база, а платится по шагу 2 сколько выйдет.
+                month_payments = [
+                    (when, _payment_amount(opened.deal, occ, opened.balance))
+                    for when, row_uid, occ in rows if row_uid == uid]
+                # Движение месяца — тоже платеж отрезка: день платежа уменьшает
+                # остаток до начисления за этот день, как требует канон.
+                month_payments += list(moves)
+                since = month
+                if opened.deal.start is not None and opened.deal.start > since:
+                    since = opened.deal.start
+                # База отрезка — как в каноне: платежи до начала долга уже
+                # вычтены из тела, а остаток на начало месяца их ещё не видит
+                # (движение месяца списывается после процентов).
+                base = opened.balance - sum(
+                    (amount for day, amount in moves if day < since),
+                    Decimal(0))
+                accrued = accrued_interest(opened.deal, base, since,
+                                           month_end, month_payments, shifts)
+                opened.balance += accrued
+                interest += accrued
+            # Движение внутри окна — факт своего месяца, и прокат проводит его
+            # в тот же месяц независимо от того, закрыта сделка или нет:
+            # вхождение, которое движение закрыло, прокат не платит (оно не в
+            # `due`), и без этого списания известный платёж потерялся бы, а
+            # остаток на конец месяца разошёлся бы с расчётным остатком на ту же
+            # дату.
+            for _, signed in moves:
+                opened.balance -= signed
+            # Смена тела идёт в ту же дату: проценты месяца уже посчитаны с
+            # ней (см. `deltas` у начисления), остаток её догоняет здесь.
+            for _, delta in shifts:
+                opened.balance += delta
         self.total_interest += interest
         # Остаток на начало месяца: от него считается обязательный платёж процентом —
         # платёж дня на неё не влияет.

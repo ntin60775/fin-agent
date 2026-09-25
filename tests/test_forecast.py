@@ -30,7 +30,7 @@ def _wallet(uid: str = "карта", balance: D = D("0"), **kw) -> Wallet:
 
 def _deal(uid: str = "заём", amount: D | None = D("3000"), **kw) -> Deal:
     base = dict(uid=uid, title=uid, counterparty="банк", amount=amount,
-                rate_per_year=D("0"), wallet="карта",
+                start=START, rate_per_year=D("0"), wallet="карта",
                 schedule=ScheduleRule(days=(20,), payment=D("1000")))
     base.update(kw)
     return Deal(**base)

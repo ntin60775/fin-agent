@@ -204,6 +204,16 @@ class Deal:
     закрытия, которой помечены сделки, гасящиеся вместе. Остаток не хранится:
     его считает `deal_balance`.
 
+    `start` — **начало долга**: дата, с которой долг существует, и отсюда идёт
+    начисление (`deal_balance`, прокат). Обязательно для сделки со ставкой и
+    суммой: без даты «долг на дату» считать не от чего. У беспроцентной сделки
+    и у регулярного расхода его не спрашивают — начислять нечего. Это другой
+    вопрос, чем `ScheduleRule.start` («начало ряда платежей»): ряд платежей
+    начинается, когда начинаются платежи, долг существует раньше — и после их
+    конца. Передача долга начала не двигает (меняется держатель и версия тела,
+    а не дата долга), а дата позже начала окна — не ошибка: долг возникает
+    внутри расчёта, и до неё начисленного нет.
+
     `prepay=False` — сделка досрочке не подлежит: свободные деньги её не
     трогают, обязательный платёж идёт как идёт. Так помечают револьверную
     кредитку: закрывать её досрочкой бессмысленно, лимит освобождается
@@ -215,6 +225,7 @@ class Deal:
     counterparty: str
     direction: str = I_OWE
     amount: Decimal | None = None       # сумма к закрытию; None — регулярный расход
+    start: date | None = None           # начало долга — отсюда идёт начисление
     rate_per_year: Decimal | None = None
     rate_per_day: Decimal | None = None
     schedule: ScheduleRule | None = None
@@ -467,6 +478,13 @@ def _validate_deals(book: Settlements) -> None:
                              f"отрицательной")
         if d.rate_per_year is not None and d.rate_per_day is not None:
             raise ValueError(f"сделка {d.uid!r}: ставка либо годовая, либо дневная")
+        if ((d.rate_per_year is not None or d.rate_per_day is not None)
+                and d.amount is not None and d.start is None):
+            raise ValueError(
+                f"сделка {d.uid!r}: ставка и сумма есть, а начала долга нет — "
+                f"без него долг на дату не считается; укажите дату начала "
+                f"долга (start). У беспроцентной сделки и у регулярного расхода "
+                f"её не спрашивают — начислять нечего")
         if d.schedule is not None:
             _validate_rule(d.uid, d.schedule)
         if d.closure_unit is not None and d.amount is None:
@@ -635,14 +653,16 @@ def _assignments(book: Settlements, deal_uid: str) -> list[Assignment]:
                   key=lambda a: a.date)
 
 
+def _signed(deal: Deal, movement: Movement) -> Decimal:
+    """Движение со знаком для остатка: по сделке — плюс, против неё — минус."""
+    along = ((deal.direction == I_OWE and movement.direction == OUT)
+             or (deal.direction == OWED_TO_ME and movement.direction == IN))
+    return movement.amount if along else -movement.amount
+
+
 def _paid(deal: Deal, movements: Iterable[Movement]) -> Decimal:
     """Сколько уплачено по сделке: по сделке — в остаток, против неё — из остатка."""
-    total = Decimal(0)
-    for m in movements:
-        along = ((deal.direction == I_OWE and m.direction == OUT)
-                 or (deal.direction == OWED_TO_ME and m.direction == IN))
-        total += m.amount if along else -m.amount
-    return total
+    return sum((_signed(deal, m) for m in movements), Decimal(0))
 
 
 def deal_holder_at(book: Settlements, deal_uid: str, on: date) -> str:
@@ -671,33 +691,93 @@ def deal_amount_at(book: Settlements, deal_uid: str, on: date) -> Decimal | None
 
 
 def deal_balance(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
-    """Расчётный остаток по сделке на дату: условия минус движения до неё.
+    """Долг на дату — канон остатка: тело минус движения плюс начисленное.
+
+    Одно определение на все пути: по нему идут расчётный остаток, сальдо по
+    контрагенту и сверка с выпиской, и он же — состояние проката: прокат
+    инициализируется этим каноном на открытие окна, поэтому остаток проката на
+    дату окна и расчётный остаток на ту же дату — одно число.
 
     Считается, а не хранится, — чтобы его можно было сверить с фактическим
-    остатком. У регулярного расхода остатка нет — None.
+    остатком. Начисление идёт той же функцией `accrued_interest`, что и в
+    прокате: от начала долга (`Deal.start`) до конца дня `on`, отрезок внутри
+    месяца — пропорционально дням, база — бегущий остаток, округление —
+    `model.kopek`. Ставки нет — начисления нет, и канон сводится к «тело минус
+    движения»; начала долга ещё нет (дата позже `on`) — начисленного тоже нет.
+    У регулярного расхода остатка нет — `None`.
     """
     amount = deal_amount_at(book, deal_uid, on)
     if amount is None:
         return None
     deal = _deal(book, deal_uid)
-    movements = [m for m in book.movements if m.deal == deal_uid and m.date <= on]
-    return amount - _paid(deal, movements)
+    movements = [m for m in book.movements
+                 if m.deal == deal_uid and m.date <= on]
+    return kopek(amount - _paid(deal, movements)
+                 + _accrued(book, deal, movements, on))
+
+
+def _accrued(book: Settlements, deal: Deal, movements: Sequence[Movement],
+             on: date) -> Decimal:
+    """Начисленное по сделке с её начала до конца дня `on`.
+
+    `movements` — движения до `on` включительно: до начала долга они входят в
+    базу, после — в платежи отрезка (и в базу следующего месяца, как в прокате).
+    """
+    since = deal.start
+    if since is None or on < since:
+        return Decimal(0)                # начисляться нечему: долга ещё нет
+    base = (deal_amount_at(book, deal.uid, since)
+            - _paid(deal, [m for m in movements if m.date < since]))
+    payments = [(m.date, _signed(deal, m)) for m in movements
+                if since <= m.date <= on]
+    # Смены версии тела (передача долга) входят в базу по своей дате: те, что
+    # раньше начала долга, уже в базе (тело берётся версией на начало), а
+    # поздние идут списком в ту же функцию, что и платежи.
+    deltas = [(a.date, a.delta) for a in book.assignments
+              if a.deal == deal.uid and since <= a.date <= on]
+    return accrued_interest(deal, base, since, on, payments, deltas)
+
+
+def _principal_left(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
+    """Тело долга на дату без начисления — служебная величина закрытости проката.
+
+    Не канон и не публичная величина: закрытость отвечает на вопрос «есть ли
+    что прокатывать», а вхождения гасят тело — начисленное вхождением не
+    является, и сделка с съеденным телом не возвращается в прокат, даже если
+    проценты за ней ещё числятся. «Сколько долгу на эту дату» — другой вопрос,
+    на него отвечает канон `deal_balance`, начисленное включающий.
+    """
+    amount = deal_amount_at(book, deal_uid, on)
+    if amount is None:
+        return None
+    deal = _deal(book, deal_uid)
+    return amount - _paid(deal, (m for m in book.movements
+                                 if m.deal == deal_uid and m.date <= on))
 
 
 # --- начисление ------------------------------------------------------------
 
 def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
-                     payments: Sequence[tuple[date, Decimal]]) -> Decimal:
+                     payments: Sequence[tuple[date, Decimal]],
+                     deltas: Sequence[tuple[date, Decimal]] = ()) -> Decimal:
     """Начисление процентов по сделке за отрезок `[since, until]` включительно.
 
-    Правило начисления одно, и его уже вызывает прокат: месяц целиком — тот же
-    вызов, что и любой другой отрезок. Расчётный остаток (`deal_balance`) ставку
-    пока не читает — он возьмёт эту же функцию в тикете 06, и тогда остаток
-    проката и расчётный остаток сойдутся по построению, а не совпадением.
+    Правило начисления одно, и его вызывают оба носителя остатка: прокат —
+    месяц целиком, расчётный остаток (`deal_balance`) — от начала долга
+    (`Deal.start`) до даты. Поэтому остаток проката и расчётный остаток на одну
+    дату сходятся по построению, а не совпадением: считает одна функция, одна
+    база и одно округление.
     Доводы — сделка (ставки и база начисления), остаток на начало отрезка,
     границы отрезка и платежи отрезка списком пар «дата — сумма»: раскладка
     платежей по дням — дело функции, не вызывающего. Полный месяц — частный
     случай отрезка.
+
+    `deltas` — смены версии тела (передача долга), тоже списком «дата — сумма»,
+    но с обратным знаком смысла: положительная сумма — долг вырос. Это не
+    платёж: деньги не уходили, а вот проценты идут на новое тело. День смены
+    увеличивает остаток до начисления за этот день, а в годовой базе смена
+    входит в базу того же месяца, в котором случилась, — долг изменился, а не
+    был уплачен.
 
     Правила прежние, они жили в месячном цикле проката:
 
@@ -724,6 +804,10 @@ def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
     for when, amount in payments:
         if since <= when <= until:
             by_day[when] = by_day.get(when, Decimal(0)) + amount
+    shift: dict[date, Decimal] = {}
+    for when, amount in deltas:
+        if since <= when <= until:
+            shift[when] = shift.get(when, Decimal(0)) + amount
 
     total = Decimal(0)
     left = balance
@@ -732,24 +816,27 @@ def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
         from_day = max(since, date(year, month, 1))
         till_day = min(until, date(year, month, days))
         month_start = left
+        moved = sum((amount for day, amount in shift.items()
+                     if from_day <= day <= till_day), Decimal(0))
         accrued = Decimal(0)
         if daily is not None:
             day = from_day
             while day <= till_day:
                 left -= by_day.get(day, Decimal(0))
+                left += shift.get(day, Decimal(0))
                 if left <= 0:
                     break
                 accrued += kopek(left * daily)
                 day += timedelta(days=1)
-        elif yearly is not None and left > 0:
-            accrued = left * yearly / 12
+        elif yearly is not None and month_start + moved > 0:
+            accrued = (month_start + moved) * yearly / 12
             covered = (till_day - from_day).days + 1
             if covered != days:
                 accrued = accrued * Decimal(covered) / Decimal(days)
             accrued = kopek(accrued)
         paid = sum((amount for day, amount in by_day.items()
                     if from_day <= day <= till_day), Decimal(0))
-        left = month_start + accrued - paid
+        left = month_start + accrued - paid + moved
         total += accrued
     return total
 

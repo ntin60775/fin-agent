@@ -28,7 +28,7 @@ def _wallet(uid: str = "карта", balance: D = D("0"), **kw) -> Wallet:
 def _deal(uid: str = "заём", amount: D | None = D("20000"), wallet: str = "карта",
           **kw) -> Deal:
     base = dict(uid=uid, title=uid, counterparty="банк", amount=amount,
-                rate_per_day=D("0.005"), wallet=wallet,
+                start=START, rate_per_day=D("0.005"), wallet=wallet,
                 schedule=ScheduleRule(days=(20,), payment=D("3000")))
     base.update(kw)
     return Deal(**base)
@@ -366,7 +366,9 @@ def test_a_prepay_takes_the_months_free_money_and_more_is_impossible():
                                           amount=D("3500")),))
     moved = applied(base, variant)
     assert [m.amount for m in moved.book.movements] == [D("3500")]
-    assert deal_balance(moved.book, "долг", date(2026, 1, 15)) == D("1500")
+    # Канон остатка: тело 5 000 − досрочка 3 500 + начисленное за 15 дней
+    # дневной ставки 0,5 % (14 × 25 плюс день досрочки на остатке 1 500).
+    assert deal_balance(moved.book, "долг", date(2026, 1, 15)) == D("1857.50")
     [payment] = moved.one_offs
     assert (payment.date, payment.amount, payment.account) == (
         date(2026, 1, 15), D("3500"), "карта")
@@ -402,7 +404,7 @@ def test_a_prepay_respects_the_closure_unit():
     assert unit.pot == D("500")                 # и он платит по своему графику
 
     beyond = Variant("больше участника", (
-        Prepay(deal="первый", date=date(2026, 1, 15), amount=D("1001")),))
+        Prepay(deal="первый", date=date(2026, 1, 15), amount=D("1076")),))
     assert "больше остатка" in impossible(base, beyond)
 
 
