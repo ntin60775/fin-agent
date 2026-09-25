@@ -2,9 +2,10 @@
 node_type: ticket
 title: Единое определение свободных денег
 service: _platform
-status: draft
+status: archived
 updated: 2026-09-25
 links:
+  documents: [../../../finance_core/solver.py, ../../../finance_core/roll.py, ../../../finance_core/__init__.py, ../../../finance_core/README.md, ../../../CONTEXT.md, ../../decisions/README.md, ../../decisions/single-free-money-basis.md, ../../../tests/test_cash.py, ../../../tests/test_debt.py, ../../../tests/test_months.py, ../../../tests/test_roll.py]
   part_of: [README.md]
   depends_on: [04-month-by-month-roll.md]
 ---
@@ -58,8 +59,47 @@ links:
 
 **Blocked by:** 04 — остаток бюджета месяца снимается в перестроенной связке.
 
-- [ ] Синтетика: деньги лежат на двух кошельках, прожиточный минимум задан — «сколько свободно» считается по всем доступным кошелькам и с вычетом минимума (сегодня один из ответов даёт −1 000 там, где другой даёт 18 000).
-- [ ] Снос выполнен целиком: снятых величин нет ни в публичном API, ни у вызывающих, ни в тестах; вместо них — одно число.
-- [ ] Сравнение сценариев идёт по свободным деньгам в конце линии, порог резерва задаётся только в сценарии.
-- [ ] Предложение второму приоритету — срез свободных денег, а не своя величина.
-- [ ] `python3 -m pytest tests/` зелёные; `finance_core/README.md` и `CONTEXT.md` называют величину одним словом; решение записано в `docs/decisions/`.
+## Приёмка
+
+Пройдено: `python3 -m pytest tests/` — 288 passed; линт KB установленной копией
+(`.omp/plugins/node_modules/ontoship/skills/kb-search/gitmark.py`) — чисто,
+новых ошибок нет (14 I7 при запуске копии вне пакета — артефакт версии,
+разобран в ревью).
+
+- [x] Синтетика: деньги лежат на двух кошельках, прожиточный минимум задан — «сколько свободно» считается по всем доступным кошелькам и с вычетом минимума (сегодня один из ответов даёт −1 000 там, где другой даёт 18 000).
+  — `tests/test_cash.py::test_free_money_is_one_number_on_the_line_and_in_the_month`;
+  замер-свидетель на фикстуре (два кошелька, минимум 18 000, резерв 1 000, январь
+  целиком): ДО `optional_cap(0)` = 15 000 против `CashMonth.free` = −3 600,00;
+  ПОСЛЕ `Result.free` = `CashMonth.free` = `Outcome.free` = −3 600,00 — ответ один
+- [x] Снос выполнен целиком: снятых величин нет ни в публичном API, ни у вызывающих, ни в тестах; вместо них — одно число.
+  — grep по репозиторию: живых вызовов `optional_cap`, `reserve=`, `Outcome.cap`,
+  `DealMonth.free`, `DealRoll.total_free` нет ни в коде, ни в тестах (остались только
+  упоминания-история «снесён» в доках и докстрингах); `finance_core/__init__.py` без
+  битых экспортов; десять правок существующих тестов перечислены в отчёте и каждая
+  касается только снесённой величины (`test_cash` — импорт и два теста `optional_cap`
+  + аргумент `reserve` у `compare`; `test_roll` — три assert на `DealMonth.free`;
+  `test_debt` — `DealMonth.free` и `total_free`; `test_months` — два assert на
+  `DealMonth.free` и переименование теста бюджетов)
+- [x] Сравнение сценариев идёт по свободным деньгам в конце линии, порог резерва задаётся только в сценарии.
+  — `tests/test_cash.py::test_compare_reads_free_money_with_the_reserve_from_the_scenario`;
+  единственный источник порога — `Scenario.obligation_reserve`, чтения только в двух
+  местах (`run()` и `_CashMonth.regular()`)
+- [x] Предложение второму приоритету — срез свободных денег, а не своя величина.
+  — `tests/test_months.py::test_offer_in_the_link_is_a_slice_of_the_cash_free_money`
+  (связка: срез с `CashMonth.free`, а не остаток пула),
+  `tests/test_roll.py::test_offer_is_a_slice_of_free_money_not_the_pool_leftover`
+  (прокат: 4 000 срез против 4 500 остатка пула),
+  `tests/test_months.py::test_offer_is_never_negative_when_free_money_is_short`
+  (срез не опускается ниже нуля: free −1 166,67 → offer 0)
+- [x] `python3 -m pytest tests/` зелёные; `finance_core/README.md` и `CONTEXT.md` называют величину одним словом; решение записано в `docs/decisions/`.
+  — 288 passed; оба документа называют величину «свободные деньги» (термин
+  «свободный остаток» убран из формулировок, в `_Не говорить_` оставлен как запрет);
+  решение — `docs/decisions/single-free-money-basis.md`, проиндексировано
+  (`docs/decisions/README.md`)
+
+Независимо подтверждено: батарея 15 сценариев / 957 значений ДО/ПОСЛЕ — кассовые и
+прокатные числа не сдвинулись ни на копейку, расходятся только снесённые величины и
+три значения `offer` (каждое = неоплаченная база). Ожидаемое последствие: зона
+`../finance` вызывает снятые имена (`optional_cap`, `compare(reserve=)`,
+`Outcome.cap`, `total_free`) и переписывается в своём цикле — записано в разделе
+«Последствия» решения `single-free-money-basis.md`.
