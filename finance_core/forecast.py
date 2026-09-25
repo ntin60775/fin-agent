@@ -25,7 +25,7 @@ from decimal import Decimal
 from typing import Any
 
 from .model import Income, Payment, Transfer
-from .roll import AVALANCHE, Expectation, Gap, MonthsRoll, roll_months
+from .roll import AVALANCHE, Expectation, Gap, MonthsRoll, Window, roll_months
 from .settlements import FAMILY, I_OWE, Settlements, Wallet, deal_balance
 from .solver import CashMonth
 
@@ -145,6 +145,7 @@ class ForecastInput:
     свободных денег она не вычитается, иначе величина занижается и цель становится
     недостижимой на бумаге. `consent_to_second` — согласие владельца направлять
     свободный остаток во второй приоритет: без него погашение не считается.
+    `window` — готовое окно проката: цена варианта считает вариант в окне базы.
     """
     book: Settlements
     start: date
@@ -161,6 +162,10 @@ class ForecastInput:
     max_months: int = 600
     max_iterations: int = 100
     main: str | None = None
+    #: Окно, в котором считать прокат: цена варианта передаёт окно базы, чтобы
+    #: сравнение шло по одной линии, а не по разным. Окно обязано быть посчитано
+    #: по этой же книге и с этим же согласием — иначе отчёт разойдётся с книгой.
+    window: Window | None = None
 
 
 # --- отчёт -----------------------------------------------------------------
@@ -190,6 +195,7 @@ class Forecast:
     family: list[FamilyTransfer]
     questions: list[Discrepancy]
     gaps: list[Gap]
+    window: Window
     living_floor: Decimal | None = None
     obligation_reserve: Decimal | None = None
     unsecured_total: Decimal = Decimal(0)
@@ -225,7 +231,9 @@ def forecast(inp: ForecastInput) -> Forecast:
     Прокат месяцев даёт кассу по месяцам; отчёт читает из неё дефицит, свободные
     деньги и допущения. Отчёт идёт до момента, когда ступени достигнуты; не
     достигнуты — ступень называет причину. Без прожиточного минимума ступени не
-    измерены: ноль не подставляется.
+    измерены: ноль не подставляется. Окно кончается там, где кончается вопрос:
+    не достигнутое за окном ступень и дата называют причину конца окна
+    (`MonthsRoll.window`), а не показывают последнюю цифру проката.
     """
     roll = roll_months(
         inp.book, inp.start, inp.wallets, inp.incomes, inp.one_offs,
@@ -233,15 +241,17 @@ def forecast(inp: ForecastInput) -> Forecast:
         transfers=inp.transfers, income_horizon=inp.income_horizon,
         strategy=inp.strategy, max_months=inp.max_months,
         max_iterations=inp.max_iterations,
-        consent_to_second=inp.consent_to_second, main=inp.main)
+        consent_to_second=inp.consent_to_second, main=inp.main,
+        window=inp.window)
     if not roll.cash_months:
         raise ValueError(
             f"прогноз: прокат пуст — max_months должен быть положительным, "
             f"передано {inp.max_months}")
 
     deficits = _deficits(roll)
-    step1 = _step_last_deficit(roll, deficits, inp.living_floor)
-    step2 = _step_free_money(roll, step1, inp.living_floor)
+    window_reason = roll.window.reason
+    step1 = _step_last_deficit(roll, deficits, inp.living_floor, window_reason)
+    step2 = _step_free_money(roll, step1, inp.living_floor, window_reason)
     until = _until(roll, step2)
     months = roll.cash_months[:until]
     return Forecast(
@@ -250,14 +260,15 @@ def forecast(inp: ForecastInput) -> Forecast:
         assumed=[i for i in roll.assumed if i <= until],
         step1=step1,
         step2=step2,
-        first_priority=_first_priority(roll),
-        second_priority=_second_priority(inp, roll),
-        cushion=_cushion(roll.cash_months, inp.cushion),
+        first_priority=_first_priority(roll, window_reason),
+        second_priority=_second_priority(inp, roll, window_reason),
+        cushion=_cushion(roll.cash_months, inp.cushion, window_reason),
         deficits=[d for d in deficits if d.index <= until],
         expectations=_within(roll.deal_roll.expectations, roll, until),
         family=_family(inp, roll, until),
         questions=_questions(inp.book),
         gaps=roll.deal_roll.gaps,
+        window=roll.window,
         living_floor=inp.living_floor,
         obligation_reserve=inp.obligation_reserve,
         unsecured_total=roll.unsecured_total,
@@ -320,7 +331,8 @@ def _due_by(expectations: Iterable[Expectation], when: date | None) -> Decimal:
 
 
 def _step_last_deficit(roll: MonthsRoll, deficits: list[Deficit],
-                       living_floor: Decimal | None) -> Milestone:
+                       living_floor: Decimal | None,
+                       window_reason: str) -> Milestone:
     """Ступень 1: позади последний месяц с дефицитом — устойчивость, не удача.
 
     Без прожиточного минимума дефицит не оценён; не оценена и нехватка в месяце,
@@ -333,8 +345,8 @@ def _step_last_deficit(roll: MonthsRoll, deficits: list[Deficit],
     last = deficits[-1].index if deficits else 0
     if last >= len(roll.cash_months):
         return Milestone(
-            reason=f"дефицит держится до конца проката: последний месяц с "
-                   f"дефицитом — {last}")
+            reason=f"не достигнута за окно: дефицит держится до последнего "
+                   f"месяца окна ({last}); окно кончилось — {window_reason}")
     blind = [cm.index for cm in roll.cash_months[:last + 1]
              if cm.floor_gap is None]
     if blind:
@@ -345,7 +357,8 @@ def _step_last_deficit(roll: MonthsRoll, deficits: list[Deficit],
 
 
 def _step_free_money(roll: MonthsRoll, step1: Milestone,
-                     living_floor: Decimal | None) -> Milestone:
+                     living_floor: Decimal | None,
+                     window_reason: str) -> Milestone:
     """Ступень 2: первый месяц со свободными деньгами — сверх ступени 1.
 
     Свободные деньги считаются до досрочек: они же и есть бюджет досрочек.
@@ -359,7 +372,9 @@ def _step_free_money(roll: MonthsRoll, step1: Milestone,
     for cm in roll.cash_months:
         if cm.month >= step1.month and cm.free > 0:
             return Milestone(month=cm.month)
-    return Milestone(reason="свободных денег за отведённые месяцы не появилось")
+    return Milestone(
+        reason=f"не достигнута за окно: свободных денег не появилось; "
+               f"окно кончилось — {window_reason}")
 
 
 def _until(roll: MonthsRoll, step2: Milestone) -> int:
@@ -374,15 +389,20 @@ def _until(roll: MonthsRoll, step2: Milestone) -> int:
 
 # --- даты по приоритетам ---------------------------------------------------
 
-def _first_priority(roll: MonthsRoll) -> Milestone:
-    """Когда закрыт обязательный график: закрывать нечего — закрыт сразу."""
+def _first_priority(roll: MonthsRoll, window_reason: str) -> Milestone:
+    """Когда закрыт обязательный график: закрывать нечего — закрыт сразу.
+
+    Срок с досрочками может лежать за концом окна — тогда он назван причиной,
+    которой окно кончилось, а не пропущен: молчание выдало бы окно за весь срок.
+    """
     if roll.deal_roll.freedom is None:
         return Milestone(
-            reason="обязательный график не закрылся за отведённые месяцы")
+            reason=f"обязательный график не закрылся за окно: {window_reason}")
     return Milestone(month=roll.deal_roll.freedom)
 
 
-def _second_priority(inp: ForecastInput, roll: MonthsRoll) -> Milestone:
+def _second_priority(inp: ForecastInput, roll: MonthsRoll,
+                     window_reason: str) -> Milestone:
     """Когда закрыт второй приоритет: считается только при согласии владельца."""
     if not inp.consent_to_second:
         return Milestone(
@@ -407,10 +427,11 @@ def _second_priority(inp: ForecastInput, roll: MonthsRoll) -> Milestone:
             month=roll.cash_months[0].month,
             reason="закрыт к началу проката: закрывать нечего")
     return Milestone(
-        reason="второй приоритет не закрылся за отведённые месяцы")
+        reason=f"второй приоритет не закрылся за окно: {window_reason}")
 
 
-def _cushion(months: list[CashMonth], target: Decimal | None) -> Milestone:
+def _cushion(months: list[CashMonth], target: Decimal | None,
+             window_reason: str) -> Milestone:
     """Когда свободных денег на руках хватит на подушку.
 
     Подушка — цель, а не расход: из свободных денег она не вычитается. Считать
@@ -424,7 +445,8 @@ def _cushion(months: list[CashMonth], target: Decimal | None) -> Milestone:
     for cm in months:
         if cm.free >= target:
             return Milestone(month=cm.month)
-    return Milestone(reason="свободных денег на подушку не хватило")
+    return Milestone(
+        reason=f"свободных денег на подушку не хватило за окно: {window_reason}")
 
 
 # --- отдельные строки отчёта -----------------------------------------------

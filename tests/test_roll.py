@@ -11,6 +11,8 @@ from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           Movement, OccurrenceEdit, ScheduleRule, Settlements,
                           Wallet, compare_deal_strategies, occurrences,
                           roll_deals, validate)
+from finance_core import (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
+                          WINDOW_MONTH_CAP, roll_window)
 
 START = date(2026, 1, 1)
 
@@ -873,3 +875,98 @@ def test_rule_forms_are_checked():
     with pytest.raises(ValueError, match="требование в единице закрытия"):
         validate(_book(_deal(amount=D("100"), direction=OWED_TO_ME,
                              closure_unit="копилка")))
+
+
+# --- окно проката ----------------------------------------------------------
+
+def test_window_ends_when_the_debts_close():
+    """Окно кончается последним платежом по долгам: регулярный расход его не продлевает.
+
+    Долг с графиком на 24 месяца и бесконечный регулярный расход: окно — 24
+    месяца, а не отведённые 600, и причина названа.
+    """
+    debt = _deal("заём", amount=D("24000"),
+                 schedule=_rule(start=START, payment=D("1000"), count=24))
+    expense = _deal("аренда", amount=None,
+                    schedule=_rule(days=(10,), payment=D("500")))
+    roll = roll_deals(_book(debt, expense), START, D("0"))
+    assert roll.window.months == 24
+    assert roll.window.reason == WINDOW_DEBTS_CLOSED
+    assert roll.window.until == date(2027, 12, 31)
+    assert len(roll.months) == 24
+
+
+def test_window_ends_with_the_visible_income():
+    """Доходы кончаются раньше долга: окно кончается концом доходов, причина названа."""
+    debt = _deal("долгий", amount=D("60000"),
+                 schedule=_rule(start=START, payment=D("1000"), count=60))
+    book = _book(debt)
+    end_of_income = date(2026, 12, 31)
+    roll = roll_deals(book, START, D("0"), income_horizon=end_of_income)
+    assert roll.window.months == 12
+    assert roll.window.reason == WINDOW_INCOME_ENDS
+    assert roll.freedom is None              # срок с досрочками за окном — не выдуман
+    assert roll_window(book, START, 600, income_horizon=end_of_income).months == 12
+
+
+def test_window_hits_the_month_cap_without_a_payment_count():
+    """Долг без числа платежей: последнего платежа нет — окно упирается в предел месяцев."""
+    debt = _deal("карта", amount=D("10000"),
+                 schedule=_rule(start=START, percent=D("0.05")))
+    roll = roll_deals(_book(debt), START, D("0"), max_months=600)
+    assert roll.window.months == 600
+    assert roll.window.reason == WINDOW_MONTH_CAP
+
+
+def test_a_deal_without_a_payment_count_does_not_end_the_window():
+    """Ряд без числа платежей границы по долгам не даёт: окно не режется чужим концом."""
+    small = _deal("малый", amount=D("3000"),
+                  schedule=_rule(start=START, payment=D("1000"), count=3))
+    big = _deal("большой", amount=D("10000"),
+                schedule=_rule(start=START, payment=D("500")))
+    roll = roll_deals(_book(small, big), START, D("0"), max_months=12)
+    assert roll.window.months == 12
+    assert roll.window.reason == WINDOW_MONTH_CAP
+
+
+def test_debts_win_the_tie_with_the_month_cap():
+    """Совпали границы — побеждает причина, первая по порядку: вопрос был о долгах."""
+    debt = _deal("заём", amount=D("3000"),
+                 schedule=_rule(start=START, payment=D("1000"), count=3))
+    roll = roll_deals(_book(debt), START, D("0"), max_months=3)
+    assert roll.window.months == 3
+    assert roll.window.reason == WINDOW_DEBTS_CLOSED
+
+
+def test_second_priority_extends_the_window_only_with_consent():
+    """Второй приоритет продлевает окно до своего закрытия только при согласии."""
+    first = _deal("график", amount=D("6000"),
+                  schedule=_rule(start=START, payment=D("1000"), count=6))
+    second = _deal("взыскание", amount=D("6000"), second_priority=True,
+                   schedule=_rule(start=START, payment=D("500"), count=24))
+    book = _book(first, second)
+    without = roll_deals(book, START, D("0"))
+    assert (without.window.months, without.window.reason) == (6, WINDOW_DEBTS_CLOSED)
+    agreed = roll_deals(book, START, D("0"), consent_to_second=True)
+    assert (agreed.window.months, agreed.window.reason) == (24, WINDOW_DEBTS_CLOSED)
+
+
+def test_a_postponed_payment_extends_the_window_and_never_shortens_it():
+    """Перенесённый платёж окно удлиняет, а перенос раньше — не сокращает.
+
+    График — гарантированный верх: окно обязано дождаться платежа по назначенной
+    дате, иначе платёж молча выпал бы из проката. Обратный перенос окна не режет.
+    """
+    debt = _deal("заём", amount=D("3000"),
+                 schedule=_rule(start=START, payment=D("1000"), count=3))
+    later = _book(debt, edits=[OccurrenceEdit("заём", date(2026, 3, 20),
+                                              postponed=True,
+                                              moved_to=date(2026, 5, 20))])
+    validate(later)
+    assert roll_deals(later, START, D("0")).window.months == 5
+
+    earlier = _book(debt, edits=[OccurrenceEdit("заём", date(2026, 3, 20),
+                                                postponed=True,
+                                                moved_to=date(2026, 2, 25))])
+    validate(earlier)
+    assert roll_deals(earlier, START, D("0")).window.months == 3
