@@ -9,10 +9,11 @@ import pytest
 from finance_core import (BOTH, CREDITOR, DEBTOR, IN, LEGAL, OWED_TO_ME, PERSON,
                           STARTER_GROUPS, Account, Assignment, Counterparty, Deal,
                           Movement, Payment, Scenario, ScheduleRule, Settlements,
-                          Wallet, beneficiary, counterparty_balance,
-                          counterparty_role, deal_amount_at, deal_balance,
-                          deal_holder_at, funding_wallet, liquidity,
-                          payment_channel, run, validate)
+                          Wallet, accrued_interest, beneficiary,
+                          counterparty_balance, counterparty_role,
+                          deal_amount_at, deal_balance, deal_holder_at,
+                          funding_wallet, liquidity, payment_channel, run,
+                          validate)
 
 START = date(2026, 1, 1)
 
@@ -215,6 +216,122 @@ def test_movement_overrides_the_deal_defaults():
     assert payment_channel(deal, movement) == "посредник"
     assert beneficiary(deal, movement) == "родня"
     assert funding_wallet(deal) == "карта"
+
+
+# --- начисление процентов ---------------------------------------------------
+
+def _daily(rate: D = D("0.001")) -> Deal:
+    """Сделка с дневной ставкой: база начисления — по дням."""
+    return _deal(rate_per_year=None, rate_per_day=rate)
+
+
+def _yearly(rate: D = D("0.24")) -> Deal:
+    """Сделка с годовой ставкой: база начисления — по месяцам."""
+    return _deal(rate_per_year=rate, rate_per_day=None)
+
+
+def test_daily_interest_takes_a_days_payment_before_that_day():
+    """Платёж дня уменьшает остаток до начисления за этот день."""
+    interest = accrued_interest(_daily(), D("100000"), date(2026, 1, 1),
+                                date(2026, 1, 31),
+                                [(date(2026, 1, 12), D("50000"))])
+    # 11 дней по 100,00 и 20 дней по 50,00: 12-е считается уже от 50 000.
+    # Начисли сначала и убавь потом — вышло бы 100,00 за 12-е, то есть 2150.
+    assert interest == D("2100.00")
+
+
+def test_annual_interest_is_taken_from_the_balance_at_the_month_start():
+    """Годовая: платежи внутри месяца начисление этого месяца не меняют."""
+    interest = accrued_interest(_yearly(), D("120000"), date(2026, 1, 1),
+                                date(2026, 1, 31),
+                                [(date(2026, 1, 12), D("5000")),
+                                 (date(2026, 1, 25), D("5000"))])
+    assert interest == D("2400.00")          # 120 000 × 0,24 / 12
+
+
+def test_daily_interest_covers_only_the_days_of_the_segment():
+    """Отрезок внутри месяца — по своим дням."""
+    interest = accrued_interest(_daily(), D("100000"),
+                                date(2026, 1, 10), date(2026, 1, 19), [])
+    assert interest == D("1000.00")          # 10 дней × 100,00
+
+
+def test_annual_interest_fills_a_partial_month_by_days():
+    """Неполный месяц у годовой — пропорционально дням месяца."""
+    interest = accrued_interest(_yearly(), D("120000"),
+                                date(2026, 1, 11), date(2026, 1, 20), [])
+    assert interest == D("774.19")           # 2 400 × 10 / 31
+
+
+def test_segment_boundaries_are_inclusive_on_both_ends():
+    """Обе границы отрезка входят в него: день — ровно один день начисления."""
+    daily, yearly = _daily(), _yearly()
+    assert accrued_interest(daily, D("100000"), date(2026, 1, 15),
+                            date(2026, 1, 15), []) == D("100.00")
+    assert accrued_interest(daily, D("100000"), date(2026, 1, 15),
+                            date(2026, 1, 16), []) == D("200.00")
+    assert accrued_interest(yearly, D("120000"), date(2026, 1, 15),
+                            date(2026, 1, 15), []) == D("77.42")   # 2 400 / 31
+    assert accrued_interest(daily, D("100000"), date(2026, 1, 16),
+                            date(2026, 1, 15), []) == D("0")       # пустой отрезок
+
+
+def test_every_day_is_rounded_on_its_own():
+    """Округление — на каждое слагаемое, а не один раз на весь отрезок."""
+    interest = accrued_interest(_daily(D("0.0007")), D("1001"),
+                                date(2026, 1, 1), date(2026, 1, 10), [])
+    # 0,7007 за день округляется до 0,70: десять дней — 7,00, а не 7,01.
+    assert interest == D("7.00")
+
+
+def test_every_month_is_rounded_on_its_own():
+    """У годовой слагаемое — месяц, и месяц округляется сам по себе."""
+    interest = accrued_interest(_yearly(D("0.001")), D("1000"),
+                                date(2026, 1, 1), date(2026, 3, 31), [])
+    # 0,0833… округляется до 0,08: три месяца — 0,24, а не 0,25 одним куском.
+    assert interest == D("0.24")
+
+
+def test_annual_interest_runs_on_the_balance_of_the_previous_month():
+    """Бегущий остаток: начисленное одного месяца — база следующего."""
+    interest = accrued_interest(_yearly(D("0.12")), D("100000"),
+                                date(2026, 1, 1), date(2026, 3, 31), [])
+    # 1 000,00 + 1 010,00 + 1 020,10 — как в прокате, проценты на проценты.
+    assert interest == D("3030.10")
+
+
+def test_no_balance_means_no_interest():
+    """Нет остатка — нет начисления: годовая не уходит в минус."""
+    for deal in (_daily(), _yearly()):
+        assert accrued_interest(deal, D("0"), date(2026, 1, 1),
+                                date(2026, 1, 31), []) == D("0")
+        assert accrued_interest(deal, D("-5000"), date(2026, 1, 1),
+                                date(2026, 1, 31), []) == D("0")
+
+
+def test_payments_sharing_one_date_are_summed():
+    """Две пары на одну дату — одно начисление от их суммы, а не от последней."""
+    interest = accrued_interest(_daily(), D("100000"), date(2026, 1, 1),
+                                date(2026, 1, 31),
+                                [(date(2026, 1, 12), D("20000")),
+                                 (date(2026, 1, 12), D("30000"))])
+    # Просроченные вхождения сходятся в один день: 50 000 суммой, значит
+    # 11 дней по 100,00 и 20 дней по 50,00, как и одним платежом.
+    assert interest == D("2100.00")
+
+
+def test_annual_payments_of_a_month_cut_the_next_one():
+    """Платёж января уменьшает базу февраля: платежи месяца видит следующий."""
+    deal = _yearly()
+    paid = accrued_interest(deal, D("120000"), date(2026, 1, 1),
+                            date(2026, 2, 28), [(date(2026, 1, 15), D("60000"))])
+    untouched = accrued_interest(deal, D("120000"), date(2026, 1, 1),
+                                 date(2026, 2, 28), [])
+    # Январь одинаков в обоих случаях — 2 400,00; февраль разный:
+    # (120 000 + 2 400 − 60 000) × 0,24 / 12 против (120 000 + 2 400) × 0,24 / 12.
+    assert paid == D("3648.00")
+    assert untouched == D("4848.00")
+    assert paid < untouched
 
 
 # --- сальдо и роль ---------------------------------------------------------

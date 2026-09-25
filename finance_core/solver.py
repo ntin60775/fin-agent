@@ -31,9 +31,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
 
-from .model import Account, Scenario, wallet_capacity, wallet_money
+from .model import Account, KOPEK, Scenario, wallet_capacity, wallet_money
 
-KOPEK = Decimal("0.01")
 DAYS_IN_MONTH = Decimal(30)
 
 #: Что именно не прошло из-за ёмкости кошелька.

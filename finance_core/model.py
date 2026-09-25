@@ -8,7 +8,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, getcontext, localcontext
+
+#: Денежный знак — копейка. Дом один на весь движок: суммы, остатки и
+#: округления берут её отсюда, копии константы расходятся молча.
+KOPEK = Decimal("0.01")
+
+
+def kopek(value: Decimal) -> Decimal:
+    """Округлить до копейки, не падая на выросшем числе.
+
+    Дом один у денежного знака и у его округления: копии расходятся молча.
+    Контекст Decimal по умолчанию несёт 28 значащих цифр. У долга, который не
+    закрывается и растёт по ставке, остаток за прокат перерастает их, и
+    `quantize` падает `InvalidOperation` вместо честного «не закрылось»: прокат
+    обязан дойти до конца окна на любом графике. Знаков берётся столько,
+    сколько нужно самому числу, — на обычных суммах ответ не меняется.
+    """
+    with localcontext() as ctx:
+        ctx.prec = max(getcontext().prec, value.adjusted() + 4)
+        return value.quantize(KOPEK, ROUND_HALF_UP)
 
 
 @dataclass
