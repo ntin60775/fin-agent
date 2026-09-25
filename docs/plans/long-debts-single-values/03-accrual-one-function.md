@@ -2,9 +2,10 @@
 node_type: ticket
 title: Начисление — одна функция (подготовка)
 service: _platform
-status: draft
+status: archived
 updated: 2026-09-25
 links:
+  documents: [../../../finance_core/settlements.py, ../../../finance_core/roll.py, ../../../finance_core/model.py, ../../../finance_core/solver.py, ../../../finance_core/actions.py, ../../../finance_core/__init__.py, ../../../finance_core/README.md, ../../../tests/test_settlements.py, ../../../tests/test_roll.py]
   part_of: [README.md]
 ---
 
@@ -52,8 +53,31 @@ links:
 
 **Blocked by:** None (can start immediately).
 
-- [ ] Прокат считает проценты выделенной функцией; ожидания существующих тестов не переписаны ни в одном месте.
-- [ ] Функция покрыта тестом сама по себе: дневная база (включая порядок «платёж дня до начисления дня»), годовая (остаток на начало месяца, платежи внутри месяца начисления не меняют), отрезок внутри месяца (пропорционально дням), включительные границы.
-- [ ] Полный месяц через функцию даёт ровно то же число, что прокат до правки (тест на равенство).
-- [ ] Константа копейки объявлена один раз.
-- [ ] `python3 -m pytest tests/` зелёные.
+## Приёмка
+
+Пройдено: `python3 -m pytest tests/` — 273 passed, `gitmark lint` — чисто, доки
+(`finance_core/README.md`) синхронизированы с кодом.
+
+- [x] Прокат считает проценты выделенной функцией; ожидания существующих тестов не переписаны ни в одном месте.
+  — вызов `accrued_interest` в `finance_core/roll.py`, прежний `_month_interest` удалён;
+  `git diff -- tests/` — удалены только строки переноса двух импортов, ни одного правленого
+  ассерта или фикстуры; числа не сдвинулись: 17 сценарных дампов ДО/ПОСЛЕ совпали байт-в-байт
+  (sha256 одинаков)
+- [x] Функция покрыта тестом сама по себе: дневная база (включая порядок «платёж дня до начисления дня»), годовая (остаток на начало месяца, платежи внутри месяца начисления не меняют), отрезок внутри месяца (пропорционально дням), включительные границы.
+  — `tests/test_settlements.py`: `test_daily_interest_takes_a_days_payment_before_that_day`,
+  `test_annual_interest_is_taken_from_the_balance_at_the_month_start`,
+  `test_daily_interest_covers_only_the_days_of_the_segment`,
+  `test_annual_interest_fills_a_partial_month_by_days`,
+  `test_segment_boundaries_are_inclusive_on_both_ends`,
+  `test_every_day_is_rounded_on_its_own`, `test_every_month_is_rounded_on_its_own`,
+  `test_annual_interest_runs_on_the_balance_of_the_previous_month`,
+  `test_no_balance_means_no_interest`, `test_payments_sharing_one_date_are_summed`,
+  `test_annual_payments_of_a_month_cut_the_next_one`
+- [x] Полный месяц через функцию даёт ровно то же число, что прокат до правки (тест на равенство).
+  — `tests/test_roll.py::test_a_full_month_through_the_function_equals_the_roll_number`:
+  функция == прокат, прежние числа 2100.00 (дневная) и 2400.00 (годовая)
+- [x] Константа копейки объявлена один раз.
+  — `finance_core/model.py:15` (`KOPEK`), копии в `roll`/`solver`/`actions` убраны;
+  `model.kopek` (`model.py:18`) — единственный дом округления, его берут и прокат, и начисление
+- [x] `python3 -m pytest tests/` зелёные.
+  — 273 passed
