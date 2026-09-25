@@ -4,7 +4,8 @@
 несёт условия — сумму, ставку, правило графика — и направление; движения —
 факты: когда, сколько, куда и кому уплачено. Ни расчётный остаток по сделке, ни
 сальдо по контрагенту не хранятся: и то и другое считается из условий и движений
-(`docs/decisions/derived-balances.md`).
+(`docs/decisions/derived-balances.md`). Начисление процентов — тоже производное:
+одно правило на отрезок дат (`accrued_interest`), которым считает и прокат.
 
 Правило графика порождает **вхождения** — плановые платежи с тремя датами и
 статусом (`occurrences`). Вхождения тоже считаются: правило плюс правки журнала
@@ -16,12 +17,12 @@
 from __future__ import annotations
 
 import calendar
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 
-from .model import wallet_debt, wallet_free_limit, wallet_money
+from .model import kopek, wallet_debt, wallet_free_limit, wallet_money
 
 # --- объявленные наборы ----------------------------------------------------
 
@@ -681,6 +682,76 @@ def deal_balance(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
     deal = _deal(book, deal_uid)
     movements = [m for m in book.movements if m.deal == deal_uid and m.date <= on]
     return amount - _paid(deal, movements)
+
+
+# --- начисление ------------------------------------------------------------
+
+def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
+                     payments: Sequence[tuple[date, Decimal]]) -> Decimal:
+    """Начисление процентов по сделке за отрезок `[since, until]` включительно.
+
+    Правило начисления одно, и его уже вызывает прокат: месяц целиком — тот же
+    вызов, что и любой другой отрезок. Расчётный остаток (`deal_balance`) ставку
+    пока не читает — он возьмёт эту же функцию в тикете 06, и тогда остаток
+    проката и расчётный остаток сойдутся по построению, а не совпадением.
+    Доводы — сделка (ставки и база начисления), остаток на начало отрезка,
+    границы отрезка и платежи отрезка списком пар «дата — сумма»: раскладка
+    платежей по дням — дело функции, не вызывающего. Полный месяц — частный
+    случай отрезка.
+
+    Правила прежние, они жили в месячном цикле проката:
+
+    - **Дневная ставка** считается по дням: платёж дня уменьшает остаток до
+      начисления за этот день, поэтому перенос платежа внутри месяца стоит
+      денег; день, на котором остаток стал ≤ 0, начисления не даёт.
+    - **Годовая** начисляется за месяц от остатка на начало этого месяца:
+      платежи внутри месяца начисление этого месяца не меняют, но уменьшают
+      остаток следующего. Отрезок внутри месяца — пропорционально дням.
+    - **Каждое слагаемое округляется до копейки** — день у дневной базы, месяц
+      у годовой, `HALF_UP` (`model.kopek`). Второй раз проценты не округляются:
+      прокат берёт число как есть.
+
+    Начисленное месяца ложится в остаток следующего — бегущий остаток, как в
+    прокате; отсюда длинный отрезок и полный месяц считаются одним числом.
+    """
+    if until < since:
+        return Decimal(0)
+    daily = deal.rate_per_day
+    yearly = deal.rate_per_year
+    if daily is None and yearly is None:
+        return Decimal(0)
+    by_day: dict[date, Decimal] = {}
+    for when, amount in payments:
+        if since <= when <= until:
+            by_day[when] = by_day.get(when, Decimal(0)) + amount
+
+    total = Decimal(0)
+    left = balance
+    for year, month in _months(since, until):
+        days = calendar.monthrange(year, month)[1]
+        from_day = max(since, date(year, month, 1))
+        till_day = min(until, date(year, month, days))
+        month_start = left
+        accrued = Decimal(0)
+        if daily is not None:
+            day = from_day
+            while day <= till_day:
+                left -= by_day.get(day, Decimal(0))
+                if left <= 0:
+                    break
+                accrued += kopek(left * daily)
+                day += timedelta(days=1)
+        elif yearly is not None and left > 0:
+            accrued = left * yearly / 12
+            covered = (till_day - from_day).days + 1
+            if covered != days:
+                accrued = accrued * Decimal(covered) / Decimal(days)
+            accrued = kopek(accrued)
+        paid = sum((amount for day, amount in by_day.items()
+                    if from_day <= day <= till_day), Decimal(0))
+        left = month_start + accrued - paid
+        total += accrued
+    return total
 
 
 def _sides(book: Settlements, counterparty: str, on: date) -> tuple[Decimal, Decimal]:

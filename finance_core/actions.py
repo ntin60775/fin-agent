@@ -32,12 +32,10 @@ from datetime import date, timedelta
 from decimal import ROUND_CEILING, Decimal
 
 from .forecast import Forecast, ForecastInput, forecast
-from .model import Income, Payment
+from .model import Income, KOPEK, Payment
 from .settlements import (OUT, Deal, Movement, OccurrenceEdit, ScheduleRule,
                           Settlements, deal_balance, deal_holder_at,
                           funding_wallet, occurrences)
-
-KOPEK = Decimal("0.01")
 
 
 # --- действия --------------------------------------------------------------

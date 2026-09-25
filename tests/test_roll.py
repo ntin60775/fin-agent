@@ -10,8 +10,8 @@ from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
                           SKIPPED, Counterparty, Deal, FirstPayment,
                           Movement, OccurrenceEdit, ScheduleRule, Settlements,
-                          Wallet, compare_deal_strategies, occurrences,
-                          roll_deals, validate)
+                          Wallet, accrued_interest, compare_deal_strategies,
+                          occurrences, roll_deals, validate)
 from finance_core import (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
                           WINDOW_MONTH_CAP, roll_window)
 
@@ -821,6 +821,29 @@ def test_annual_rate_ignores_a_postponement_inside_the_month():
                       START, D(0), max_months=1)
     assert on_time.months[0].interest == D("2400.00")
     assert late.months[0].interest == D("2400.00")
+
+
+def test_a_full_month_through_the_function_equals_the_roll_number():
+    """Полный месяц через функцию начисления — ровно то число, что дал прокат.
+
+    Одинаковый вход — одно число: правило живёт в `settlements`, а прокат его
+    вызывает, поэтому считает ту же сумму, что и прежде.
+    """
+    cases = [
+        (_deal(amount=D("100000"), rate_per_year=None, rate_per_day=D("0.001"),
+               schedule=_rule(days=(12,), payment=D("50000"))), D("50000")),
+        (_deal(amount=D("120000"), rate_per_year=D("0.24"),
+               schedule=_rule(days=(12,), payment=D("5000"))), D("5000")),
+    ]
+    seen = []
+    for deal, payment in cases:
+        roll = roll_deals(_book(deal), START, D(0), max_months=1)
+        accrued = accrued_interest(deal, deal.amount, START, date(2026, 1, 31),
+                                   [(date(2026, 1, 12), payment)])
+        assert accrued == roll.months[0].interest
+        seen.append(roll.months[0].interest)
+    # Прежние числа проката: 11 × 100 + 20 × 50 по дневной и 120 000 × 0,24 / 12.
+    assert seen == [D("2100.00"), D("2400.00")]
 
 
 # --- месяц целиком ---------------------------------------------------------
