@@ -1,16 +1,22 @@
 """Тесты проката месяцев — синтетические фикстуры, без личных данных."""
 from __future__ import annotations
 
+import time
 from datetime import date
 from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (KIND_PREPAID, LEGAL, Account, ConvergenceError, Counterparty,
-                            Deal, Income, Payment, Scenario, Settlements,
+import finance_core.roll as roll_module
+from finance_core import (KIND_PREPAID, LEGAL, AVALANCHE, Account,
+                            ConvergenceError, Counterparty,
+                            Deal, ForecastInput, Income, Payment, Scenario,
+                            Settlements,
                             TransferHint, Wallet, roll_cash, roll_deals,
                             roll_months, run)
 from finance_core import WINDOW_DEBTS_CLOSED
+from finance_core.roll import _DealsRoll
+from finance_core.solver import _CashRoll
 
 START = date(2026, 1, 1)
 
@@ -472,7 +478,6 @@ def test_roll_months_converges():
         book, START, wallets, incomes, [],
         living_floor=D("200"), max_months=12,
     )
-    assert result.iterations >= 1
     assert len(result.cash_months) == 12
     # Deal may close earlier than max_months — that's correct
     assert len(result.deal_roll.months) <= 12
@@ -491,7 +496,6 @@ def test_roll_months_converges_without_living_floor():
     wallets = [_wallet("main", D("0"))]
     result = roll_months(book, START, wallets, [], [],
                          living_floor=None, max_months=4)
-    assert result.iterations >= 1
     # Свободные деньги — состояние месяца: 0 − 1 000, платёж не прошёл
     assert result.cash_months[0].free == D("-1000")
     # Бюджет досрочек не бывает отрицательным — нехватка его не уменьшает
@@ -557,17 +561,180 @@ def test_roll_months_credit_card_pays_rent_but_not_the_loan():
     assert (u.amount, u.short) == (D("500"), D("500"))
 
 
-def test_roll_months_raises_on_no_convergence():
-    """Не сошлось — ошибка с понятной причиной."""
+def test_month_fuse_raises_when_the_inner_limit_is_exhausted(monkeypatch):
+    """Предохранитель месяца: исчерпан внутренний предел — ошибка с причиной.
+
+    Публичный `max_iterations` снесён тикетом 04 — у зоны один предел, месяцы, —
+    а предохранитель остался: малый предел месяца (`_MONTH_PASSES`) и та же
+    `ConvergenceError`. Шаг месяца ловится драйвером и становится признаком
+    результата — см. `test_roll_months_marks_no_convergence`.
+    """
+    deal = _deal(amount=D("1000"), schedule=_rule(start=START, payment=D("100")))
+    book = _book(deal)
+    incomes = [Income(date(2026, 1, 1), D("500"), "main")]
+    scenario = Scenario(accounts=[Account(name="main", balance=D("0"))],
+                        income=list(incomes), living_floor_monthly=D("200"))
+    deals = _DealsRoll(book, START, strategy=AVALANCHE,
+                       consent_to_second=False, max_months=12)
+    cash = _CashRoll(scenario, START, "main")
+    monkeypatch.setattr(roll_module, "_MONTH_PASSES", 1)
+    with pytest.raises(ConvergenceError, match="не сошёлся"):
+        roll_module._converge_month(deals, cash, 1)
+
+
+def test_roll_months_marks_no_convergence(monkeypatch):
+    """Не сошлось — признак в результате, а расчёт не роняется исключением.
+
+    У месяца есть свободные деньги, поэтому его бюджет меняется от прохода к
+    проходу; на один проход круг не сходится — месяц попадает в `unconverged`,
+    а прокат считается до конца окна.
+    """
     deal = _deal(amount=D("1000"), schedule=_rule(start=START, payment=D("100")))
     book = _book(deal)
     wallets = [_wallet("main", D("0"))]
     incomes = [Income(date(2026, 1, 1), D("500"), "main")]
-    with pytest.raises(ConvergenceError, match="не сошёлся"):
-        roll_months(
-            book, START, wallets, incomes, [],
-            living_floor=D("200"), max_months=12, max_iterations=1,
-        )
+    monkeypatch.setattr(roll_module, "_MONTH_PASSES", 1)
+    result = roll_months(
+        book, START, wallets, incomes, [],
+        living_floor=D("200"), max_months=12,
+    )
+    assert result.unconverged[0] == 1          # предохранитель сработал с первого месяца
+    assert not result.converged                # признак несходимости виден в результате
+    assert len(result.cash_months) == 12       # и расчёт досчитан, а не брошен
+
+
+# --- проход по месяцам (тикет 04) -------------------------------------------
+
+def _income_on(day: int, amount: D, account: str, months: int) -> list[Income]:
+    """Доход каждые `months` месяцев начиная с января 2026 (синтетика)."""
+    return [Income(date(2026 + i // 12, i % 12 + 1, day), amount, account)
+            for i in range(months)]
+
+
+def test_twenty_year_debt_with_free_money_gives_the_closing_date():
+    """20-летний долг со свободными деньгами считается и даёт дату закрытия.
+
+    До тикета 04 тот же сценарий падал `ConvergenceError`: связка гоняла весь
+    прокат целиком на каждой итерации, и правка бюджета, распространяясь на
+    месяц вперёд за итерацию, упиралась в лимит 100. Длинный график — ровно
+    тот случай, ради которого перестроен проход по месяцам.
+    """
+    deal = _deal(amount=D("600000"), rate_per_year=D("0.12"),
+                 schedule=_rule(days=(20,), payment=D("7270"),
+                                count=240, start=START))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0"))]
+    incomes = _income_on(5, D("9270"), "main", 240)   # платёж 7 270 + свободные 2 000
+    result = roll_months(book, START, wallets, incomes, [],
+                         living_floor=D("0"), obligation_reserve=D("1000"),
+                         max_months=240)
+    assert result.window.months == 240                 # окно 240 месяцев
+    assert result.deal_roll.freedom == date(2034, 10, 1)   # дата закрытия есть
+    assert result.converged and result.unconverged == []
+
+
+def test_roll_time_is_linear_in_months():
+    """Время линейно по месяцам: 240 укладывается в 0,5 с и не больше двойного 120."""
+    deal = _deal(amount=D("600000"), rate_per_year=D("0.12"),
+                 schedule=_rule(days=(20,), payment=D("7270"),
+                                count=240, start=START))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0"))]
+    incomes = _income_on(5, D("9270"), "main", 240)
+
+    def best(max_months: int) -> float:
+        times = []
+        for _ in range(3):
+            started = time.perf_counter()
+            roll_months(book, START, wallets, incomes, [],
+                        living_floor=D("0"), obligation_reserve=D("1000"),
+                        max_months=max_months)
+            times.append(time.perf_counter() - started)
+        return min(times)
+
+    at_120, at_240 = best(120), best(240)
+    assert at_240 <= 0.5, f"240 месяцев: {at_240:.3f} с"
+    assert at_240 <= 2 * at_120, f"t(240)={at_240:.3f} с против t(120)={at_120:.3f} с"
+
+
+def test_month_budget_comes_from_the_cash_of_the_same_month():
+    """Сходимость месяца: непрошедшее уменьшает свободные, бюджет сходится, досрочка уходит из остатка.
+
+    Январь: деньги есть, касса считает свободные, досрочка уходит из остатка —
+    и её сумма равна бюджету месяца. Февраль: кошелёк сделки пуст, обязательный
+    платёж не проходит, и непрошедшее вычитается из свободных денег — обещанное
+    не отменяется.
+    """
+    deal = _deal(amount=D("1000"), schedule=_rule(start=START, payment=D("100")))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0")), _wallet("деньги", D("0"))]
+    incomes = ([Income(date(2026, 1, 5), D("500"), "main")]
+               + [Income(date(2026, m, 5), D("500"), "деньги")
+                  for m in (2, 3)])
+    result = roll_months(book, START, wallets, incomes, [],
+                         living_floor=D("0"), max_months=3)
+    assert result.converged
+
+    jan_deal, jan_cash = result.deal_roll.months[0], result.cash_months[0]
+    # Бюджет месяца сходится: досрочка равна свободным деньгам кассы того же месяца
+    assert jan_deal.prepaid == jan_cash.free == D("400")
+    # Досрочка ушла из остатка: касса пуста после неё
+    assert jan_cash.balances["main"] == D("0")
+
+    feb = result.cash_months[1]
+    # Непрошедшее уменьшает свободные деньги: деньги есть, но не на том кошельке
+    assert [u.amount for u in feb.unsecured][:1] == [D("100")]
+    assert feb.free == D("500") - D("100") == D("400")
+
+
+def test_changed_payments_recompute_the_month_cash_from_its_entry(monkeypatch):
+    """Бюджет изменил платежи — касса месяца считается заново с его входа.
+
+    Процент от остатка при ставке > 0: база фиксируется на старте проката по
+    остатку без процентов, а платёж месяца считается уже после начисления, —
+    поэтому с нулевым бюджетом пул режет платёж, а с бюджетом кассы того же
+    месяца пропускает целиком. Платежи изменились — и касса обязана начать
+    месяц заново с его входных остатков (`cash.restore`), а не наложить новый
+    проход поверх старого. Деньги впритык (доход меньше платежа) держат бюджет
+    в колебании до внутреннего предела — это и ловит предохранитель.
+    """
+    deal = _deal(amount=D("1000"), rate_per_year=D("0.12"),
+                 schedule=_rule(days=(20,), percent=D("0.05"), start=START))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0"))]
+    incomes = _income_on(5, D("50.40"), "main", 6)
+
+    calls: list[int] = []
+    original = _CashRoll.month
+
+    def counting(self, index, payments=()):
+        calls.append(index)
+        return original(self, index, payments)
+
+    monkeypatch.setattr(_CashRoll, "month", counting)
+    result = roll_months(book, START, wallets, incomes, [],
+                         living_floor=None, max_months=6)
+
+    # Месяц 1 считался не один раз: платежи изменились — ветка восстановления
+    # состояния кассы исполнялась, а не пропускалась.
+    assert calls.count(1) > 1
+    assert result.cash_months[0].free == D("0.00")   # вход месяца, а не его остаток
+    assert result.unconverged == [1]                 # предохранитель сработал без подмены предела
+    assert not result.converged
+
+
+def test_iteration_limit_is_gone_from_the_entry():
+    """Предел итераций исчез из публичного входа: зона не может его задать."""
+    deal = _deal(amount=D("1000"), schedule=_rule(start=START, payment=D("100")))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0"))]
+    incomes = [Income(date(2026, 1, 1), D("500"), "main")]
+    with pytest.raises(TypeError, match="max_iterations"):
+        roll_months(book, START, wallets, incomes, [],
+                    living_floor=D("0"), max_months=12, max_iterations=1)
+    with pytest.raises(TypeError, match="max_iterations"):
+        ForecastInput(book=book, start=START, wallets=wallets,
+                      max_iterations=1)
 
 
 # --- roll_deals per-month budgets --------------------------------------------

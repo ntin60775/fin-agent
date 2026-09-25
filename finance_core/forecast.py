@@ -161,7 +161,6 @@ class ForecastInput:
     consent_to_second: bool = False
     strategy: str = AVALANCHE
     max_months: int = 600
-    max_iterations: int = 100
     main: str | None = None
     #: Окно, в котором считать прокат: цена варианта передаёт окно базы, чтобы
     #: сравнение шло по одной линии, а не по разным. Окно обязано быть посчитано
@@ -177,7 +176,12 @@ class Forecast:
 
     `months` — месяцы отчёта: они кончаются там, где ступени достигнуты, а не на
     фиксированном числе. `assumed` — месяцы, посчитанные на допущении (после
-    дыры): цифра на допущении не выглядит фактом. `questions` — необъяснённые
+    дыры): цифра на допущении не выглядит фактом. `unconverged` — месяцы, в
+    которых связка долгов и кассы не сошлась за внутренний предел: признак
+    несходимости встаёт в тот же ряд и делает прогноз неполным. Оба списка
+    обрезаются по месяцам отчёта одним правилом (`_shown`): прокат длиннее
+    отчёта, и дальше его конца отчёт ничего не показывает — ни цифр на
+    допущении, ни месяцев без сходимости. `questions` — необъяснённые
     расхождения факта с расчётом: пока они есть, прогноз неполон.
     `unsecured_total` — сколько за прокат не прошло из-за ёмкости своего кошелька:
     не ноль значит, что прогноз долгов держится на переводе. `interest` — рубли
@@ -207,6 +211,7 @@ class Forecast:
     obligation_reserve: Decimal | None = None
     unsecured_total: Decimal = Decimal(0)
     interest: Decimal = Decimal(0)
+    unconverged: list[int] = field(default_factory=list)
 
     @property
     def reached(self) -> bool:
@@ -214,14 +219,20 @@ class Forecast:
         return self.step1.reached and self.step2.reached
 
     @property
+    def converged(self) -> bool:
+        """Сошёлся ли расчёт: False — хотя бы один месяц не сошёлся за предел."""
+        return not self.unconverged
+
+    @property
     def complete(self) -> bool:
         """Полон ли прогноз: минимум известен, нехватка измерена, пробелов нет.
 
         Неполный прогноз не выдаётся за полный: причина названа в ступенях,
-        `questions` и `gaps`.
+        `questions`, `gaps` и признаке несходимости (`converged`).
         """
         return (self.living_floor is not None and not self.gaps
                 and not self.questions
+                and self.converged
                 and all(cm.floor_gap is not None for cm in self.months))
 
     @property
@@ -231,6 +242,17 @@ class Forecast:
 
 
 # --- расчёт ----------------------------------------------------------------
+
+def _roll_of(inp: ForecastInput) -> MonthsRoll:
+    """Прокат месяцев по входу прогноза: один сборщик у отчёта и у проверок."""
+    return roll_months(
+        inp.book, inp.start, inp.wallets, inp.incomes, inp.one_offs,
+        inp.living_floor, obligation_reserve=inp.obligation_reserve,
+        transfers=inp.transfers, income_horizon=inp.income_horizon,
+        strategy=inp.strategy, max_months=inp.max_months,
+        consent_to_second=inp.consent_to_second, main=inp.main,
+        window=inp.window)
+
 
 def forecast(inp: ForecastInput) -> Forecast:
     """Построить прогноз: ступени, даты по приоритетам, вилку и открытые вопросы.
@@ -242,14 +264,7 @@ def forecast(inp: ForecastInput) -> Forecast:
     не достигнутое за окном ступень и дата называют причину конца окна
     (`MonthsRoll.window`), а не показывают последнюю цифру проката.
     """
-    roll = roll_months(
-        inp.book, inp.start, inp.wallets, inp.incomes, inp.one_offs,
-        inp.living_floor, obligation_reserve=inp.obligation_reserve,
-        transfers=inp.transfers, income_horizon=inp.income_horizon,
-        strategy=inp.strategy, max_months=inp.max_months,
-        max_iterations=inp.max_iterations,
-        consent_to_second=inp.consent_to_second, main=inp.main,
-        window=inp.window)
+    roll = _roll_of(inp)
     if not roll.cash_months:
         raise ValueError(
             f"прогноз: прокат пуст — max_months должен быть положительным, "
@@ -264,7 +279,8 @@ def forecast(inp: ForecastInput) -> Forecast:
     return Forecast(
         start=inp.start,
         months=months,
-        assumed=[i for i in roll.assumed if i <= until],
+        assumed=_shown(roll.assumed, until),
+        unconverged=_shown(roll.unconverged, until),
         step1=step1,
         step2=step2,
         first_priority=_first_priority(roll, window_reason),
@@ -478,6 +494,16 @@ def _within(rows: list[Expectation], roll: MonthsRoll, until: int
             ) -> list[Expectation]:
     """Требования в окне отчёта: дальше его срока строки не показываются."""
     return [e for e in rows if _in_window(e.date, roll, until)]
+
+
+def _shown(indices: Iterable[int], until: int) -> list[int]:
+    """Признаки проката, попавшие в отчёт: за `until` отчёт ничего не показывает.
+
+    Одно правило на оба признака — `assumed` и `unconverged`: прокат длиннее
+    отчёта, и дальше его конца система не утверждает ни цифр на допущении, ни
+    месяцев без сходимости, поэтому и не помечает их.
+    """
+    return [i for i in indices if i <= until]
 
 
 def _family(inp: ForecastInput, roll: MonthsRoll, until: int) -> list[FamilyTransfer]:
