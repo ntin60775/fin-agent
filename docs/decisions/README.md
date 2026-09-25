@@ -22,6 +22,7 @@ links:
 - [movement-settles-occurrence.md](movement-settles-occurrence.md) — факт по вхождению несёт движение, а не правка
 - [schedule-to-cash.md](schedule-to-cash.md) — долги отдают кассе расписание, касса возвращает бюджет досрочек
 - [month-by-month-convergence.md](month-by-month-convergence.md) — сходимость связки — проходом по месяцам, а не глобальной петлёй
+- [single-free-money-basis.md](single-free-money-basis.md) — свободные деньги — одно число на одном базисе: потолок и остаток бюджета снесены, предложение — срез
 - [card-schemas.md](card-schemas.md) — карточки покрыты схемами через frontmatter, проза свободна
 - [what-means-out.md](what-means-out.md) — «выбрался» — это покрытые расходы, а не закрытые долги
 - [wallet-pays-what-it-has.md](wallet-pays-what-it-has.md) — кошелёк платит тем, что у него есть; дыра — «денег нет нигде»

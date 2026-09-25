@@ -45,12 +45,12 @@ from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, EXPECTED, FAMILY,
                           occurrences, payment_channel, planned_date, validate)
 from .solver import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER,
                      UNSECURED_KINDS, Outcome, Result, Step, TransferHint,
-                     Unsecured, compare, cover_cost, optional_cap, outcome, run)
+                     Unsecured, compare, cover_cost, outcome, run)
 
 __all__ = [
     # касса
     "Account", "Income", "Payment", "Transfer", "Scenario",
-    "Step", "Result", "Outcome", "run", "roll_cash", "optional_cap",
+    "Step", "Result", "Outcome", "run", "roll_cash",
     "cover_cost", "outcome", "compare",
     "Unsecured", "TransferHint",
     # взаиморасчёты

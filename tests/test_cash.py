@@ -9,7 +9,7 @@ import pytest
 
 from finance_core import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER, Account,
                           Income, Payment, Scenario, Transfer, TransferHint,
-                          compare, cover_cost, optional_cap, roll_cash, run)
+                          compare, cover_cost, roll_cash, run)
 
 
 # --- каскад ---------------------------------------------------------------
@@ -589,24 +589,92 @@ def test_floor_gap_keeps_the_balance_raw_despite_promise():
 
 # --- производные величины -------------------------------------------------
 
-def test_optional_cap_is_balance_minus_reserve():
+def test_line_free_money_subtracts_the_reserve_of_the_scenario():
+    """Свободные деньги линии вычитают резерв — порог берётся из сценария."""
     s = Scenario(accounts=[Account("main", D("1000"))],
-                 payments=[Payment(date(2026, 1, 5), D("400"), account="main", counterparty="x")])
+                 payments=[Payment(date(2026, 1, 5), D("400"), account="main", counterparty="x")],
+                 obligation_reserve=D("250"))
     r = run(s, main="main")
-    assert optional_cap(r, D("250")) == D("350")
-    assert optional_cap(r, D("600")) == D("-0")   # резерв больше остатка
+    assert r.free == D("350")
+    tighter = dataclasses.replace(s, obligation_reserve=D("600"))
+    assert run(tighter, main="main").free == D("0")   # резерв больше остатка
 
 
-def test_optional_cap_reserves_what_did_not_pass():
-    """Потолок частного транша не считает свободными деньги непрошедшего платежа.
+def test_line_free_money_excludes_what_did_not_pass():
+    """Свободные деньги не считают непрошедший платёж свободным.
 
-    Платёж не отменён: деньги на него уже обещаны, хотя и лежат пока на кошельке.
+    Платёж не отменён: деньги на него уже обещаны, хотя и лежат пока на
+    кошельке. Прежний потолок частного транша (`optional_cap`) давал здесь
+    те же −200, но без вычета прожиточного минимума и по одному кошельку —
+    снесён: одно число, один базис.
     """
     s = Scenario(accounts=[Account("main", D("1000"))],
                  payments=[Payment(date(2026, 1, 5), D("1200"), account="main", counterparty="x")])
     r = run(s, main="main")
     assert r.end_balance == D("1000")             # платёж не прошёл — деньги на месте
-    assert optional_cap(r, D("0")) == D("-200")   # но они не свободны
+    assert r.free == D("-200")                    # но они не свободны
+
+
+def test_free_money_is_one_number_on_the_line_and_in_the_month():
+    """«Сколько свободно» — одно число на одном базисе, а не два ответа.
+
+    Два кошелька, заданный прожиточный минимум и резерв: линия
+    (`Result.free`, начало — первое событие, конец — последнее) и месяц
+    (`CashMonth.free`, начало — `start` окна, конец — конец месяца) на одном
+    и том же январе отвечают одинаково. До правки тут же расходились:
+    `optional_cap` (основной кошелёк, без вычета минимума) давал 15 000,
+    `CashMonth.free` — −3 600; потолок снесён, ответ один.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("12000")), Account("карта", D("1000"))],
+        income=[Income(date(2026, 1, 1), D("5000"), "main")],
+        payments=[Payment(date(2026, 1, 31), D("2000"), account="карта",
+                          counterparty="x")],
+        living_floor_monthly=D("18000"),
+        obligation_reserve=D("1000"),
+    )
+    r = run(s, main="main")
+    months = roll_cash(s, date(2026, 1, 1), max_months=1, main="main")
+    # 18 000 на двух кошельках − 2 000 обещанного непрошедшего платежа
+    # − 18 000 × 31/30 (январь целиком, включительно) − 1 000 резерва
+    assert months[0].free == D("-3600.00")
+    assert r.free == months[0].free
+    assert compare({"январь": s}, main="main")[0].free == r.free
+
+
+def test_line_without_events_has_no_segment_so_the_floor_is_not_subtracted():
+    """Событий вовсе нет — отрезка прожитого нет, минимум в линии не вычитается.
+
+    Точка отсчёта линии — первое событие; событий нет — точки нет, и
+    движок её не выдумывает («сегодня» он не спрашивает). Месяц при этом
+    копит минимум с начала окна как и раньше: расхождение двух путей ровно
+    на прожитое января (18 600 = 18 000 × 31/30).
+    """
+    s = Scenario(accounts=[Account("main", D("10000"))],
+                 living_floor_monthly=D("18000"),
+                 obligation_reserve=D("500"))
+    r = run(s, main="main")
+    assert r.floor_gap is None                # оценивать нечего: точек нет
+    assert r.free == D("9500")                # 10 000 − 500: минимум не вычтен
+    months = roll_cash(s, date(2026, 1, 1), max_months=1, main="main")
+    assert months[0].free == D("-9100.00")    # 10 000 − 18 600 − 500
+    assert r.free - months[0].free == D("18600.00")   # разница = прожитое января
+
+
+def test_compare_reads_free_money_with_the_reserve_from_the_scenario():
+    """Сравнение читает свободные деньги в конце линии каждого варианта.
+
+    Порог резерва задаётся только в сценарии — аргумента `reserve` у
+    `compare()` больше нет, двух источников одного порога не бывает.
+    """
+    base = Scenario(accounts=[Account("main", D("1000"))],
+                    payments=[Payment(date(2026, 1, 5), D("400"), account="main",
+                                      counterparty="x")])
+    with_reserve = dataclasses.replace(base, obligation_reserve=D("300"))
+    rows = compare({"без резерва": base, "с резервом": with_reserve},
+                   main="main")
+    assert [row.label for row in rows] == ["без резерва", "с резервом"]
+    assert [row.free for row in rows] == [D("600"), D("300")]
 
 
 def test_cover_cost_yearly_and_daily():
@@ -621,7 +689,6 @@ def test_compare_returns_outcomes_in_requested_order():
     base = Scenario(accounts=[Account("main", D("1000"))])
     with_extra = dataclasses.replace(
         base, payments=[Payment(date(2026, 1, 5), D("100"), account="main", counterparty="x")])
-    rows = compare({"без траты": base, "с тратой": with_extra},
-                   main="main", reserve=D("0"))
+    rows = compare({"без траты": base, "с тратой": with_extra}, main="main")
     assert [r.label for r in rows] == ["без траты", "с тратой"]
     assert [r.end_balance for r in rows] == [D("1000"), D("900")]
