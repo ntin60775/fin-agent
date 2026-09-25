@@ -39,10 +39,10 @@ from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, EXPECTED, FAMILY,
                           WALLET_KINDS, Assignment, Counterparty, Deal,
                           FirstPayment, Movement, Occurrence, OccurrenceEdit,
                           ObservedBalance, ScheduleRule, Settlements, Wallet,
-                          beneficiary, counterparty_balance, counterparty_role,
-                          deal_amount_at, deal_balance, deal_holder_at,
-                          funding_wallet, liquidity, occurrences,
-                          payment_channel, planned_date, validate)
+                          accrued_interest, beneficiary, counterparty_balance,
+                          counterparty_role, deal_amount_at, deal_balance,
+                          deal_holder_at, funding_wallet, liquidity,
+                          occurrences, payment_channel, planned_date, validate)
 from .solver import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER,
                      UNSECURED_KINDS, Outcome, Result, Step, TransferHint,
                      Unsecured, compare, cover_cost, optional_cap, outcome, run)
@@ -57,9 +57,10 @@ __all__ = [
     "Counterparty", "Wallet", "Deal", "ScheduleRule", "FirstPayment",
     "Movement", "Assignment", "Occurrence", "OccurrenceEdit",
     "ObservedBalance", "Settlements",
-    "validate", "deal_balance", "deal_amount_at", "deal_holder_at",
-    "counterparty_balance", "counterparty_role", "funding_wallet",
-    "payment_channel", "beneficiary", "liquidity", "occurrences", "planned_date",
+    "accrued_interest", "validate", "deal_balance", "deal_amount_at",
+    "deal_holder_at", "counterparty_balance", "counterparty_role",
+    "funding_wallet", "payment_channel", "beneficiary", "liquidity",
+    "occurrences", "planned_date",
     # прокат сделок
     "roll_deals", "roll_months", "compare_deal_strategies", "DealRoll",
     "DealMonth", "ScheduledPayment", "UnitMonth", "Expectation", "Gap",
