@@ -3,7 +3,7 @@ node_type: index
 title: База знаний ядра расчёта
 service: _platform
 status: active
-updated: 2026-09-18
+updated: 2026-09-25
 links:
   part_of: [../AGENTS.md]
 ---
@@ -39,7 +39,7 @@ Markdown — источник правды. Всё производное — п
 
 ## Планы
 
-- [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [engine-wording.md](plans/engine-wording.md), [engine-messages.md](plans/engine-messages.md), [obligations/](plans/obligations/README.md)
+- [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [engine-wording.md](plans/engine-wording.md), [engine-messages.md](plans/engine-messages.md), [obligations/](plans/obligations/README.md), [long-debts-single-values/](plans/long-debts-single-values/README.md)
 
 ## Ops
 
