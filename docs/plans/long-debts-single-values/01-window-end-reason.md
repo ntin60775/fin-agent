@@ -2,10 +2,11 @@
 node_type: ticket
 title: Окно — конец окна и его причина
 service: _platform
-status: active
+status: archived
 updated: 2026-09-25
 links:
   part_of: [README.md]
+  documents: [../../../finance_core/roll.py, ../../../finance_core/forecast.py, ../../../finance_core/actions.py, ../../../finance_core/README.md, ../../../CONTEXT.md]
 ---
 
 # 01: Окно — конец окна и его причина
@@ -47,11 +48,15 @@ links:
   *Отклонено:* ступени независимо от окна (21/35) — тогда отчёт обещает то, чего в расчёте
   нет.
 
-**Blocked by:** None (can start immediately).
+**Blocked by:** —
 
-- [ ] Синтетика: долг с графиком на 24 месяца и бесконечный регулярный расход — окно кончается закрытием долга, причина «долги закрыты» (сегодня окно — 600 месяцев).
-- [ ] Синтетика: доходы кончаются раньше долга — окно кончается концом доходов, причина названа, и срок с досрочками за окном назван причиной, а не пропущен.
-- [ ] Синтетика: долг без числа платежей — окно упирается в предел месяцев, причина названа.
-- [ ] Второй приоритет с согласием владельца продлевает окно до своего закрытия; без согласия — не продлевает.
-- [ ] Ступень прогноза за концом окна названа «не достигнута за окно» с причиной.
-- [ ] `python3 -m pytest tests/` зелёные; `finance_core/README.md` и `CONTEXT.md` называют причину конца окна и порядок причин.
+## Приёмка
+
+- [x] Синтетика: долг с графиком на 24 месяца и бесконечный регулярный расход — окно кончается закрытием долга, причина «долги закрыты» (`test_window_ends_when_the_debts_close`; было окно 600 месяцев)
+- [x] Синтетика: доходы кончаются раньше долга — окно кончается концом доходов, причина названа, и срок с досрочками за окном назван причиной, а не пропущен (`test_window_ends_with_the_visible_income`, `test_the_payoff_date_beyond_the_window_names_the_reason`)
+- [x] Синтетика: долг без числа платежей — окно упирается в предел месяцев, причина названа (`test_window_hits_the_month_cap_without_a_payment_count`; смешанный портфель — `test_a_deal_without_a_payment_count_does_not_end_the_window`)
+- [x] Второй приоритет с согласием владельца продлевает окно до своего закрытия; без согласия — не продлевает (`test_second_priority_extends_the_window_only_with_consent`, `test_consent_extends_the_variants_window_and_closes_the_second_priority`)
+- [x] Ступень прогноза за концом окна названа «не достигнута за окно» с причиной (`test_step_beyond_the_window_names_the_reason`)
+- [x] `python3 -m pytest tests/` зелёные (252); `finance_core/README.md` и `CONTEXT.md` называют причину конца окна и порядок причин
+- [x] Окно видно снаружи объявленным набором причин (`WINDOW_REASONS`, `DealRoll.window`, `MonthsRoll.window`, `Forecast.window`); касса катается по тому же окну, что и долги (`test_roll_months_cash_covers_the_window_not_the_month_cap`)
+- [x] Горизонт действий — конец окна, а не `max_months`: действие за окном невозможно, цена варианта сравнивает одну линию (`test_the_window_bounds_the_horizon_and_the_price_line`)
