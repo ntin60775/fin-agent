@@ -7,7 +7,8 @@ from decimal import Decimal as D
 import pytest
 
 from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
-                          POSTPONED, SKIPPED, Counterparty, Deal, FirstPayment,
+                          PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
+                          SKIPPED, Counterparty, Deal, FirstPayment,
                           Movement, OccurrenceEdit, ScheduleRule, Settlements,
                           Wallet, compare_deal_strategies, occurrences,
                           roll_deals, validate)
@@ -970,3 +971,76 @@ def test_a_postponed_payment_extends_the_window_and_never_shortens_it():
                                                 moved_to=date(2026, 2, 25))])
     validate(earlier)
     assert roll_deals(earlier, START, D("0")).window.months == 3
+
+
+# --- обе даты срока --------------------------------------------------------
+
+def test_payoff_by_graph_says_not_closed_when_the_payment_covers_interest():
+    """Платёж равен процентам: по графику не закрывается, с досрочками месяц."""
+    debt = _deal("вечный", amount=D("1000"), rate_per_year=D("0.12"),
+                 schedule=_rule(payment=D("10")))
+    roll = roll_deals(_book(debt), START, D("100"), max_months=24)
+    assert roll.payoff_by_graph is None
+    assert roll.payoff_by_graph_reason == PAYOFF_NOT_CLOSED
+    assert roll.freedom == date(2026, 10, 1)
+
+
+def test_payoff_by_graph_comes_after_the_payoff_with_prepayments():
+    """Обе даты есть и разные: досрочки закрывают долг раньше графика."""
+    debt = _deal("заём", amount=D("3000"), schedule=_rule(payment=D("1000")))
+    roll = roll_deals(_book(debt), START, D("2000"))
+    assert roll.payoff_by_graph == date(2026, 3, 1)
+    assert roll.payoff_by_graph_reason is None
+    assert roll.freedom == date(2026, 1, 1)
+    assert roll.payoff_by_graph != roll.freedom
+
+
+def test_payoff_by_graph_of_a_debt_paid_off_before_the_roll():
+    """Погашен до проката: первый месяц окна и причина, а не пустая дата."""
+    debt = _deal("заём", amount=D("1000"), schedule=_rule(payment=D("1000")))
+    closed = Movement(date(2025, 12, 20), D("1000"), "заём")
+    roll = roll_deals(_book(debt, movements=[closed]), START, D("0"))
+    assert roll.payoff_by_graph == date(2026, 1, 1)
+    assert roll.payoff_by_graph_reason == PAYOFF_CLOSED_BEFORE
+
+
+def test_payoff_reasons_are_the_literal_phrases():
+    """Формулировки причин — ровно тексты глоссария, а не синоним смысла."""
+    gone = roll_deals(
+        _book(_deal("заём", amount=D("1000"), schedule=_rule(payment=D("1000"))),
+              movements=[Movement(date(2025, 12, 20), D("1000"), "заём")]),
+        START, D("0"))
+    assert gone.payoff_by_graph_reason == "закрыт к началу проката: закрывать нечего"
+    never = roll_deals(
+        _book(_deal("вечный", amount=D("1000"), rate_per_year=D("0.12"),
+                    schedule=_rule(payment=D("10")))),
+        START, D("0"), max_months=24)
+    assert never.payoff_by_graph_reason == "за отведённые месяцы долг не закрылся"
+
+
+def test_a_gap_is_not_a_payoff_closed_before_the_roll():
+    """Пробел — не «закрыт к началу»: не смоделированный долг не закрыт, а не просчитан."""
+    book = _book(_deal("пробел", amount=D("1000"), schedule=None))
+    roll = roll_deals(book, START, D("0"), max_months=24)
+    assert roll.gaps                                 # долг остался пробелом
+    assert roll.payoff_by_graph is None
+    assert roll.payoff_by_graph_reason == PAYOFF_NOT_CLOSED
+
+
+def test_the_payoff_with_prepayments_is_never_later_than_the_graph():
+    """Срок с досрочками не позже срока по графику: досрочки только приближают."""
+    plain = _deal("заём", amount=D("3000"), schedule=_rule(payment=D("1000")))
+    second = _deal("второй", amount=D("1000"), second_priority=True,
+                   schedule=_rule(payment=D("1000")))
+    cases = [
+        ("без досрочек", _book(plain), D("0")),
+        ("с досрочками", _book(plain), D("2000")),
+        ("два долга со вторым приоритетом", _book(plain, second), D("2000")),
+    ]
+    for name, book, extra in cases:
+        roll = roll_deals(book, START, extra, consent_to_second=True)
+        assert roll.freedom is not None, name
+        assert roll.payoff_by_graph is not None, name
+        assert roll.freedom <= roll.payoff_by_graph, name
+    helped = roll_deals(_book(plain), START, D("2000"))
+    assert helped.freedom < helped.payoff_by_graph   # досрочки приближают срок
