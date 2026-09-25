@@ -33,7 +33,6 @@ from decimal import ROUND_CEILING, Decimal
 
 from .forecast import Forecast, ForecastInput, forecast
 from .model import Income, Payment
-from .roll import horizon
 from .settlements import (OUT, Deal, Movement, OccurrenceEdit, ScheduleRule,
                           Settlements, deal_balance, deal_holder_at,
                           funding_wallet, occurrences)
@@ -120,6 +119,8 @@ class Base:
 
     Прогноз считается один раз: цена варианта сравнивает с ним, а не считает базу
     заново. Горизонт — последний день окна проката: за него действие не заглядывает.
+    Окно может быть короче `max_months` — тогда горизонт сужается вместе с ним:
+    за окном вопрос кончился, и действие там невозможно.
     """
     inp: ForecastInput
     forecast: Forecast
@@ -128,8 +129,10 @@ class Base:
 
 def baseline(inp: ForecastInput) -> Base:
     """Собрать базу: прогноз исходного сценария и горизонт проката."""
-    return Base(inp=inp, forecast=forecast(inp),
-                horizon=horizon(inp.start, inp.max_months))
+    plan = forecast(inp)
+    # Горизонт — конец окна, а не предел месяцев: окно кончается там, где
+    # кончился вопрос, и вариант катается в том же окне.
+    return Base(inp=inp, forecast=plan, horizon=plan.window.until)
 
 
 # --- что невозможно --------------------------------------------------------
@@ -387,8 +390,14 @@ def _variant_input(base: Base, actions: tuple[Action, ...]) -> ForecastInput:
             incomes.append(income)
         else:
             consent = True
+    # Окно базы передаётся, только если вариант не меняет входов окна: согласие
+    # владельца продлевает окно до закрытия второго приоритета, и вариант с ним
+    # обязан посчитать своё окно, а не кататься в базовом. Остальные действия
+    # горизонтом отсечены: сдвиг и мост за окном невозможны (`impossible`),
+    # а досрочка окно только укорачивает.
+    window = base.forecast.window if consent == base.inp.consent_to_second else None
     return replace(base.inp, book=book, one_offs=one_offs, incomes=incomes,
-                   consent_to_second=consent)
+                   consent_to_second=consent, window=window)
 
 
 def facts(base: Base, variant: Variant) -> list[OccurrenceEdit | Movement | Deal]:

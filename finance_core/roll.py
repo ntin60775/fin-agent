@@ -52,6 +52,13 @@ AVALANCHE = "avalanche"
 SNOWBALL = "snowball"
 STRATEGIES = (AVALANCHE, SNOWBALL)
 
+#: Причины конца окна — по порядку важности: если причины совпали, побеждает
+#: первая, потому что она полезнее владельцу (закрылись долги — вопрос был об этом).
+WINDOW_DEBTS_CLOSED = "долги закрыты"
+WINDOW_INCOME_ENDS = "кончились доходы"
+WINDOW_MONTH_CAP = "кончился предел месяцев"
+WINDOW_REASONS = (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP)
+
 
 # --- что прокат отдаёт наружу ----------------------------------------------
 
@@ -142,13 +149,16 @@ class DealRoll:
     """Прокат сделок: месяцы, срок и пробелы.
 
     `freedom` — месяц закрытия последней сделки первого приоритета; None вместе
-    с `stalled` значит, что за отведённые месяцы долги не закрылись. Регулярные
-    расходы на срок не влияют: закрывать там нечего.
+    с `stalled` значит, что за окно долги не закрылись. Регулярные расходы на
+    срок не влияют: закрывать там нечего.
 
     `second_freedom` — месяц закрытия второго приоритета. Сам он платится только
     по согласию владельца, и тогда прокат идёт, пока не закроется и он; закрыться
     он может и без согласия — взыскание, попавшее в единицу закрытия, гасится
     вместе с ней первым приоритетом, и дата тоже видна.
+
+    `window` — окно проката: до какого месяца он заглядывает и почему там
+    кончилось (`Window`).
     """
     months: list[DealMonth]
     total_interest: Decimal
@@ -157,6 +167,7 @@ class DealRoll:
     stalled: bool
     expectations: list[Expectation]
     gaps: list[Gap]
+    window: Window
     second_freedom: date | None = None
 
     @property
@@ -365,12 +376,150 @@ def _facts_at(book: Settlements, deal_uid: str, start: date) -> date:
     return on
 
 
+# --- окно проката -----------------------------------------------------------
+
+@dataclass(frozen=True)
+class Window:
+    """Окно проката: до какого месяца он заглядывает и почему там кончилось.
+
+    Окно — минимум из трёх границ: последний платёж по сделкам с остатком (по
+    графику), конец видимых доходов и `max_months`. За окном вопрос кончился:
+    месяц за его концом был бы выдумкой, а не расчётом.
+
+    `reason` — одно значение из объявленного набора (`WINDOW_REASONS`) по
+    порядку важности: «долги закрыты» → «кончились доходы» → «кончился предел
+    месяцев». Совпадение причин безвредно: первый по порядку ответ полезнее.
+    """
+    months: int
+    until: date
+    reason: str
+
+
+def _last_payment(deal: Deal, book: Settlements) -> date | None:
+    """Последнее вхождение сделки по графику; None — последнего платежа нет.
+
+    График, а не прокат: прокат зависит от свободных денег, и окно стало бы
+    результатом того, что само от него зависит. График при этом —
+    гарантированный верх: досрочки закрывают долг раньше, но никогда позже.
+
+    Конец есть только у ряда с числом платежей (`count` и `start`); у процента
+    от остатка и у платежа без числа раз последнего вхождения нет. Отдельный
+    первый платёж — единственное вхождение такой сделки. Перенесённое вхождение
+    платится по назначенной дате, поэтому правка, уводящая платёж позже, окно
+    удлиняет.
+    """
+    rule = deal.schedule
+    if rule is None:
+        return None
+    if rule.days:
+        if rule.count is None or rule.start is None:
+            return None
+        days = sorted(rule.days)
+        months, position = divmod(rule.count - 1, len(days))
+        first = _month_start(rule.start, months)
+        when = planned_date(first.year, first.month, days[position],
+                            rule.shift_weekend)
+    elif rule.first is not None:
+        when = planned_date(rule.first.date.year, rule.first.date.month,
+                            rule.first.date.day, rule.shift_weekend)
+    else:
+        return None
+    # Поздняя правка побеждает: перенесённый платёж уходит назначенной датой.
+    moved: dict[date, date | None] = {}
+    for edit in book.edits:
+        if edit.deal == deal.uid:
+            moved[edit.planned] = edit.moved_to
+    for assigned in moved.values():
+        if assigned is not None and assigned > when:
+            when = assigned
+    return when
+
+
+def _rollable(book: Settlements,
+              start: date) -> tuple[set[str], dict[str, str | None]]:
+    """Кто в прокате: закрытые сделки и пробелы — по сделке и по единице закрытия.
+
+    Закрытое прокатывать нечего — и пробелом оно не считается: сначала
+    закрытость, потом всё остальное. Иначе погашенная сделка без ставки
+    объявила бы пробелом всю свою копилку и живые долги не прокатались бы.
+    """
+    closed = {d.uid for d in book.deals
+              if d.amount is not None and d.direction == I_OWE
+              and (deal_balance(book, d.uid, _facts_at(book, d.uid, start))
+                   or Decimal(0)) <= 0}
+    reasons: dict[str, str | None] = {
+        d.uid: (None if d.uid in closed else _gap_reason(d)) for d in book.deals}
+    broken = _broken_units(book, reasons)
+    for deal in book.deals:
+        if reasons[deal.uid] is None and deal.closure_unit is not None:
+            reasons[deal.uid] = broken.get(deal.closure_unit)
+    return closed, reasons
+
+
+def _debts_end(book: Settlements, start: date, closed: set[str],
+               reasons: dict[str, str | None],
+               consent_to_second: bool) -> date | None:
+    """Последний платёж по сделкам с остатком; None — конец по долгам не наступит.
+
+    Регулярный расход остатка не имеет и окно не продлевает: закрывать там
+    нечего. Сделка без числа платежей границы не даёт вовсе: её ряд не
+    кончается, и окно, кончившееся раньше, закрыло бы вопрос при живом долге.
+    Второй приоритет входит в границу только при согласии владельца: без
+    согласия он не платится.
+
+    Просроченное вхождение платится в первый месяц проката (`_service_date`),
+    поэтому дат в прошлом у границы не бывает.
+    """
+    last: date | None = None
+    for deal in book.deals:
+        if deal.direction != I_OWE or deal.amount is None:
+            continue                       # регулярный расход: закрывать нечего
+        if deal.uid in closed or reasons.get(deal.uid) is not None:
+            continue                       # закрыта или пробел: в прокат не входит
+        if deal.second_priority and not consent_to_second:
+            continue                       # без согласия он не платится
+        found = _last_payment(deal, book)
+        if found is None:
+            return None                    # ряда нет конца — нет и границы
+        when = _service_date(deal, found, start)
+        last = when if last is None else max(last, when)
+    return last
+
+
+def roll_window(book: Settlements, start: date, max_months: int, *,
+                income_horizon: date | None = None,
+                consent_to_second: bool = False) -> Window:
+    """Где кончается окно проката и почему: минимум из трёх границ.
+
+    Границы — последний платёж по сделкам с остатком (по графику), конец
+    видимых доходов и `max_months`. Конец видимых доходов — объявленный
+    горизонт данных о доходах: список приходов может быть видимым срезом, а не
+    концом данных, и неизвестное не подставляется нулём. Горизонт не задан —
+    доходы окно не ограничивают.
+
+    При совпадении границ побеждает причина, первая по порядку важности:
+    «долги закрыты» → «кончились доходы» → «кончился предел месяцев».
+    """
+    closed, reasons = _rollable(book, start)
+    bounds: list[tuple[int, str]] = [(max_months, WINDOW_MONTH_CAP)]
+    if income_horizon is not None:
+        bounds.append((_month_index(start, income_horizon), WINDOW_INCOME_ENDS))
+    debts = _debts_end(book, start, closed, reasons, consent_to_second)
+    if debts is not None:
+        bounds.append((_month_index(start, debts), WINDOW_DEBTS_CLOSED))
+    order = {reason: place for place, reason in enumerate(WINDOW_REASONS)}
+    months, reason = min(bounds, key=lambda bound: (bound[0], order[bound[1]]))
+    return Window(months, horizon(start, months), reason)
+
+
 # --- прокат ----------------------------------------------------------------
 
 def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
                strategy: str = AVALANCHE, max_months: int = 600,
                consent_to_second: bool = False,
-               budgets: Mapping[int, Decimal] | None = None) -> DealRoll:
+               budgets: Mapping[int, Decimal] | None = None,
+               income_horizon: date | None = None,
+               window: Window | None = None) -> DealRoll:
     """Прокатить сделки по месяцам от `start`.
 
     Бюджет месяца — обязательная нагрузка по графику плюс `monthly_extra`;
@@ -387,20 +536,22 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
     предложением (`DealMonth.offer`). Согласие считается до конца: прокат идёт,
     пока не закроется и второй приоритет, — иначе даты его закрытия не видно
     (`DealRoll.second_freedom`).
+
+    Окно проката считается здесь же (`roll_window`): дальше последнего платежа
+    по долгам, конца видимых доходов и `max_months` прокат не заглядывает, а
+    причина конца окна видна в `DealRoll.window`. Готовое окно можно передать
+    снаружи (`window`) — так цена варианта считает его в окне базы: сравнение
+    идёт по одной линии, а не по разным. Переданное окно используется как есть и
+    обязано быть посчитано по этой же книге и с этим же согласием — иначе отчёт
+    разойдётся с книгой.
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"неизвестная стратегия: {strategy!r}")
 
-    # Закрытое прокатывать нечего — и пробелом оно не считается: сначала
-    # закрытость, потом всё остальное. Иначе погашенная сделка без ставки
-    # объявила бы пробелом всю свою копилку и живые долги не прокатались бы.
-    closed = {d.uid for d in book.deals
-              if d.amount is not None and d.direction == I_OWE
-              and (deal_balance(book, d.uid, _facts_at(book, d.uid, start))
-                   or Decimal(0)) <= 0}
-    reasons = {d.uid: (None if d.uid in closed else _gap_reason(d))
-               for d in book.deals}
-    broken = _broken_units(book, reasons)
+    closed, reasons = _rollable(book, start)
+    win = window if window is not None else roll_window(
+        book, start, max_months, income_horizon=income_horizon,
+        consent_to_second=consent_to_second)
 
     gaps: list[Gap] = []
     open_deals: dict[str, _Open] = {}
@@ -411,8 +562,6 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
         if deal.uid in closed:
             continue                       # уже закрыта: прокатывать нечего
         reason = reasons[deal.uid]
-        if reason is None and deal.closure_unit is not None:
-            reason = broken.get(deal.closure_unit)
         if reason is not None:
             gaps.append(Gap(deal.uid, reason))
             continue
@@ -451,7 +600,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
             if unit.closed:
                 open_deals[member].balance = Decimal(0)
 
-    until = horizon(start, max_months)
+    until = win.until
 
     # Вхождения: окно от начала графика и самых ранних правок — правка может
     # увести вхождение в прокатываемый месяц из-за его начала.
@@ -481,7 +630,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
                 continue
             when = _service_date(opened.deal, occ.due, start)
             index = _month_index(start, when)
-            if index > max_months:
+            if index > win.months:
                 continue
             due.setdefault(index, []).append((when, uid, occ))
             baseline[index] = (baseline.get(index, Decimal(0))
@@ -500,7 +649,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
     # датой не объявляется.
     second_start = _second_open(open_deals, open_units)
 
-    for index in range(1, max_months + 1):
+    for index in range(1, win.months + 1):
         month = _month_start(start, index - 1)
         rows = due.get(index, [])
         extra = budgets.get(index, Decimal(0)) if budgets is not None else monthly_extra
@@ -622,7 +771,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
         stalled = freedom is None
 
     return _result(book, months, total_interest, freedom, start_total, stalled,
-                   receivables, gaps, start, second_freedom)
+                   receivables, gaps, start, win, second_freedom)
 
 
 def _prepayment(book: Settlements, open_deals: dict[str, _Open],
@@ -698,6 +847,7 @@ def _second_open(open_deals: dict[str, _Open],
 def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
             freedom: date | None, start_total: Decimal, stalled: bool,
             receivables: Iterable[Deal], gaps: list[Gap], start: date,
+            window: Window,
             second_freedom: date | None = None) -> DealRoll:
     """Собрать прокат: месяцы плюс то, что в них не входило.
 
@@ -716,7 +866,7 @@ def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
                                             occ.due, occ.remaining))
     expectations.sort(key=lambda e: e.date)
     return DealRoll(months, total_interest, freedom, start_total, stalled,
-                    expectations, gaps, second_freedom)
+                    expectations, gaps, window, second_freedom)
 
 
 @dataclass
@@ -742,6 +892,11 @@ class MonthsRoll:
         """
         return sum((cm.unsecured_total for cm in self.cash_months), Decimal(0))
 
+    @property
+    def window(self) -> Window:
+        """Окно проката: до какого месяца он заглядывает и почему там кончилось."""
+        return self.deal_roll.window
+
 
 class ConvergenceError(Exception):
     """Расчёт не сошёлся за отведённое число итераций."""
@@ -759,7 +914,8 @@ def roll_months(book: Settlements, start: date,
                 max_months: int = 600,
                 max_iterations: int = 100,
                 consent_to_second: bool = False,
-                main: str | None = None) -> MonthsRoll:
+                main: str | None = None,
+                window: Window | None = None) -> MonthsRoll:
     """Прокатить месяцы: долги отдают расписание, касса возвращает бюджет досрочек.
 
     Связка замкнута: свободные деньги месяца становятся бюджетом досрочек,
@@ -772,9 +928,12 @@ def roll_months(book: Settlements, start: date,
     не хватает.
 
     Кроме расписания касса принимает приходы, переводы и разовые платежи
-    (`one_offs` — то, что не из сделок); `income_horizon` нужен, чтобы измерить
-    прожиточный минимум после последнего прихода в окне, а `obligation_reserve` —
+    (`one_offs` — то, что не из сделок); `income_horizon` — конец видимых
+    доходов: до него измеряется прожиточный минимум после последнего прихода в
+    окне, и им же кончается окно проката (`roll_window`); `obligation_reserve` —
     чтобы не раздать досрочками деньги, оставленные под начало следующего месяца.
+    `window` — готовое окно: цена варианта передаёт окно базы, и оно обязано быть
+    посчитано по той же книге и с тем же согласием.
 
     Месяцы после дыры помечаются как посчитанные на допущении: прокат не
     останавливается и не уходит в минус молча.
@@ -805,6 +964,8 @@ def roll_months(book: Settlements, start: date,
             max_months=max_months,
             consent_to_second=consent_to_second,
             budgets=budgets,
+            income_horizon=income_horizon,
+            window=window,
         )
 
         # Собрать платежи расписания в сценарий кассы
@@ -829,7 +990,10 @@ def roll_months(book: Settlements, start: date,
             obligation_reserve=obligation_reserve,
             income_horizon=income_horizon,
         )
-        cash_months = roll_cash(scenario, start, max_months=max_months, main=main)
+        # Касса катается по тому же окну, что и долги: за окном вопрос кончился,
+        # и месяц за ним был бы выдумкой (600 месяцев кассы на 24-месячный долг).
+        cash_months = roll_cash(scenario, start,
+                                max_months=deal_roll.window.months, main=main)
 
         # Бюджет досрочек не бывает отрицательным: свободные деньги месяца —
         # состояние месяца и могут быть нехваткой; `prepay_budget` клампит их нулём.
