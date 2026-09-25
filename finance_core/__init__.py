@@ -24,10 +24,12 @@ from .forecast import (Deficit, Discrepancy, FamilyTransfer, Forecast,
                        ForecastInput, Milestone, Shift, forecast,
                        forecast_shifts, widest)
 from .model import Account, Income, Payment, Scenario, Transfer
-from .roll import (AVALANCHE, SNOWBALL, STRATEGIES, ConvergenceError,
-                   DealMonth, DealRoll, Expectation, Gap, MonthsRoll,
-                   ScheduledPayment, UnitMonth, compare_deal_strategies,
-                   horizon, roll_deals, roll_months)
+from .roll import (AVALANCHE, SNOWBALL, STRATEGIES, WINDOW_DEBTS_CLOSED,
+                   WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP, WINDOW_REASONS,
+                   ConvergenceError, DealMonth, DealRoll, Expectation, Gap,
+                   MonthsRoll, ScheduledPayment, UnitMonth, Window,
+                   compare_deal_strategies, horizon, roll_deals, roll_months,
+                   roll_window)
 from .solver import CashMonth, roll_cash
 from .settlements import (BOTH, CREDITOR, DEBTOR, DIRECTIONS, EXPECTED, FAMILY,
                           IN, I_OWE, KINDS, LEGAL, MOVEMENT_DIRECTIONS,
@@ -61,6 +63,7 @@ __all__ = [
     "roll_deals", "roll_months", "compare_deal_strategies", "DealRoll",
     "DealMonth", "ScheduledPayment", "UnitMonth", "Expectation", "Gap",
     "MonthsRoll", "CashMonth", "ConvergenceError", "horizon",
+    "roll_window", "Window",
     # прогноз
     "forecast", "forecast_shifts", "widest", "Forecast", "ForecastInput",
     "Milestone", "Deficit", "FamilyTransfer", "Discrepancy", "Shift",
@@ -76,4 +79,6 @@ __all__ = [
     "OCCURRENCE_STATUSES",
     "KIND_PAYMENT", "KIND_PREPAID", "KIND_TRANSFER", "UNSECURED_KINDS",
     "AVALANCHE", "SNOWBALL", "STRATEGIES",
+    "WINDOW_DEBTS_CLOSED", "WINDOW_INCOME_ENDS", "WINDOW_MONTH_CAP",
+    "WINDOW_REASONS",
 ]

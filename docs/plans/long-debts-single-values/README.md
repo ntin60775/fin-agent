@@ -2,7 +2,7 @@
 node_type: plan
 title: Длинный долг считается, у величин один базис
 service: _platform
-status: draft
+status: active
 updated: 2026-09-25
 links:
   documents: [../../../finance_core/roll.py, ../../../finance_core/solver.py, ../../../finance_core/settlements.py, ../../../finance_core/forecast.py, ../../../finance_core/actions.py]
@@ -150,7 +150,7 @@ links:
 
 | # | Тикет | Блокируют | Статус |
 |---|---|---|---|
-| 01 | [Окно — конец окна и его причина](01-window-end-reason.md) | — | draft |
+| 01 | [Окно — конец окна и его причина](01-window-end-reason.md) | — | active |
 | 02 | [Обе даты — срок по графику рядом со сроком с досрочками](02-payoff-by-graph.md) | 01 | draft |
 | 03 | [Начисление — одна функция (подготовка)](03-accrual-one-function.md) | — | draft |
 | 04 | [Проход по месяцам — сходимость без глобальной петли](04-month-by-month-roll.md) | 01, 02, 03 | draft |

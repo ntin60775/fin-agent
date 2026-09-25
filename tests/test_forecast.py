@@ -11,6 +11,7 @@ from finance_core import (FAMILY, LEGAL, OWED_TO_ME, PERSON, Counterparty, Deal,
                           ForecastInput, Income, Movement, ObservedBalance,
                           Payment, ScheduleRule, Settlements, Wallet, forecast,
                           forecast_shifts, validate, widest)
+from finance_core import WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP
 
 START = date(2026, 1, 1)
 
@@ -457,3 +458,33 @@ def test_obligation_reserve_is_taken_off_free_money():
     with_reserve = forecast(replace(base, obligation_reserve=D("300")))
     assert with_reserve.months[0].free == D("400")
     assert with_reserve.obligation_reserve == D("300")
+
+
+# --- окно проката -----------------------------------------------------------
+
+def test_step_beyond_the_window_names_the_reason():
+    """Ступень за концом окна названа «не достигнута за окно» с причиной конца окна."""
+    incomes = _incomes(D("1000"), 1, 2, 3)
+    one_offs = [Payment(date(2026, month, 10), D("1000"), account="карта",
+                        counterparty="банк") for month in (1, 2, 3)]
+    f = forecast(_input(_book(), incomes=incomes, one_offs=one_offs,
+                        living_floor=D("0"), max_months=3))
+    assert len(f.months) == 3                    # окно кончилось пределом месяцев
+    assert f.step1.month == date(2026, 1, 1)     # дефицита нет — ступень 1 достигнута
+    assert not f.step2.reached                   # свободные деньги нулевые во всех месяцах
+    assert "не достигнута за окно" in f.step2.reason
+    assert WINDOW_MONTH_CAP in f.step2.reason
+    assert f.window.reason == WINDOW_MONTH_CAP
+
+
+def test_the_payoff_date_beyond_the_window_names_the_reason():
+    """Срок с досрочками за окном назван причиной, а не пропущен."""
+    debt = _deal(uid="долгий", amount=D("60000"), rate_per_year=D("0"),
+                 wallet="карта",
+                 schedule=ScheduleRule(days=(20,), start=START,
+                                       payment=D("1000"), count=60))
+    f = forecast(_input(_book(debt), incomes=_incomes(D("5000"), 1, 2, 3),
+                        living_floor=D("0"), income_horizon=date(2026, 3, 31)))
+    assert (f.window.months, f.window.reason) == (3, WINDOW_INCOME_ENDS)
+    assert f.first_priority.month is None        # долг не закрылся в окне
+    assert WINDOW_INCOME_ENDS in f.first_priority.reason
