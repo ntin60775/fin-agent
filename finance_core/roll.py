@@ -27,8 +27,10 @@
   видеть. Свободные деньги считаются до досрочек — это и есть их бюджет.
 
 Прокат месячный: платежи внутри месяца агрегируются в его итог, а дни у платежей
-остаются — по ним начисляются проценты у дневной ставки. Точку отсчёта и бюджет
-досрочек движок не выдумывает: и то и другое передаётся снаружи.
+остаются — по ним начисляются проценты у дневной ставки. Считает их одна функция
+в `settlements` (`accrued_interest`): прокат передаёт ей месяц целиком — остаток
+на его начало и платежи месяца, — и берёт число без второго округления. Точку
+отсчёта и бюджет досрочек движок не выдумывает: и то и другое передаётся снаружи.
 """
 from __future__ import annotations
 
@@ -36,15 +38,15 @@ import calendar
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal, getcontext, localcontext
+from decimal import Decimal
 
-from .model import Account, Income, Payment, Scenario, Transfer
+from .model import Account, Income, Payment, Scenario, Transfer, kopek
 from .settlements import (I_OWE, OWED_TO_ME, Deal, Occurrence, Settlements,
-                          Wallet, deal_amount_at, deal_balance, deal_holder_at,
-                          funding_wallet, occurrences, planned_date)
+                          Wallet, accrued_interest, deal_amount_at,
+                          deal_balance, deal_holder_at, funding_wallet,
+                          occurrences, planned_date)
 from .solver import roll_cash
 
-KOPEK = Decimal("0.01")
 DAYS_IN_YEAR = Decimal(365)
 
 #: Стратегии досрочек: лавина — дорогая ставка первой, снежный ком — мелкий остаток.
@@ -292,20 +294,6 @@ def _rate(deal: Deal) -> Decimal:
     return deal.rate_per_year or Decimal(0)
 
 
-def _money(value: Decimal) -> Decimal:
-    """Округлить до копейки, не падая на выросшем остатке.
-
-    Контекст Decimal по умолчанию несёт 28 значащих цифр. У долга, который не
-    закрывается и растёт по ставке, остаток за прокат перерастает их, и
-    `quantize` падает `InvalidOperation` вместо честного «не закрылось»: прокат
-    обязан дойти до конца окна на любом графике. Знаков берётся столько, сколько
-    нужно самому числу, — на обычных суммах ответ не меняется.
-    """
-    with localcontext() as ctx:
-        ctx.prec = max(getcontext().prec, value.adjusted() + 4)
-        return value.quantize(KOPEK, ROUND_HALF_UP)
-
-
 def _payment_amount(deal: Deal, occ: Occurrence, balance: Decimal) -> Decimal:
     """Сколько платить по вхождению: сумма правила или процент от остатка.
 
@@ -318,30 +306,7 @@ def _payment_amount(deal: Deal, occ: Occurrence, balance: Decimal) -> Decimal:
     percent = deal.schedule.percent if deal.schedule is not None else None
     if percent is None:
         return Decimal(0)
-    return _money(balance * percent)
-
-
-def _month_interest(deal: Deal, balance: Decimal, month: date,
-                    day_payments: dict[int, Decimal]) -> Decimal:
-    """Проценты за месяц по базе начисления сделки.
-
-    Дневная ставка считается по дням: платёж дня уменьшает остаток до начисления
-    за этот день — поэтому перенос платежа внутри месяца стоит денег. Годовая —
-    начисление месячное: остаток на начало месяца, и перенос её не удорожает.
-    """
-    if deal.rate_per_day is not None:
-        days = calendar.monthrange(month.year, month.month)[1]
-        total = Decimal(0)
-        left = balance
-        for day in range(1, days + 1):
-            left -= day_payments.get(day, Decimal(0))
-            if left <= 0:
-                break
-            total += _money(left * deal.rate_per_day)
-        return total
-    if deal.rate_per_year is not None:
-        return _money(balance * deal.rate_per_year / 12)
-    return Decimal(0)
+    return kopek(balance * percent)
 
 
 def _order(targets: Sequence[_Target], strategy: str) -> list[_Target]:
@@ -737,17 +702,19 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
         payments: list[ScheduledPayment] = []
 
         # 1. Проценты: до платежей месяца, по базе начисления каждой сделки.
+        # Их считает settlements (`accrued_interest`): слагаемые округлены
+        # там, второй раз проценты здесь не округляются.
         interest = Decimal(0)
         for uid, opened in open_deals.items():
             if opened.unit is not None or opened.balance <= 0:
                 continue                   # внутри копилки проценты не идут
-            by_day: dict[int, Decimal] = {}
-            for when, row_uid, occ in rows:
-                if row_uid == uid:
-                    by_day[when.day] = (by_day.get(when.day, Decimal(0))
-                                        + _payment_amount(opened.deal, occ,
-                                                          opened.balance))
-            accrued = _month_interest(opened.deal, opened.balance, month, by_day)
+            # Платежи месяца — с суммой вхождения на начало месяца: на них
+            # считается дневная база, а платится по шагу 2 сколько выйдет.
+            month_payments = [
+                (when, _payment_amount(opened.deal, occ, opened.balance))
+                for when, row_uid, occ in rows if row_uid == uid]
+            accrued = accrued_interest(opened.deal, opened.balance, month,
+                                       _month_end(month), month_payments)
             opened.balance += accrued
             interest += accrued
         total_interest += interest
