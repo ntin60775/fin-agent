@@ -155,7 +155,7 @@ links:
 | 03 | [Начисление — одна функция (подготовка)](03-accrual-one-function.md) | — | archived |
 | 04 | [Проход по месяцам — сходимость без глобальной петли](04-month-by-month-roll.md) | 01, 02, 03 | archived |
 | 05 | [Единое определение свободных денег](05-single-free-money-basis.md) | 04 | archived |
-| 06 | [Дата начала долга и канон остатка](06-deal-start-and-balance-canon.md) | 04 | draft |
+| 06 | [Дата начала долга и канон остатка](06-deal-start-and-balance-canon.md) | 04 | archived |
 | 07 | [Копилка и округление — следствия канона](07-pot-balance-and-rounding.md) | 06 | draft |
 | 08 | [Сальдо, сверка и неполнота прогноза](08-saldo-and-reconciliation.md) | 06 | draft |
 | 09 | [Хвосты ревью — сборник неблокирующих замечаний](09-review-tails.md) | 08 | draft |

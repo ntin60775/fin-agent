@@ -2,10 +2,10 @@
 node_type: ticket
 title: Начало долга и канон остатка
 service: _platform
-status: draft
+status: archived
 updated: 2026-09-26
 links:
-  documents: [../../../finance_core/settlements.py, ../../../finance_core/roll.py, ../../../finance_core/actions.py, ../../../finance_core/README.md, ../../../CONTEXT.md, ../../decisions/README.md, ../../decisions/deal-balance-canon.md, ../../../tests/test_roll.py, ../../../tests/test_settlements.py, ../../../tests/test_debt.py, ../../../tests/test_actions.py]
+  documents: [../../../finance_core/settlements.py, ../../../finance_core/roll.py, ../../../finance_core/actions.py, ../../../finance_core/README.md, ../../../CONTEXT.md, ../../decisions/README.md, ../../decisions/deal-balance-canon.md, ../../../tests/test_roll.py, ../../../tests/test_settlements.py, ../../../tests/test_debt.py, ../../../tests/test_actions.py, ../../../tests/test_forecast.py, ../../../tests/test_months.py]
   part_of: [README.md]
   depends_on: [03-accrual-one-function.md, 04-month-by-month-roll.md]
 ---
@@ -69,36 +69,56 @@ links:
 
 ## Приёмка
 
-Пройдено: `python3 -m pytest tests/` — 300 passed (288 на main + 12 новых),
-`gitmark lint` — чисто, доки (`finance_core/README.md`, `CONTEXT.md`) синхронизированы
-с кодом, решение записано и проиндексировано.
+Пройдено: `python3 -m pytest tests/` — 300 passed; линт KB канонической копией —
+чисто.
 
 - [x] Синтетика: долг со ставкой — остаток проката на конец месяца и расчётный остаток на ту же дату совпадают до копейки (сегодня расходятся на 19 763,73 при теле 100 000 и ставке 24 %).
-  — расхождение воспроизведено на main: прокат 59 763,73 против `deal_balance` 40 000
-  (разница ровно 19 763,73); после правки оба числа 59 763,73 —
-  `tests/test_roll.py::test_roll_balance_and_the_canon_are_one_number_at_the_month_end`
+  — `tests/test_roll.py::test_roll_balance_and_the_canon_are_one_number_at_the_month_end`:
+  ДО на main — прокат 59 763,73 против канона 40 000, расхождение 19 763,73 (ровно
+  накопленные проценты); ПОСЛЕ — 59 763,73 = 59 763,73. Равенство невакуумное: на книге
+  без движений (платежи проката ещё не записаны) канон даёт 126 824,18, и числа сходятся
+  только когда книга отражает те же платежи
 - [x] Синтетика: дата внутри месяца — начислено пропорционально дням, и месяц на границе даёт ровно то же число, что прокат.
   — `tests/test_roll.py::test_the_roll_opens_with_the_canon_and_a_mid_month_date_accrues_by_days`:
-  15.01 → 115 980,19 (15/31 января от основания 114 868,56), 31.01 → 117 165,93 =
-  `roll.months[0].balances`; там же `test_a_debt_start_inside_the_window_accrues_only_from_it`
-  (долг с 15.04: январь–март — 0, апрель — 16/30 дня)
+  15/31 января → 115 980,19, граница 31.01 → 117 165,93 = `roll.months[0].balances`;
+  `tests/test_roll.py::test_a_debt_start_inside_the_window_accrues_only_from_it` —
+  долг с 15.04: январь–март 0, апрель 16/30 дня → 1 066,67, граница 30.04 = балансу
+  проката, майская граница тоже сходится
 - [x] Проверка падает с понятным текстом на сделке со ставкой без начала долга.
   — `tests/test_settlements.py::test_a_rated_deal_without_a_debt_start_falls_with_a_clear_text`:
-  «сделка 'заём': ставка и сумма есть, а начала долга нет — без него долг на дату не
-  считается…»
+  ValueError «сделка 'заём': ставка и сумма есть, а начала долга нет — без него долг на
+  дату не считается; укажите дату начала долга (start)…»
 - [x] Беспроцентная сделка и регулярный расход считаются без начала долга, и это не ошибка.
   — `tests/test_settlements.py::test_a_free_deal_and_a_regular_expense_never_ask_for_a_debt_start`:
-  `validate` проходит, канон беспроцентной — тело минус движения (7 000), у регулярного
-  расхода остатка нет (`None`)
+  `validate` проходит без ошибки, канон беспроцентной — 7 000,00 (тело минус движения),
+  у регулярного расхода остатка нет (`None`)
 - [x] Синтетика: передача долга не двигает начало долга и не сбрасывает накопленное начисление.
   — `tests/test_settlements.py::test_an_assignment_neither_moves_the_debt_start_nor_resets_the_accrual`:
-  `start` 01.06.2025 не изменился, 28.02 → 119 509,25, 31.03 → 142 299,44 — дельта
-  01.03 входит в базу марта (перезапуск от даты передачи дал бы 122 400,00)
+  `start` 01.06.2025 не изменился, 28.02 → 119 509,25, 31.03 → 142 299,44 (дельта 01.03
+  входит в базу марта; перезапуск от даты передачи дал бы 122 400,00), плюс
+  `test_an_assignment_before_the_window_enters_the_accrual_base` — цессия ДО окна:
+  открытие 136 517,21, 31.01 прокат = канон = 138 247,55, и
+  `test_an_assignment_inside_the_window_enters_the_accrual_of_its_month` — цессия ВНУТРИ
+  окна: 31.03 прокат = канон = 139 239,04
 - [x] `python3 -m pytest tests/` зелёные; `finance_core/README.md`, `CONTEXT.md` («Начало долга» и его отличие от начала ряда платежей) и решение в `docs/decisions/`.
-  — 300 passed; `CONTEXT.md` — термин «Начало долга» рядом с «Правилом графика» и
-  обновлённый «Расчётный остаток»; обещание тикета 03 в `finance_core/README.md` и в
-  докстринге `accrued_interest` приведено к настоящему времени; решение —
-  `docs/decisions/deal-balance-canon.md`, строка в `docs/decisions/README.md`
+  — 300 passed; `CONTEXT.md` — термин «Начало долга» рядом с «Правилом графика» (с его
+  отличием от начала ряда платежей) и развёрнутый «Расчётный остаток»; обещание тикета 03
+  в `finance_core/README.md` и в докстринге `accrued_interest` приведено к настоящему
+  времени; решение `docs/decisions/deal-balance-canon.md` проиндексировано в
+  `docs/decisions/README.md`, линт KB чист
+
+Независимо подтверждено ревью:
+
+- (а) все четыре правленых ожидания пересчитаны ревьюером и объяснимы каноном; ни один
+  ассерт не ослаблен и не удалён.
+- (б) два блокирующих первого раунда исправлены и закреплены тестами: котёл копилки
+  считался от канона (теперь от тела — `test_unit_pot_on_opening_is_what_was_paid`:
+  котёл 6 000,00, остаток до цели 14 000,00) и дельта цессии не входила в базу начисления
+  (теперь входит — эталоны ревьюера воспроизведены точно: 136 517,21 / 138 247,55 /
+  139 239,04); спор о числе 142 239,04 разрешён в пользу автора — верное 142 299,44.
+- (в) названные исключения равенства «прокат = канон»: участник копилки (его остаток
+  стоит на теле, отложено в тикет 07) и вхождение, которое платит сам прокат
+  (структурно: проценты считаются до платежей месяца).
 
 **Механические правки фикстур:** `start=START` в хелперах `_deal` пяти файлов тестов
 (`test_roll`, `test_debt`, `test_months`, `test_forecast`, `test_actions`), `start=START` у
