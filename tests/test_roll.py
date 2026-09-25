@@ -341,7 +341,7 @@ def test_regular_expense_pays_but_never_closes_or_is_prepaid():
     assert roll.freedom == date(2026, 1, 1)         # заём закрылся, аренда срок не держит
     assert roll.months[0].paid == D("1500")         # 500 аренды + 1000 займа
     assert [p.amount for p in roll.months[0].payments if p.deal == "аренда"] == [D("500")]
-    assert roll.months[0].free == D("5000")         # свободные деньги её не досрочили
+    assert roll.months[0].prepaid == D("0")         # свободные деньги её не досрочили
 
 
 def test_scheduled_payment_knows_whether_it_is_debt():
@@ -433,14 +433,35 @@ def test_second_priority_is_offered_not_paid():
     book = _book(schedule_deal, claim)
     validate(book)
     offered = roll_deals(book, START, D("4000"), max_months=6)
-    assert offered.months[0].offer == D("2000")
-    assert offered.months[0].free == D("2000")
+    assert offered.months[0].offer == D("2000")     # срез: 4 000 свободных − 2 000 ушедших
+    assert offered.months[0].prepaid == D("2000")
     assert offered.months[0].balances["взыскание"] == D("5000")
 
     agreed = roll_deals(book, START, D("4000"), max_months=6, consent_to_second=True)
     assert agreed.months[0].offer == D("0")
     assert agreed.months[0].balances["взыскание"] == D("3000")
     assert agreed.months[0].paid == D("5000")
+
+
+def test_offer_is_a_slice_of_free_money_not_the_pool_leftover():
+    """Предложение — срез свободных денег, а не свой расчёт по бюджету.
+
+    На третьем месяце обязательный платёж урезан остатком сделки (500 из
+    1 000): неоплаченная база освобождает остаток пула до 4 500, но в
+    свободные деньги она не входит. Срез — 4 000 переданного бюджета минус
+    ушедшие досрочки; остаток пула в него не попадает.
+    """
+    tight = _deal(uid="узкий", amount=D("2500"),
+                  schedule=_rule(payment=D("1000")), prepay=False)
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  schedule=None)
+    book = _book(tight, claim)
+    validate(book)
+    roll = roll_deals(book, START, D("4000"), max_months=6)
+    third = roll.months[2]
+    assert third.short == D("500")            # урезано: остаток 500 < платежа 1000
+    assert third.prepaid == D("0")            # досрочек не было
+    assert third.offer == D("4000")           # срез: 4 000 свободных, а не 4 500 пула
 
 
 def test_second_priority_grows_while_it_waits():
@@ -452,7 +473,7 @@ def test_second_priority_grows_while_it_waits():
     roll = roll_deals(book, START, D(0), max_months=2)
     assert roll.months[0].balances["взыскание"] == D("12120.00")
     assert roll.months[0].paid == D("0")            # но сам не платится
-    assert roll.months[0].free == D("0")
+    assert roll.months[0].offer == D("0")           # свободных денег ноль — предлагать нечего
 
 
 def test_second_priority_is_not_paid_by_its_own_schedule():
