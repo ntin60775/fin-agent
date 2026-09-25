@@ -19,8 +19,9 @@
 - **Копилка.** Сделки одной единицы закрытия гасят друг друга вместе: платежи
   копятся в котёл, остаток не падает, цель (сумма по единице) фиксирована и не
   растёт — процентов внутри копилки нет.
-- **Второй приоритет сам не платится.** Прокат показывает свободный остаток и
-  предлагает направить его туда; считать погашение он начинает только после
+- **Второй приоритет сам не платится.** Прокат показывает срез свободных
+  денег месяца — сколько их не нашло места (`DealMonth.offer`) — и предлагает
+  направить его туда; считать погашение он начинает только после
   согласия владельца (`consent_to_second`). Ждать при этом не бесплатно: долг
   растёт по ставке сделки.
 - **Пробел — не ноль.** Сделка с неизвестной ставкой или без правила графика в
@@ -123,10 +124,11 @@ class DealMonth:
     месяц, `paid` — ушло за месяц, из него `prepaid` — досрочки, `short` —
     урезано: сколько из обязательного `want` не заплачено (сумма `want − amount`
     по обязательным вхождениям месяца, урезанным пулом, остатком или котлом;
-    аррерис в следующий месяц не переносится). `free` —
-    свободные деньги, которым не нашлось места; `offer` — сколько из них
-    предлагается направить во второй приоритет. `payments` — расписание месяца:
-    дата, сумма, кошелёк и контрагент каждого платежа.
+    аррерис в следующий месяц не переносится). `offer` — **срез свободных
+    денег месяца**, которым не нашлось места: свободные деньги месяца минус
+    ушедшие досрочки — столько предлагается направить во второй приоритет.
+    `payments` — расписание месяца: дата, сумма, кошелёк и контрагент каждого
+    платежа.
     """
     index: int
     month: date
@@ -137,7 +139,6 @@ class DealMonth:
     paid: Decimal
     prepaid: Decimal
     short: Decimal
-    free: Decimal
     offer: Decimal
     payments: list[ScheduledPayment]
 
@@ -199,10 +200,6 @@ class DealRoll:
     @property
     def total_paid(self) -> Decimal:
         return sum((s.paid for s in self.months), Decimal(0))
-
-    @property
-    def total_free(self) -> Decimal:
-        return sum((s.free for s in self.months), Decimal(0))
 
 
 # --- состояние проката -----------------------------------------------------
@@ -532,13 +529,15 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
 
     `budgets` — бюджет досрочек по месяцам (индекс → сумма); если задан,
     используется вместо `monthly_extra`. Нужен для связки с кассой: свободные
-    деньги месяца становятся бюджетом досрочек.
+    деньги месяца становятся бюджетом досрочек. Кассы в этом пути нет, и
+    свободные деньги месяца — сам переданный бюджет: из них и считается
+    срез-предложение второму приоритету.
 
     Второй приоритет не платится, пока владелец не дал согласия
-    (`consent_to_second`); без согласия его свободный остаток показывается
-    предложением (`DealMonth.offer`). Согласие считается до конца: прокат идёт,
-    пока не закроется и второй приоритет, — иначе даты его закрытия не видно
-    (`DealRoll.second_freedom`).
+    (`consent_to_second`); без согласия срез свободных денег, которым не
+    нашлось места, показывается предложением (`DealMonth.offer`). Согласие
+    считается до конца: прокат идёт, пока не закроется и второй приоритет, —
+    иначе даты его закрытия не видно (`DealRoll.second_freedom`).
 
     Окно проката считается здесь же (`roll_window`): дальше последнего платежа
     по долгам, конца видимых доходов и `max_months` прокат не заглядывает, а
@@ -838,11 +837,14 @@ class _DealsRoll:
                                payments)
         return self.load
 
-    def finish(self, load: _MonthLoad) -> list[ScheduledPayment]:
+    def finish(self, load: _MonthLoad, free: Decimal) -> list[ScheduledPayment]:
         """Шаг месяца: досрочки по стратегии, второй приоритет и итог месяца.
 
         Досрочки идут из остатка пула — обязательные уже заплачены, а
-        освободившийся платёж остаётся в бюджете. Возвращает досрочки месяца:
+        освободившийся платёж остаётся в бюджете. `free` — свободные деньги
+        месяца (в связке — `CashMonth.free`, в прокате без кассы — бюджет,
+        который передал вызывающий): предложение второму приоритету считается
+        срезом этих денег, а не остатком пула. Возвращает досрочки месяца:
         их касса проведёт после обязательных, когда деньги месяца уже
         посчитаны.
         """
@@ -870,7 +872,11 @@ class _DealsRoll:
             load.payments.append(payment)
             prepayments.append(payment)
 
-        # 4. Второй приоритет: сам не платится — предлагается.
+        # 4. Второй приоритет: сам не платится — предлагается. Предложение —
+        # срез свободных денег месяца, которым не нашлось места: свободные
+        # деньги минус ушедшие досрочки, а не остаток пула. Отрицательный
+        # срез — нехватка, а не предложение: не бывает его меньше нуля, как и
+        # бюджета досрочек.
         second_open = _second_open(open_deals, open_units)
         if consent:
             for target in _order(_targets(open_deals, open_units, True),
@@ -894,6 +900,9 @@ class _DealsRoll:
                 for member in unit.members:
                     open_deals[member].balance = Decimal(0)
 
+        offer = (max(free - prepaid, Decimal(0))
+                 if second_open and not consent else Decimal(0))
+
         self.months.append(DealMonth(
             index=load.index, month=month,
             balances={uid: o.balance for uid, o in open_deals.items()},
@@ -901,8 +910,7 @@ class _DealsRoll:
             total=sum((o.balance for o in open_deals.values() if not o.second),
                       Decimal(0)),
             interest=load.interest, paid=paid, prepaid=prepaid,
-            short=load.short, free=pool,
-            offer=pool if second_open and not consent else Decimal(0),
+            short=load.short, offer=offer,
             payments=load.payments,
         ))
 
@@ -946,9 +954,11 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
                        window=window)
     for index in range(1, deals.window.months + 1):
         # Бюджет месяца приходит снаружи: из словаря связки или одним числом.
+        # В этом пути кассы рядом нет — переданный бюджет и есть свободные
+        # деньги месяца, их срезом считается предложение второму приоритету.
         extra = (budgets.get(index, Decimal(0)) if budgets is not None
                  else monthly_extra)
-        deals.finish(deals.begin(index, extra))
+        deals.finish(deals.begin(index, extra), extra)
         if deals.done:
             break
     return deals.result(payoff_by_graph, payoff_by_graph_reason)
@@ -1262,7 +1272,9 @@ def roll_months(book: Settlements, start: date,
 
         # Досрочки уходят из остатка пула — обязательные уже заплачены, — а
         # касса проводит их после обязательных: деньги месяца уже посчитаны.
-        prepayments = deals.finish(load)
+        # Свободные деньги месяца для предложения второму приоритету — те же
+        # свободные деньги кассы (`step.free`), срез, а не пересчёт.
+        prepayments = deals.finish(load, step.free)
         deals_done = deals.done
         cash_months.append(step.finish([_as_payment(p) for p in prepayments]))
 

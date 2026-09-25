@@ -150,6 +150,15 @@ class Result:
     min_date: date | None
     end_balance: Decimal          # остаток основного кошелька в конце линии
     balances: dict[str, Decimal]  # финальный остаток каждого кошелька
+    #: Свободные деньги в конце линии — «сколько свободно» и «сколько можно
+    #: отдать» в одном числе: деньги всех доступных кошельков (`_money_total`)
+    #: минус обещанное (`_unpaid`), минус накопленный прожиточный минимум и
+    #: минус резерв обязательств (`Scenario.obligation_reserve`). Прожитое —
+    #: отрезок от первого события линии до последнего с включительными
+    #: границами: `F × дней / 30` вверх до копейки — та же пропорция дня,
+    #: что и в свободных деньгах кассы. Неизвестный минимум не вычитается,
+    #: как и в `CashMonth.free`: неизвестное — `None`, а не ноль.
+    free: Decimal
     timeline: list[Step]
     #: Худшая нехватка до прожиточного минимума (включает саму дыру).
     #: None = прожиточный минимум неизвестен → реальный дефицит НЕ оценён.
@@ -172,8 +181,8 @@ class Result:
     def unsecured_total(self) -> Decimal:
         """Сколько не прошло из-за ёмкости своего кошелька.
 
-        Деньги на непрошедшее уже обещаны, поэтому и потолок частного транша, и
-        свободные деньги месяца считаются без них.
+        Деньги на непрошедшее уже обещаны, поэтому и свободные деньги линии
+        (`Result.free`), и свободные деньги месяца считаются без них.
         """
         return _unpaid(self.unsecured)
 
@@ -393,6 +402,11 @@ def run(scenario: Scenario, main: str) -> Result:
     теряла — требование сравнивается с совокупной доступной ликвидностью всех
     кошельков за вычетом прожитого. Оценивается каждое событие линии. Раньше
     первого события позиция неизвестна: движок не спрашивает «сегодня».
+    Свободные деньги (`Result.free`) считаются здесь же той же формулой, что
+    у кассы: все доступные кошельки минус обещанное, минус накопленный
+    прожиточный минимум (с первого события по последнее) и минус резерв
+    обязательств из сценария — «сколько свободно» и «сколько можно отдать»
+    в конце линии отвечает одно число.
     """
     _validate(scenario, main)
     bal: dict[str, Decimal] = {a.name: a.balance for a in scenario.accounts}
@@ -438,7 +452,25 @@ def run(scenario: Scenario, main: str) -> Result:
     # Раньше первого события позиция неизвестна, и движок её не выдумывает.
     floor_gap, floor_gap_date = _assess_floor(
         scenario, floor_points, since=events[0].date if events else None)
-    return Result(min_balance, min_date, bal[main], dict(bal), timeline,
+
+    # Свободные деньги в конце линии: та же формула, что у свободных денег
+    # кассы, — деньги всех доступных кошельков минус обещанное, минус
+    # накопленный прожиточный минимум и минус резерв обязательств. Прожитое —
+    # отрезок с первого события линии по последнее, включительно: то же
+    # правило отрезка, что в кассе, чтобы у построчного и месячного путей не
+    # было двух определений одной величины. Неизвестный минимум не
+    # вычитается — как и в `CashMonth.free`.
+    total_money = _money_total(scenario, bal) - _unpaid(unsecured)
+    reserved = scenario.obligation_reserve or Decimal(0)
+    if scenario.living_floor_monthly is not None and events:
+        days = (events[-1].date - events[0].date).days + 1
+        accrued = (scenario.living_floor_monthly * Decimal(days)
+                   / DAYS_IN_MONTH).quantize(KOPEK, rounding=ROUND_CEILING)
+    else:
+        accrued = Decimal(0)
+    free = total_money - accrued - reserved
+
+    return Result(min_balance, min_date, bal[main], dict(bal), free, timeline,
                   floor_gap, floor_gap_date, hole, hole_date, unsecured)
 
 
@@ -513,16 +545,6 @@ def _assess_floor(scenario: Scenario,
     return worst if worst is not None else (Decimal(0), None)
 
 
-def optional_cap(result: Result, reserve: Decimal) -> Decimal:
-    """Сколько можно отдать частному кредитору в этом месяце.
-
-    = остаток основного кошелька после всех обязательств минус резерв на
-    обязательства начала следующего месяца и минус то, что не прошло: непрошедший
-    платёж не отменён, деньги на него уже обещаны.
-    """
-    return result.end_balance - reserve - result.unsecured_total
-
-
 def cover_cost(hole: Decimal, days: int,
                rate_per_year: Decimal | None = None,
                rate_per_day: Decimal | None = None) -> Decimal:
@@ -544,7 +566,9 @@ class Outcome:
     min_balance: Decimal
     min_date: date | None
     end_balance: Decimal
-    cap: Decimal                  # потолок частного транша при заданном резерве
+    #: Свободные деньги в конце линии — то же число, что `Result.free`:
+    #: «сколько свободно» и «сколько можно отдать» — один вопрос, один ответ.
+    free: Decimal
     floor_gap: Decimal | None     # None = прожиточный минимум неизвестен
     #: Дыра: нехватка суммарно по доступным кошелькам; 0 — нехватки нет.
     hole: Decimal = Decimal(0)
@@ -552,17 +576,21 @@ class Outcome:
     unsecured_total: Decimal = Decimal(0)
 
 
-def outcome(label: str, scenario: Scenario, main: str, reserve: Decimal) -> Outcome:
+def outcome(label: str, scenario: Scenario, main: str) -> Outcome:
+    """Итог одного варианта: свободные деньги читаются в конце линии."""
     r = run(scenario, main)
     return Outcome(label, r.min_balance, r.min_date, r.end_balance,
-                   optional_cap(r, reserve), r.floor_gap, r.hole,
-                   r.unsecured_total)
+                   r.free, r.floor_gap, r.hole, r.unsecured_total)
 
 
-def compare(variants: Mapping[str, Scenario], main: str,
-            reserve: Decimal) -> list[Outcome]:
-    """Прогнать несколько сценариев и вернуть итоги в порядке передачи."""
-    return [outcome(label, s, main, reserve) for label, s in variants.items()]
+def compare(variants: Mapping[str, Scenario], main: str) -> list[Outcome]:
+    """Прогнать несколько сценариев и вернуть итоги в порядке передачи.
+
+    Каждый вариант читает свои свободные деньги в конце линии, а порог
+    резерва берётся только из самого сценария (`Scenario.obligation_reserve`):
+    двух источников одного порога не бывает.
+    """
+    return [outcome(label, s, main) for label, s in variants.items()]
 
 
 def _month_start(day: date, index: int) -> date:

@@ -466,6 +466,26 @@ def test_roll_cash_free_subtracts_the_minimum_of_the_whole_window():
     assert months[1].prepay_budget == D("6100")
 
 
+def test_roll_cash_accrues_the_floor_through_a_month_without_events():
+    """Месяц без событий копит минимум: остатки прожитое не теряют.
+
+    Приход только в январе, февраль и март без единого события: деньги те же,
+    а накопленный минимум растёт — слагаемое месяца считается, даже когда
+    событий в месяце нет.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("0"))],
+        income=[Income(date(2026, 1, 1), D("51000"), "main")],
+        living_floor_monthly=D("18000"),
+    )
+    months = roll_cash(s, START, max_months=3, main="main")
+    assert [m.free for m in months] == [
+        D("32400.00"),   # 51 000 − 18 600 (январь целиком)
+        D("15600.00"),   # 51 000 − 18 600 − 16 800: февраль без событий копит
+        D("-3000.00"),   # 51 000 − 54 000: март (31 день) копит своим числом
+    ]
+
+
 # --- roll_months -----------------------------------------------------------
 
 def test_roll_months_converges():
@@ -739,18 +759,17 @@ def test_iteration_limit_is_gone_from_the_entry():
 
 # --- roll_deals per-month budgets --------------------------------------------
 
-def test_roll_deals_per_month_budgets_affect_free():
+def test_roll_deals_per_month_budgets_affect_prepayment():
     """Бюджет досрочек по месяцам меняет прокат."""
     deal = _deal(amount=D("1000"), schedule=_rule(start=START, payment=D("100")))
     book = _book(deal)
-    # Budget 0: free = 100 - 100 = 0 each month
+    # Бюджет 0: обязательное забирает весь пул, досрочек нет
     roll0 = roll_deals(book, START, D("0"), max_months=3)
-    assert roll0.months[0].free == D("0")
-    # Budget 200 in month 1: more prepayment, less free
+    assert roll0.months[0].prepaid == D("0")
+    # Бюджет 200 в месяце 1: досрочка растёт из него
     roll1 = roll_deals(book, START, D("0"), max_months=3,
                        budgets={1: D("200")})
     assert roll1.months[0].prepaid == D("200")
-    assert roll1.months[0].free == D("0")
 
 
 # --- досрочка в кассе --------------------------------------------------------
@@ -797,6 +816,46 @@ def test_roll_months_prepayment_leaves_the_cash():
     # Деньги не берутся из ниоткуда: сколько ушло из кассы, столько дошло до долга
     left = D("1500") - result.cash_months[-1].balances["main"]
     assert left == result.deal_roll.total_paid
+
+
+def test_offer_in_the_link_is_a_slice_of_the_cash_free_money():
+    """Предложение второму приоритету — срез свободных денег кассы.
+
+    Обязательный платёж урезан остатком сделки (800 из 1 000): остаток пула
+    в 200 — деньги, не заплаченные по графику, а не свободные. Касса
+    показывает ноль свободных, и срез берётся с этого числа, а не со своего
+    расчёта по бюджету (прежний остаток пула давал здесь 200).
+    """
+    deal = _deal(uid="X", amount=D("800"), schedule=_rule(payment=D("1000")))
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  schedule=None)
+    book = _book(deal, claim)
+    wallets = [_wallet("main", D("800"))]
+    result = roll_months(book, START, wallets, [], [], living_floor=D("0"),
+                         max_months=6)
+    first = result.deal_roll.months[0]
+    assert first.short == D("200")             # урезано остатком: 800 < 1 000
+    assert result.cash_months[0].free == D("0")
+    assert first.offer == D("0")               # срез с нуля, а не остаток пула
+
+
+def test_offer_is_never_negative_when_free_money_is_short():
+    """Срез ниже нуля не опускается: нехватка — не предложение.
+
+    Второй приоритет открыт, прожиточный минимум больше денег: свободные
+    деньги месяца отрицательны, и предложение — ноль, как и у бюджета
+    досрочек. Без ограничения снизу здесь стояло бы −1 166,67.
+    """
+    deal = _deal(uid="X", amount=D("1000"), schedule=_rule(payment=D("1000")))
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  schedule=None)
+    book = _book(deal, claim)
+    wallets = [_wallet("main", D("5000"))]
+    result = roll_months(book, START, wallets, [], [],
+                         living_floor=D("5000"), max_months=6)
+    # 4 000 после обязательного − 5 000 × 31/30 = −1 166,67
+    assert result.cash_months[0].free == D("-1166.67")
+    assert result.deal_roll.months[0].offer == D("0")
 
 
 # --- окно проката ------------------------------------------------------------

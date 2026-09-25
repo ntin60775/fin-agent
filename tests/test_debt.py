@@ -124,8 +124,11 @@ def test_freed_minimum_stays_in_the_budget():
     )
     roll = roll_deals(book, START, D(0))
     # Пока есть открытый долг — свободные деньги не простаивают:
-    # освобождённый платёж малого идёт в досрочку большого.
-    assert all(m.free == D("0") for m in roll.months if m.total > 0)
+    # освободившийся платёж малого идёт в досрочку большого. Всё, что не
+    # заплачено по графику (short), уходит досрочкой (prepaid) — тот же
+    # смысл, что у прежнего «остаток пула (DealMonth.free) равен нулю»,
+    # снесённого вместе с остатком бюджета месяца.
+    assert all(m.prepaid == m.short for m in roll.months if m.total > 0)
 
 
 def test_budget_never_exceeds_minimums_plus_extra():
@@ -152,7 +155,13 @@ def test_prepay_false_leaves_money_idle():
     )
     locked = roll_deals(book_locked, START, D("60000"))
     free = roll_deals(book_free, START, D("60000"))
-    assert locked.total_free > 0
+    # Деньги, которые запрет не пустил в досрочку, в дело не идут: с месяца 2
+    # (разрешённый «быстрый» закрыт) запрещённый прокат не досрочит ничего,
+    # хотя бюджет — 60 000 в месяц. В месяце 1 досрочка уходит в разрешённую
+    # сделку — это не нарушение запрета.
+    assert all(m.prepaid == 0 for m in locked.months[1:])
+    assert (sum(m.prepaid for m in locked.months)
+            < sum(m.prepaid for m in free.months))
     assert len(locked.months) > len(free.months)
     assert locked.total_interest > free.total_interest
 
