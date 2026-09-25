@@ -615,3 +615,58 @@ def test_an_accepted_action_becomes_a_fact_and_the_object_is_not_stored():
     assert not any(isinstance(row, (Move, Prepay, Bridge))
                    for row in [*moved.book.edits, *moved.book.movements,
                                *moved.book.deals, *moved.one_offs])
+
+
+# --- окно и цена варианта ---------------------------------------------------
+
+def test_the_window_bounds_the_horizon_and_the_price_line():
+    """Окно задаёт горизонт действий и линию сравнения цены.
+
+    Горизонт — конец окна, а не предел месяцев: окно может быть короче, и тогда
+    действие за ним невозможно. Вариант считается в том же окне, поэтому цена
+    сравнивает одну линию, а не разные.
+    """
+    inp = _inp(_book(_deal(amount=D("3000"), rate_per_day=None,
+                           rate_per_year=D("0"),
+                           schedule=ScheduleRule(days=(20,), start=START,
+                                                 payment=D("1000"), count=3))),
+               wallets=[_wallet("карта", D("50000"))], max_months=24)
+    base = baseline(inp)
+    assert base.horizon == date(2026, 3, 31)     # окно кончил долг, не предел месяцев
+
+    beyond = Variant("за окно", (Move(deal="заём", planned=date(2026, 3, 20),
+                                      to=date(2026, 5, 20)),))
+    assert "за горизонтом проката" in impossible(base, beyond)
+
+    inside = Variant("внутри окна", (Move(deal="заём", planned=date(2026, 1, 20),
+                                          to=date(2026, 1, 25)),))
+    assert forecast(applied(base, inside)).window == base.forecast.window
+
+
+def test_consent_extends_the_variants_window_and_closes_the_second_priority():
+    """Согласие владельца продлевает окно варианта: второй приоритет получает дату.
+
+    `Direct()` меняет вход окна — согласие, — поэтому вариант не катается в окне
+    базы: иначе второй приоритет объявился бы незакрытым с чужой причиной.
+    """
+    first = _deal("график", amount=D("1000"), rate_per_day=None,
+                  rate_per_year=D("0"),
+                  schedule=ScheduleRule(days=(20,), start=START,
+                                        payment=D("1000"), count=1))
+    second = _deal("взыскание", amount=D("23000"), rate_per_day=None,
+                   rate_per_year=D("0"), second_priority=True,
+                   schedule=ScheduleRule(days=(20,), start=START,
+                                         payment=D("1000"), count=24))
+    wallets = [_wallet("карта", D("0"))]
+    incomes = [Income(date(2026 + (m - 1) // 12, (m - 1) % 12 + 1, 5), D("1000"),
+                      "карта") for m in range(1, 25)]
+    book = _book(first, second, wallets=wallets)
+    base = baseline(_inp(book, wallets=wallets, incomes=incomes, max_months=600))
+    assert base.forecast.window.months == 1      # окно базы кончил первый приоритет
+
+    agreed = forecast(_inp(book, wallets=wallets, incomes=incomes, max_months=600,
+                           consent_to_second=True))
+    by_variant = forecast(applied(base, Variant("согласие", (Direct(),))))
+    assert agreed.second_priority.month is not None
+    assert by_variant.second_priority.month == agreed.second_priority.month
+    assert by_variant.window == agreed.window

@@ -10,6 +10,7 @@ from finance_core import (KIND_PREPAID, LEGAL, Account, ConvergenceError, Counte
                             Deal, Income, Payment, Scenario, Settlements,
                             TransferHint, Wallet, roll_cash, roll_deals,
                             roll_months, run)
+from finance_core import WINDOW_DEBTS_CLOSED
 
 START = date(2026, 1, 1)
 
@@ -629,3 +630,20 @@ def test_roll_months_prepayment_leaves_the_cash():
     # Деньги не берутся из ниоткуда: сколько ушло из кассы, столько дошло до долга
     left = D("1500") - result.cash_months[-1].balances["main"]
     assert left == result.deal_roll.total_paid
+
+
+# --- окно проката ------------------------------------------------------------
+
+def test_roll_months_cash_covers_the_window_not_the_month_cap():
+    """Касса катается по окну, а не по пределу месяцев: вопрос кончается на долге."""
+    deal = _deal(amount=D("24000"),
+                 schedule=_rule(start=START, payment=D("1000"), count=24))
+    book = _book(deal)
+    wallets = [_wallet("main", D("0"))]
+    incomes = [Income(date(2026, month, 5), D("3000"), "main")
+               for month in range(1, 13)]
+    result = roll_months(book, START, wallets, incomes, [], living_floor=D("0"),
+                         max_months=600)
+    assert result.window.months == 24
+    assert result.window.reason == WINDOW_DEBTS_CLOSED
+    assert len(result.cash_months) == 24
