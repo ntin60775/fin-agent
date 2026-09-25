@@ -7,11 +7,13 @@ from decimal import Decimal as D
 
 import pytest
 
+import finance_core.roll as roll_module
 from finance_core import (FAMILY, LEGAL, OWED_TO_ME, PERSON, Counterparty, Deal,
                           ForecastInput, Income, Movement, ObservedBalance,
                           Payment, ScheduleRule, Settlements, Wallet, forecast,
                           forecast_shifts, validate, widest)
 from finance_core import WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP
+from finance_core.forecast import _roll_of
 
 START = date(2026, 1, 1)
 
@@ -335,6 +337,27 @@ def test_agreed_check_is_not_a_question():
     assert f.complete
 
 
+def test_non_convergence_makes_the_forecast_incomplete(monkeypatch):
+    """Признак несходимости делает прогноз неполным — в ряд с stalled/assumed.
+
+    Тот же вход: без признака прогноз полон, с признаком — неполон, а сам
+    расчёт не роняется исключением и отчёт собирается целиком.
+    """
+    book = _book(_deal(amount=D("10000")),
+                 observed=[ObservedBalance("заём", date(2026, 1, 31), D("10000"))])
+    inp = _input(book, incomes=_incomes(D("5000"), 1, 2),
+                 income_horizon=date(2026, 4, 5),
+                 living_floor=D("0"), max_months=2)
+    assert forecast(inp).complete               # признака нет — прогноз полон
+
+    monkeypatch.setattr(roll_module, "_MONTH_PASSES", 1)
+    f = forecast(inp)
+    assert 1 in f.unconverged                   # признак несходимости в результате
+    assert not f.converged
+    assert f.months                             # отчёт собран, расчёт не упал
+    assert not f.complete                       # и прогноз с признаком неполон
+
+
 def test_unassessed_deficit_is_not_called_absent():
     """«Не оценено» — не «дефицита нет»: нечем судить — ступень не объявляется."""
     book = _book(wallets=[_wallet(balance=D("1000"))])
@@ -436,6 +459,33 @@ def test_months_on_assumption_are_marked():
     assert [(d.index, d.hole) for d in f.deficits] == [(1, D("1000"))]
     assert f.assumed == [1, 2]                      # дыра и месяц за ней — на допущении
     assert len(f.months) == 2                       # дальше ступеней отчёт не идёт
+
+
+def test_signs_of_the_roll_beyond_the_report_window_follow_one_rule(monkeypatch):
+    """Признаки проката за концом отчёта обрезаются одним правилом.
+
+    Прокат длиннее отчёта (отчёт кончается на ступенях), и его списки содержат
+    месяцы за его концом — и допущения (`assumed`), и несходимость
+    (`unconverged`). Оба показываются по месяцам отчёта тем же правилом:
+    дальше `until` отчёт ничего не утверждает. Внутренний предел в один шаг
+    задаёт несходимость провокацией, а не патологией сценария.
+    """
+    deal = _deal(uid="заём", amount=D("3000"), rate_per_year=D("0.12"),
+                 schedule=ScheduleRule(days=(20,), payment=D("1000"), start=START))
+    book = _book(deal, wallets=[_wallet(balance=D("-1000"))])
+    inp = _input(book, incomes=_incomes(D("30000"), 1, 2, 3, 4),
+                 living_floor=D("5000"), max_months=6)
+    monkeypatch.setattr(roll_module, "_MONTH_PASSES", 1)
+    roll = _roll_of(inp)
+    f = forecast(inp)
+    until = len(f.months)
+
+    assert until < len(roll.cash_months)            # прокат длиннее отчёта
+    assert max(roll.assumed) > until                # допущения за его концом
+    assert max(roll.unconverged) > until            # несходимость за его концом
+    assert f.assumed == [i for i in roll.assumed if i <= until] == [1, 2]
+    assert f.unconverged == [i for i in roll.unconverged if i <= until] == [1, 2]
+    assert not f.complete                           # признак внутри отчёта делает его неполным
 
 
 def test_unreached_steps_are_said_plainly():
