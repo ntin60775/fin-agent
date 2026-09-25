@@ -25,7 +25,8 @@ from decimal import Decimal
 from typing import Any
 
 from .model import Income, Payment, Transfer
-from .roll import AVALANCHE, Expectation, Gap, MonthsRoll, Window, roll_months
+from .roll import (AVALANCHE, PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, DealRoll,
+                   Expectation, Gap, MonthsRoll, Window, roll_months)
 from .settlements import FAMILY, I_OWE, Settlements, Wallet, deal_balance
 from .solver import CashMonth
 
@@ -181,6 +182,11 @@ class Forecast:
     `unsecured_total` — сколько за прокат не прошло из-за ёмкости своего кошелька:
     не ноль значит, что прогноз долгов держится на переводе. `interest` — рубли
     процентов за прокат целиком: прогноз, закрывающий долги раньше, платит меньше.
+
+    Две даты одного вопроса «когда выйду из долгов»: `first_priority` — срок с
+    досрочками (при текущем бюджете свободных денег), `payoff_by_graph` — срок по
+    графику (гарантированный верх: без досрочек и окном не сужается). Они не
+    взаимозаменяемы, и обе приходят из проката.
     """
     start: date
     months: list[CashMonth]
@@ -188,6 +194,7 @@ class Forecast:
     step1: Milestone
     step2: Milestone
     first_priority: Milestone
+    payoff_by_graph: Milestone
     second_priority: Milestone
     cushion: Milestone
     deficits: list[Deficit]
@@ -261,6 +268,7 @@ def forecast(inp: ForecastInput) -> Forecast:
         step1=step1,
         step2=step2,
         first_priority=_first_priority(roll, window_reason),
+        payoff_by_graph=_payoff_by_graph(roll.deal_roll),
         second_priority=_second_priority(inp, roll, window_reason),
         cushion=_cushion(roll.cash_months, inp.cushion, window_reason),
         deficits=[d for d in deficits if d.index <= until],
@@ -389,15 +397,30 @@ def _until(roll: MonthsRoll, step2: Milestone) -> int:
 
 # --- даты по приоритетам ---------------------------------------------------
 
+def _payoff_by_graph(deal_roll: DealRoll) -> Milestone:
+    """Срок по графику: гарантированный верх — когда сделки закроются сами.
+
+    Считан прокатом без бюджета досрочек и до предела месяцев, поэтому есть у
+    любого графика: окно кассы его не сужает, и «не закрывается» здесь — честное
+    «за отведённые месяцы долг не закрылся», а не пропуск. Долг, погашенный до
+    начала проката, назван причиной рядом с первым месяцем: закрывать нечего.
+    """
+    return Milestone(month=deal_roll.payoff_by_graph,
+                     reason=deal_roll.payoff_by_graph_reason)
+
+
 def _first_priority(roll: MonthsRoll, window_reason: str) -> Milestone:
     """Когда закрыт обязательный график: закрывать нечего — закрыт сразу.
 
-    Срок с досрочками может лежать за концом окна — тогда он назван причиной,
-    которой окно кончилось, а не пропущен: молчание выдало бы окно за весь срок.
+    Это **срок с досрочками** — при текущем бюджете свободных денег; рядом лежит
+    срок по графику (`payoff_by_graph`) — гарантированный верх, окном не
+    сужается. Срок с досрочками может лежать за концом окна — тогда он назван
+    той же фразой, что и срок по графику («не закрывается» — одна формулировка),
+    и причиной, которой окно кончилось: молчание выдало бы окно за весь срок.
     """
     if roll.deal_roll.freedom is None:
         return Milestone(
-            reason=f"обязательный график не закрылся за окно: {window_reason}")
+            reason=f"{PAYOFF_NOT_CLOSED}: {window_reason}")
     return Milestone(month=roll.deal_roll.freedom)
 
 
@@ -425,7 +448,7 @@ def _second_priority(inp: ForecastInput, roll: MonthsRoll,
     if not left:
         return Milestone(
             month=roll.cash_months[0].month,
-            reason="закрыт к началу проката: закрывать нечего")
+            reason=PAYOFF_CLOSED_BEFORE)
     return Milestone(
         reason=f"второй приоритет не закрылся за окно: {window_reason}")
 

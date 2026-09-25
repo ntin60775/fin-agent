@@ -24,8 +24,9 @@ from .forecast import (Deficit, Discrepancy, FamilyTransfer, Forecast,
                        ForecastInput, Milestone, Shift, forecast,
                        forecast_shifts, widest)
 from .model import Account, Income, Payment, Scenario, Transfer
-from .roll import (AVALANCHE, SNOWBALL, STRATEGIES, WINDOW_DEBTS_CLOSED,
-                   WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP, WINDOW_REASONS,
+from .roll import (AVALANCHE, PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, SNOWBALL,
+                   STRATEGIES, WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
+                   WINDOW_MONTH_CAP, WINDOW_REASONS,
                    ConvergenceError, DealMonth, DealRoll, Expectation, Gap,
                    MonthsRoll, ScheduledPayment, UnitMonth, Window,
                    compare_deal_strategies, horizon, roll_deals, roll_months,
@@ -81,4 +82,5 @@ __all__ = [
     "AVALANCHE", "SNOWBALL", "STRATEGIES",
     "WINDOW_DEBTS_CLOSED", "WINDOW_INCOME_ENDS", "WINDOW_MONTH_CAP",
     "WINDOW_REASONS",
+    "PAYOFF_NOT_CLOSED", "PAYOFF_CLOSED_BEFORE",
 ]

@@ -2,7 +2,7 @@
 node_type: ticket
 title: Обе даты — срок по графику рядом со сроком с досрочками
 service: _platform
-status: draft
+status: active
 updated: 2026-09-25
 links:
   part_of: [README.md]

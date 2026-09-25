@@ -488,3 +488,43 @@ def test_the_payoff_date_beyond_the_window_names_the_reason():
     assert (f.window.months, f.window.reason) == (3, WINDOW_INCOME_ENDS)
     assert f.first_priority.month is None        # долг не закрылся в окне
     assert WINDOW_INCOME_ENDS in f.first_priority.reason
+
+
+# --- обе даты срока --------------------------------------------------------
+
+def test_forecast_gives_both_payoff_dates_and_they_differ():
+    """Срок с досрочками и срок по графику стоят рядом и не перепутаются."""
+    debt = _deal("заём", amount=D("3000"))
+    f = forecast(_input(_book(debt), wallets=[_wallet(balance=D("5000"))],
+                        max_months=12))
+    assert f.first_priority.month == date(2026, 1, 1)    # с досрочками раньше
+    assert f.payoff_by_graph.month == date(2026, 3, 1)   # по графику позже
+    assert f.first_priority.month != f.payoff_by_graph.month
+
+
+def test_payoff_by_graph_outlives_the_window_that_income_ends():
+    """Доходы кончаются раньше долга: по графику дата есть, с досрочками нет."""
+    debt = _deal(uid="долгий", amount=D("60000"),
+                 schedule=ScheduleRule(days=(20,), payment=D("1000"), count=60))
+    f = forecast(_input(_book(debt), max_months=600,
+                        incomes=_incomes(D("1000"), 1),
+                        income_horizon=date(2026, 12, 31)))
+    assert (f.window.months, f.window.reason) == (12, WINDOW_INCOME_ENDS)
+    assert f.first_priority.month is None
+    assert WINDOW_INCOME_ENDS in f.first_priority.reason
+    assert f.payoff_by_graph.month == date(2030, 12, 1)
+    assert f.payoff_by_graph.month > f.window.until      # окном не сужается
+
+
+def test_both_dates_say_not_closed_with_one_phrasing():
+    """Один факт «не закрылось» — одна фраза у обеих дат, причина окна рядом."""
+    daily = _deal(uid="дневной", amount=D("10000"), rate_per_day=D("0.005"))
+    yearly = _deal(uid="годовой", amount=D("10000"), rate_per_year=D("0.4"))
+    f = forecast(_input(_book(daily, yearly), wallets=[_wallet()],
+                        max_months=600))
+    assert f.first_priority.month is None
+    assert f.payoff_by_graph.month is None
+    assert f.first_priority.reason == (
+        "за отведённые месяцы долг не закрылся: кончился предел месяцев")
+    assert f.payoff_by_graph.reason == "за отведённые месяцы долг не закрылся"
+    assert f.first_priority.reason.startswith(f.payoff_by_graph.reason)
