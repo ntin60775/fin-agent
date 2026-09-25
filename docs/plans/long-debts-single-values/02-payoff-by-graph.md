@@ -2,9 +2,10 @@
 node_type: ticket
 title: Обе даты — срок по графику рядом со сроком с досрочками
 service: _platform
-status: active
+status: archived
 updated: 2026-09-25
 links:
+  documents: [../../../finance_core/roll.py, ../../../finance_core/forecast.py, ../../../finance_core/__init__.py, ../../../finance_core/README.md, ../../../CONTEXT.md, ../../../tests/test_roll.py, ../../../tests/test_forecast.py]
   part_of: [README.md]
   depends_on: [01-window-end-reason.md]
 ---
@@ -49,9 +50,20 @@ links:
 
 **Blocked by:** 01 — окно задаёт горизонт, в котором обе даты имеют смысл.
 
-- [ ] Синтетика: долг, который по графику не закрывается (платёж равен процентам), а с досрочками закрывается, — видны обе даты: у первой причина, у второй месяц.
-- [ ] Синтетика: долг, закрывающийся и по графику, и досрочками, — обе даты есть и они разные (досрочки раньше).
-- [ ] Синтетика: долг, закрытый к началу окна, — дата первого месяца и причина «закрыт к началу».
-- [ ] Прогноз отдаёт срок по графику рядом с датой обязательного графика; обе даты названы так, что их нельзя перепутать.
-- [ ] Синтетика: доходы кончаются раньше долга — срок по графику всё равно есть (график считается до предела месяцев и окном не сужается), а срок с досрочками за окном назван причиной.
-- [ ] `python3 -m pytest tests/` зелёные; `finance_core/README.md` и `CONTEXT.md` описывают оба срока и их разницу.
+## Приёмка
+
+Пройдено: `python3 -m pytest tests/` — 261 passed, `gitmark lint` — чисто, доки
+(`finance_core/README.md`, `CONTEXT.md`) синхронизированы с кодом.
+
+- [x] Синтетика: долг, который по графику не закрывается (платёж равен процентам), а с досрочками закрывается, — видны обе даты: у первой причина, у второй месяц.
+  — `tests/test_roll.py::test_payoff_by_graph_says_not_closed_when_the_payment_covers_interest`; обе даты в одном прогнозе — `tests/test_forecast.py::test_both_dates_say_not_closed_with_one_phrasing`
+- [x] Синтетика: долг, закрывающийся и по графику, и досрочками, — обе даты есть и они разные (досрочки раньше).
+  — `tests/test_roll.py::test_payoff_by_graph_comes_after_the_payoff_with_prepayments`; инвариант «не позже» на трёх книгах — `tests/test_roll.py::test_the_payoff_with_prepayments_is_never_later_than_the_graph`
+- [x] Синтетика: долг, закрытый к началу окна, — дата первого месяца и причина «закрыт к началу».
+  — `tests/test_roll.py::test_payoff_by_graph_of_a_debt_paid_off_before_the_roll`; пробел такой даты не даёт — `tests/test_roll.py::test_a_gap_is_not_a_payoff_closed_before_the_roll`; тексты причин литералом — `tests/test_roll.py::test_payoff_reasons_are_the_literal_phrases`
+- [x] Прогноз отдаёт срок по графику рядом с датой обязательного графика; обе даты названы так, что их нельзя перепутать.
+  — `tests/test_forecast.py::test_forecast_gives_both_payoff_dates_and_they_differ`
+- [x] Синтетика: доходы кончаются раньше долга — срок по графику всё равно есть (график считается до предела месяцев и окном не сужается), а срок с досрочками за окном назван причиной.
+  — `tests/test_forecast.py::test_payoff_by_graph_outlives_the_window_that_income_ends`
+- [x] `python3 -m pytest tests/` зелёные; `finance_core/README.md` и `CONTEXT.md` описывают оба срока и их разницу.
+  — 261 passed; линт KB чист; обе записи глоссария «Срок по графику» и «Срок с досрочками»
