@@ -33,10 +33,10 @@
 from __future__ import annotations
 
 import calendar
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, getcontext, localcontext
 
 from .model import Account, Income, Payment, Scenario, Transfer
 from .settlements import (I_OWE, OWED_TO_ME, Deal, Occurrence, Settlements,
@@ -58,6 +58,15 @@ WINDOW_DEBTS_CLOSED = "долги закрыты"
 WINDOW_INCOME_ENDS = "кончились доходы"
 WINDOW_MONTH_CAP = "кончился предел месяцев"
 WINDOW_REASONS = (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP)
+
+#: Почему срок по графику не наступил: за отведённые месяцы долг не закрылся.
+#: Одна формулировка на оба случая — платёж не покрывает проценты и график
+#: кончился, а остаток остался: различать их — новая логика ради диагностики.
+PAYOFF_NOT_CLOSED = "за отведённые месяцы долг не закрылся"
+
+#: Почему у срока по графику вместо даты первый месяц: долг погашен до начала
+#: проката — закрывать нечего. Тем же словом закрыт и второй приоритет.
+PAYOFF_CLOSED_BEFORE = "закрыт к началу проката: закрывать нечего"
 
 
 # --- что прокат отдаёт наружу ----------------------------------------------
@@ -146,11 +155,21 @@ class Gap:
 
 @dataclass
 class DealRoll:
-    """Прокат сделок: месяцы, срок и пробелы.
+    """Прокат сделок: месяцы, обе даты срока и пробелы.
 
-    `freedom` — месяц закрытия последней сделки первого приоритета; None вместе
-    с `stalled` значит, что за окно долги не закрылись. Регулярные расходы на
-    срок не влияют: закрывать там нечего.
+    `freedom` — **срок с досрочками**: месяц закрытия последней сделки первого
+    приоритета при текущем бюджете досрочек; None вместе с `stalled` значит, что
+    за окно долги не закрылись. Регулярные расходы на срок не влияют: закрывать
+    там нечего.
+
+    `payoff_by_graph` — **срок по графику**: месяц, когда те же сделки закрылись
+    бы своими платежами, без досрочек. Гарантированный верх: считается тем же
+    прокатом с нулевым бюджетом досрочек и до `max_months`, поэтому окном кассы
+    не сужается и есть у любого графика. `payoff_by_graph_reason` называет
+    причину рядом с датой: `PAYOFF_NOT_CLOSED` — за отведённые месяцы долг не
+    закрылся (даты тогда нет), `PAYOFF_CLOSED_BEFORE` — закрывать было нечего
+    (дата тогда первый месяц проката). Дата без причины и пустое поле без неё
+    были бы неотличимы от «не посчитали».
 
     `second_freedom` — месяц закрытия второго приоритета. Сам он платится только
     по согласию владельца, и тогда прокат идёт, пока не закроется и он; закрыться
@@ -163,6 +182,8 @@ class DealRoll:
     months: list[DealMonth]
     total_interest: Decimal
     freedom: date | None
+    payoff_by_graph: date | None
+    payoff_by_graph_reason: str | None
     start_total: Decimal
     stalled: bool
     expectations: list[Expectation]
@@ -271,6 +292,20 @@ def _rate(deal: Deal) -> Decimal:
     return deal.rate_per_year or Decimal(0)
 
 
+def _money(value: Decimal) -> Decimal:
+    """Округлить до копейки, не падая на выросшем остатке.
+
+    Контекст Decimal по умолчанию несёт 28 значащих цифр. У долга, который не
+    закрывается и растёт по ставке, остаток за прокат перерастает их, и
+    `quantize` падает `InvalidOperation` вместо честного «не закрылось»: прокат
+    обязан дойти до конца окна на любом графике. Знаков берётся столько, сколько
+    нужно самому числу, — на обычных суммах ответ не меняется.
+    """
+    with localcontext() as ctx:
+        ctx.prec = max(getcontext().prec, value.adjusted() + 4)
+        return value.quantize(KOPEK, ROUND_HALF_UP)
+
+
 def _payment_amount(deal: Deal, occ: Occurrence, balance: Decimal) -> Decimal:
     """Сколько платить по вхождению: сумма правила или процент от остатка.
 
@@ -283,7 +318,7 @@ def _payment_amount(deal: Deal, occ: Occurrence, balance: Decimal) -> Decimal:
     percent = deal.schedule.percent if deal.schedule is not None else None
     if percent is None:
         return Decimal(0)
-    return (balance * percent).quantize(KOPEK, ROUND_HALF_UP)
+    return _money(balance * percent)
 
 
 def _month_interest(deal: Deal, balance: Decimal, month: date,
@@ -302,10 +337,10 @@ def _month_interest(deal: Deal, balance: Decimal, month: date,
             left -= day_payments.get(day, Decimal(0))
             if left <= 0:
                 break
-            total += (left * deal.rate_per_day).quantize(KOPEK, ROUND_HALF_UP)
+            total += _money(left * deal.rate_per_day)
         return total
     if deal.rate_per_year is not None:
-        return (balance * deal.rate_per_year / 12).quantize(KOPEK, ROUND_HALF_UP)
+        return _money(balance * deal.rate_per_year / 12)
     return Decimal(0)
 
 
@@ -544,7 +579,49 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
     идёт по одной линии, а не по разным. Переданное окно используется как есть и
     обязано быть посчитано по этой же книге и с этим же согласием — иначе отчёт
     разойдётся с книгой.
+
+    Отдаёт **обе даты** одного вопроса «когда выйду из долгов»: срок по графику
+    (`DealRoll.payoff_by_graph` — тот же прокат с нулевым бюджетом досрочек, до
+    `max_months`) и срок с досрочками (`DealRoll.freedom` — при текущем бюджете).
+    Окно кассы срок по графику не сужает: он гарантированный верх и есть у
+    любого графика. Не закрылось — сказано причиной рядом с датой
+    (`DealRoll.payoff_by_graph_reason`), а не пустым полем.
     """
+    if strategy not in STRATEGIES:
+        raise ValueError(f"неизвестная стратегия: {strategy!r}")
+
+    # Срок по графику: тот же прокат сделок, но без бюджета досрочек. Окно у него
+    # своё — по графику и `max_months`: окно кассы (конец видимых доходов) его не
+    # сужает, иначе у долга, переживающего доходы, даты бы не было. Даты в этом
+    # проходе не считаны (`None`): срок по графику — это его `freedom`, а пара
+    # «дата и причина» собирается здесь и уходит в основной прокат.
+    graph = _roll_pass(book, start, Decimal(0), strategy, max_months,
+                       consent_to_second, budgets=None, income_horizon=None,
+                       window=None, payoff_by_graph=None,
+                       payoff_by_graph_reason=None)
+    if graph.start_total <= 0 and not graph.gaps:
+        # Закрывать было нечего: долг погашен до начала проката. Пробел сюда не
+        # попадает: не смоделированный долг — не закрытый, а не посчитанный.
+        payoff, reason = _month_start(start, 0), PAYOFF_CLOSED_BEFORE
+    elif graph.start_total <= 0 or graph.freedom is None:
+        # Пробелы вместо прокатываемых долгов либо долг не закрылся за
+        # отведённые месяцы: даты нет, причина названа рядом.
+        payoff, reason = None, PAYOFF_NOT_CLOSED
+    else:
+        payoff, reason = graph.freedom, None
+
+    return _roll_pass(book, start, monthly_extra, strategy, max_months,
+                      consent_to_second, budgets, income_horizon, window,
+                      payoff, reason)
+
+
+def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
+               strategy: str, max_months: int, consent_to_second: bool,
+               budgets: Mapping[int, Decimal] | None,
+               income_horizon: date | None, window: Window | None,
+               payoff_by_graph: date | None,
+               payoff_by_graph_reason: str | None) -> DealRoll:
+    """Один прокат сделок: обе даты приходят снаружи — их считает `roll_deals`."""
     if strategy not in STRATEGIES:
         raise ValueError(f"неизвестная стратегия: {strategy!r}")
 
@@ -770,7 +847,8 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
         # `second_freedom`.
         stalled = freedom is None
 
-    return _result(book, months, total_interest, freedom, start_total, stalled,
+    return _result(book, months, total_interest, freedom, payoff_by_graph,
+                   payoff_by_graph_reason, start_total, stalled,
                    receivables, gaps, start, win, second_freedom)
 
 
@@ -845,9 +923,10 @@ def _second_open(open_deals: dict[str, _Open],
 
 
 def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
-            freedom: date | None, start_total: Decimal, stalled: bool,
-            receivables: Iterable[Deal], gaps: list[Gap], start: date,
-            window: Window,
+            freedom: date | None, payoff_by_graph: date | None,
+            payoff_by_graph_reason: str | None, start_total: Decimal,
+            stalled: bool, receivables: Iterable[Deal], gaps: list[Gap],
+            start: date, window: Window,
             second_freedom: date | None = None) -> DealRoll:
     """Собрать прокат: месяцы плюс то, что в них не входило.
 
@@ -865,7 +944,8 @@ def _result(book: Settlements, months: list[DealMonth], total_interest: Decimal,
                                             deal_holder_at(book, deal.uid, occ.due),
                                             occ.due, occ.remaining))
     expectations.sort(key=lambda e: e.date)
-    return DealRoll(months, total_interest, freedom, start_total, stalled,
+    return DealRoll(months, total_interest, freedom, payoff_by_graph,
+                    payoff_by_graph_reason, start_total, stalled,
                     expectations, gaps, window, second_freedom)
 
 
