@@ -12,8 +12,8 @@ from finance_core import (BOTH, CREDITOR, DEBTOR, IN, LEGAL, OWED_TO_ME, PERSON,
                           Wallet, accrued_interest, beneficiary,
                           counterparty_balance, counterparty_role,
                           deal_amount_at, deal_balance, deal_holder_at,
-                          funding_wallet, liquidity, payment_channel, run,
-                          validate)
+                          funding_wallet, liquidity, payment_channel, roll_deals,
+                          run, validate)
 
 START = date(2026, 1, 1)
 
@@ -216,6 +216,35 @@ def test_movement_overrides_the_deal_defaults():
     assert payment_channel(deal, movement) == "посредник"
     assert beneficiary(deal, movement) == "родня"
     assert funding_wallet(deal) == "карта"
+
+
+# --- начало долга -----------------------------------------------------------
+
+def test_a_rated_deal_without_a_debt_start_falls_with_a_clear_text():
+    """Ставка и сумма без начала долга — ошибка: считать долг не от чего."""
+    book = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(start=None, rate_per_year=None, rate_per_day=D("0.001"))],
+    )
+    with pytest.raises(ValueError, match="начала долга нет"):
+        validate(book)
+
+
+def test_a_free_deal_and_a_regular_expense_never_ask_for_a_debt_start():
+    """Ни беспроцентной сделке, ни регулярному расходу начала долга не спрашивают."""
+    book = Settlements(
+        counterparties=[_counterparty(),
+                        _counterparty(uid="арендодатель", name="Арендодатель",
+                                      subtype="прочее")],
+        deals=[_deal(uid="рассрочка", start=None),
+               _deal(uid="аренда", amount=None, counterparty="арендодатель",
+                     start=None)],
+        movements=[Movement(date(2026, 1, 10), D("3000"), "рассрочка")],
+    )
+    validate(book)                    # отсутствие начала долга — не ошибка
+    # У беспроцентной канон — тело минус движения, у регулярного расхода его нет.
+    assert deal_balance(book, "рассрочка", date(2026, 1, 31)) == D("7000")
+    assert deal_balance(book, "аренда", date(2026, 1, 31)) is None
 
 
 # --- начисление процентов ---------------------------------------------------
@@ -458,6 +487,80 @@ def test_transfer_date_starts_the_new_version():
     assert deal_balance(book, "заём", date(2026, 3, 1)) == D("80000")
 
 
+def test_an_assignment_neither_moves_the_debt_start_nor_resets_the_accrual():
+    """Передача долга начала не двигает, а начисленное через неё не обнуляется.
+
+    Начало долга — дата возникновения, а не держателя: у одного долга не бывает
+    двух дат начала, и проценты, накопленные до передачи, остаются накопленными.
+    """
+    book = _assigned_book(
+        deals=[_deal(uid="заём", counterparty="коллектор", amount=D("120000"),
+                     start=date(2025, 6, 1), rate_per_year=D("0.24"),
+                     rate_per_day=None)])
+    validate(book)
+    assert book.deals[0].start == date(2025, 6, 1)
+    # До передачи: тело версии 100 000 плюс начисленное с начала долга.
+    assert deal_balance(book, "заём", date(2026, 2, 28)) == D("119509.25")
+    # После: тело версии 120 000 плюс начисленное с начала долга, в которое
+    # дельта передачи (01.03) входит базой марта: 19 509,25 + 2 790,19.
+    # Перезапуска от 01.03.2026 нет — с него началось бы 120 000 × 0,24 / 12.
+    assert deal_balance(book, "заём", date(2026, 3, 31)) == D("142299.44")
+
+
+def _transfer_book(assign: date, movements: list[Movement]) -> Settlements:
+    """Долг 100 000 (после передачи — 120 000) под 24 % с начала 01.06.2025."""
+    return _assigned_book(
+        deals=[_deal(uid="заём", counterparty="коллектор", amount=D("120000"),
+                     start=date(2025, 6, 1), rate_per_year=D("0.24"),
+                     rate_per_day=None, wallet="карта",
+                     schedule=ScheduleRule(days=(20,), payment=D("1000")))],
+        wallets=[Wallet("карта", "Карта", "карта", D("0"))],
+        assignments=[Assignment(assign, "заём", from_holder="банк",
+                                to_holder="коллектор", amount=D("100000"),
+                                delta=D("20000"))],
+        movements=movements)
+
+
+def test_an_assignment_before_the_window_enters_the_accrual_base():
+    """Дельта передачи до окна входит в базу с даты передачи, а не с открытия.
+
+    Тело на конец декабря уже 120 000, но проценты с сентября идут на тело с
+    дельтой: канон на открытии и основание проката — одно число.
+    """
+    book = _transfer_book(
+        date(2025, 9, 1),
+        [Movement(date(2026, 1, 20), D("1000"), "заём",
+                  occurrence=date(2026, 1, 20))])
+    validate(book)
+    assert deal_balance(book, "заём", date(2025, 12, 31)) == D("136517.21")
+    roll = roll_deals(book, START, D(0), max_months=1)
+    assert roll.months[0].balances["заём"] == D("138247.55")
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == \
+        roll.months[0].balances["заём"]
+
+
+def test_an_assignment_inside_the_window_enters_the_accrual_of_its_month():
+    """Передача внутри окна: дельта входит в базу своего месяца и в остаток.
+
+    Март считается на теле с дельтой, а не на прежнем, — и прокат, и канон
+    дают одно и то же число.
+    """
+    book = _transfer_book(
+        date(2026, 3, 1),
+        [Movement(date(2026, month, 20), D("1000"), "заём",
+                  occurrence=date(2026, month, 20)) for month in (1, 2, 3)])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3)
+    assert roll.months[2].balances["заём"] == D("139239.04")
+    assert deal_balance(book, "заём", date(2026, 3, 31)) == \
+        roll.months[2].balances["заём"]
+    # До передачи — прежнее тело: оба числа сходятся и в месяцы до неё.
+    assert roll.months[0].balances["заём"] == \
+        deal_balance(book, "заём", date(2026, 1, 31))
+    assert roll.months[1].balances["заём"] == \
+        deal_balance(book, "заём", date(2026, 2, 28))
+
+
 def test_holder_and_amount_agree_with_the_last_assignment():
     """Сумма и держатель сделки — одно число и одно имя с записью, а не два."""
     book = _assigned_book()
@@ -559,8 +662,8 @@ def test_the_model_holds_together():
         wallets=[Wallet("карта", "Карта", "карта", D("20000")),
                  Wallet("кредитка", "Кредитка", "карта", D("-15000"),
                         is_credit=True, limit=D("60000"))],
-        deals=[_deal(amount=D("50000"), rate_per_year=D("0.2"), wallet="карта",
-                     closure_unit="копилка", kind="заём",
+        deals=[_deal(amount=D("50000"), start=START, rate_per_year=D("0.2"),
+                     wallet="карта", closure_unit="копилка", kind="заём",
                      schedule=ScheduleRule(days=(15,))),
                _deal(uid="взыскание", counterparty="мфо", amount=D("30000"),
                      second_priority=True, closure_unit="копилка", kind="цессия"),
@@ -570,5 +673,7 @@ def test_the_model_holds_together():
     validate(book)
     assert liquidity(book) == D("20000")
     assert counterparty_role(book, "мфо", START) == CREDITOR
-    assert counterparty_balance(book, "банк", START) == D("50000")
+    # Канон остатка: долг начался 01.01, поэтому на конец этого дня по нему
+    # уже день начисления — 50 000 × 0,2 / 12 / 31.
+    assert counterparty_balance(book, "банк", START) == D("50026.88")
     assert deal_balance(book, "аренда", START) is None

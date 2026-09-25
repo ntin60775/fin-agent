@@ -462,7 +462,8 @@ def _bridge_facts(action: Bridge) -> tuple[Deal, Income]:
     total = action.amount + _bridge_cost(action)
     deal = Deal(
         uid=_uid(action), title=action.title, counterparty=action.counterparty,
-        amount=total, rate_per_year=Decimal(0), wallet=action.wallet,
+        amount=total, start=action.date, rate_per_year=Decimal(0),
+        wallet=action.wallet,
         kind="мост",
         schedule=ScheduleRule(days=(repay.day,), payment=total, count=1,
                               start=repay.replace(day=1)))
