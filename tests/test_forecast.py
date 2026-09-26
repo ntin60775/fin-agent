@@ -10,8 +10,8 @@ import pytest
 import finance_core.roll as roll_module
 from finance_core import (FAMILY, LEGAL, OWED_TO_ME, PERSON, Counterparty, Deal,
                           ForecastInput, Income, Movement, ObservedBalance,
-                          Payment, ScheduleRule, Settlements, Wallet, forecast,
-                          forecast_shifts, validate, widest)
+                          Payment, ScheduleRule, Settlements, Wallet, deal_balance,
+                          forecast, forecast_shifts, validate, widest)
 from finance_core import WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP
 from finance_core.forecast import _roll_of
 
@@ -335,6 +335,91 @@ def test_agreed_check_is_not_a_question():
                         living_floor=D("0"), max_months=2))
     assert f.questions == []
     assert f.complete
+
+
+def test_observation_matching_the_accrued_balance_leaves_no_question():
+    """Наблюдение, равное расчёту на дату, — сверка сошлась: вопроса нет.
+
+    Сверка идёт по канону остатка (`deal_balance`), поэтому сверять есть что:
+    выписка называет долг с процентами к дате, и это число может совпасть с
+    расчётом — тогда открытого вопроса не появляется и прогноз остаётся полным.
+    """
+    book = _book(_deal(amount=D("10000"), rate_per_year=D("0.24"),
+                       rate_per_day=None))
+    on = date(2026, 1, 31)
+    canon = deal_balance(book, "заём", on)
+    assert canon == D("10200.00")              # канон больше тела: январь начислен
+    watched = replace(book, observed=[ObservedBalance("заём", on, canon)])
+    validate(watched)                          # сошедшаяся сверка — не ошибка
+    f = forecast(_input(watched, incomes=_incomes(D("5000"), 1, 2),
+                        income_horizon=date(2026, 4, 5),
+                        living_floor=D("0"), max_months=2))
+    assert f.questions == []                   # сошлось — вопросом не становится
+    assert f.complete                          # и неполноту не добавляет
+
+
+def test_observation_without_the_accrual_is_a_question_with_the_difference():
+    """Наблюдение «тело минус движения» при начисленных — вопрос с разницей.
+
+    Расхождение теперь говорит: правило начисления движка не совпало с правилом
+    кредитора. Прогноз от этого неполон, а правится условие, а не число.
+    """
+    book = _book(_deal(amount=D("10000"), rate_per_year=D("0.24"),
+                       rate_per_day=None))
+    on = date(2026, 1, 31)
+    kwargs = dict(incomes=_incomes(D("5000"), 1, 2), income_horizon=date(2026, 4, 5),
+                  living_floor=D("0"), max_months=2)
+    assert forecast(_input(book, **kwargs)).complete   # наблюдения нет — полон
+
+    watched = replace(book, observed=[ObservedBalance("заём", on, D("10000"))])
+    validate(watched)                                  # само расхождение — не ошибка
+    f = forecast(_input(watched, **kwargs))
+    assert [(q.deal, q.observed, q.computed, q.difference) for q in f.questions] == [
+        ("заём", D("10000"), D("10200.00"), D("-200.00"))]
+    assert not f.complete                              # и неполон именно из-за вопроса
+
+
+def test_observation_above_the_computed_balance_is_a_question_too():
+    """Наблюдение больше расчёта — тоже вопрос: разница уходит в плюс.
+
+    Кредитор начислил больше, чем посчитал движок (переплата, недоначисление
+    с нашей стороны): разница «наблюдение минус расчёт» становится
+    положительной, и это такой же открытый вопрос, как уход в минус.
+    """
+    book = _book(_deal(amount=D("10000"), rate_per_year=D("0.24"),
+                       rate_per_day=None))
+    on = date(2026, 1, 31)
+    watched = replace(book, observed=[ObservedBalance("заём", on, D("10500"))])
+    validate(watched)                              # само расхождение — не ошибка
+    f = forecast(_input(watched, incomes=_incomes(D("5000"), 1, 2),
+                        income_horizon=date(2026, 4, 5),
+                        living_floor=D("0"), max_months=2))
+    assert deal_balance(book, "заём", on) == D("10200.00")
+    assert [(q.deal, q.observed, q.computed, q.difference) for q in f.questions] == [
+        ("заём", D("10500"), D("10200.00"), D("300.00"))]
+    assert not f.complete                          # и неполон именно из-за вопроса
+
+
+def test_a_deal_without_a_rate_is_reconciled_and_can_agree():
+    """Нет ставки — нет начисления, но сверка идёт: канон равен телу минус движения.
+
+    Отдельного «сверять нечего» для беспроцентного долга нет — оно остаётся
+    только у регулярного расхода, у которого остатка нет вовсе.
+    """
+    book = _book(_deal(amount=D("10000"), rate_per_year=None, rate_per_day=None,
+                       start=None))
+    on = date(2026, 1, 31)
+    validate(book)                                      # ставки нет — не ошибка
+    assert deal_balance(book, "заём", on) == D("10000.00")   # сверять есть что
+
+    agreed = replace(book, observed=[ObservedBalance("заём", on, D("10000"))])
+    f = forecast(_input(agreed, living_floor=D("0"), max_months=2))
+    assert f.questions == []                            # числа совпали — сошлось
+
+    missed = replace(book, observed=[ObservedBalance("заём", on, D("9000"))])
+    g = forecast(_input(missed, living_floor=D("0"), max_months=2))
+    assert [(q.observed, q.computed, q.difference) for q in g.questions] == [
+        (D("9000"), D("10000.00"), D("-1000.00"))]      # та же сверка ловит разницу
 
 
 def test_non_convergence_makes_the_forecast_incomplete(monkeypatch):
