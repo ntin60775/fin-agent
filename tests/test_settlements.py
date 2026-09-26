@@ -390,6 +390,22 @@ def test_saldo_is_computed_from_movements_not_stored():
     assert counterparty_balance(book, "банк", date(2026, 1, 31)) == D("3500")
 
 
+def test_saldo_includes_accrued_interest():
+    """Сальдо включает начисленное: «сколько я должен» — один ответ, и ответ кредитора."""
+    book = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("10000"), start=date(2025, 7, 1),
+                     rate_per_year=D("0.24"), rate_per_day=None)],
+        movements=[Movement(date(2026, 1, 20), D("1000"), "заём")],
+    )
+    validate(book)
+    on = date(2026, 1, 31)
+    assert deal_balance(book, "заём", on) == D("10486.86")
+    assert counterparty_balance(book, "банк", on) == D("10486.86")
+    # «тело минус движения» — 9 000: сальдо больше ровно на начисленное
+    assert counterparty_balance(book, "банк", on) - D("9000") == D("1486.86")
+
+
 def test_role_is_derived_from_both_directions():
     """Роль выводится из суммы по сделкам в обе стороны и нигде не хранится."""
     book = _two_way_book()
