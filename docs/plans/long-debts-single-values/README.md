@@ -157,7 +157,7 @@ links:
 | 05 | [Единое определение свободных денег](05-single-free-money-basis.md) | 04 | archived |
 | 06 | [Дата начала долга и канон остатка](06-deal-start-and-balance-canon.md) | 04 | archived |
 | 07 | [Копилка и округление — следствия канона](07-pot-balance-and-rounding.md) | 06 | archived |
-| 08 | [Сальдо, сверка и неполнота прогноза](08-saldo-and-reconciliation.md) | 06 | draft |
+| 08 | [Сальдо, сверка и неполнота прогноза](08-saldo-and-reconciliation.md) | 06 | archived |
 | 09 | [Хвосты ревью — сборник неблокирующих замечаний](09-review-tails.md) | 08 | draft |
 
 01 и 03 независимы: окно и выделение функции начисления проверяются сами по себе. 02 идёт после
