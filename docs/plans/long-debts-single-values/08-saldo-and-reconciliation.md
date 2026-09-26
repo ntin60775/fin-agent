@@ -3,8 +3,9 @@ node_type: ticket
 title: Сальдо, сверка и неполнота прогноза
 service: _platform
 status: draft
-updated: 2026-09-25
+updated: 2026-09-26
 links:
+  documents: [../../../finance_core/forecast.py, ../../../finance_core/settlements.py, ../../../finance_core/README.md, ../../../CONTEXT.md, ../../../tests/test_forecast.py, ../../../tests/test_settlements.py]
   part_of: [README.md]
   depends_on: [06-deal-start-and-balance-canon.md]
 ---
@@ -13,8 +14,10 @@ links:
 
 **What to build:** сальдо по контрагенту и сверка с выпиской идут по канону остатка, поэтому
 сверка **может сойтись**: наблюдение из выписки, совпавшее с расчётом на дату, не оставляет
-открытого вопроса и не делает прогноз неполным. Сегодня расхождение не закрывается никогда —
-расчёт не видит начисленных процентов, — и прогноз вечно помечен неполным.
+открытого вопроса и не делает прогноз неполным. До тикета 06 расхождение не закрывалось
+никогда — расчёт не видел начисленных процентов, — и прогноз оставался неполным навсегда:
+это закрыл канон остатка (тело − движения + начисленное, тикет 06), а тикет 08 закрепляет
+результат синтетикой и приводит документацию сверки к настоящему.
 
 Расхождение остаётся открытым вопросом, но меняет смысл: теперь оно говорит «правило начисления
 движка не совпало с правилом кредитора» (иная ставка, база начисления, начало долга, комиссия) и
@@ -50,9 +53,95 @@ links:
 
 **Blocked by:** 06 — канон остатка.
 
-- [ ] Синтетика: наблюдение, равное расчётному остатку на дату, не создаёт открытого вопроса и не делает прогноз неполным.
-- [ ] Синтетика: наблюдение, разошедшееся с расчётом, остаётся открытым вопросом с разницей, и прогноз помечен неполным.
-- [ ] Синтетика: сальдо по контрагенту включает начисленное (больше «тела минус движения» на накопленные проценты).
-- [ ] Синтетика: у сделки без ставки сверка идёт и сходится при совпадении чисел.
-- [ ] Документация сверки перестала утверждать, что сошедшейся сверки не бывает, и называет возможные причины расхождения.
-- [ ] `python3 -m pytest tests/` зелёные; `finance_core/README.md` и `CONTEXT.md` описывают сверку на новом каноне.
+## Приёмка
+
+Пройдено: `python3 -m pytest tests/` — **311 passed** (306 на main + 5 новых);
+линт KB канонической копией — чисто, `index` пересобран. Правок существующих
+ожиданий нет: ни один прежний ассерт не менялся (в `tests/` единственные
+удалённые строки — две строки импорта, куда добавлен `deal_balance`;
+`git diff --numstat 202b845`: `test_forecast.py` **+87/−2** — 85 чистых
+добавлений + 2 переписанные строки импорта, `test_settlements.py` **+16/−0**).
+
+- [x] Синтетика: наблюдение, равное расчётному остатку на дату, не создаёт открытого вопроса и не делает прогноз неполным.
+  — `tests/test_forecast.py::test_observation_matching_the_accrued_balance_leaves_no_question`:
+  канон на 31.01 при теле 10 000 и ставке 24 % — **10 200,00** (январь начислен),
+  наблюдение ровно 10 200,00 → `questions == []` и `complete`; тот же случай с
+  нулевой ставкой уже держал `test_agreed_check_is_not_a_question`
+- [x] Синтетика: наблюдение, разошедшееся с расчётом, остаётся открытым вопросом с разницей, и прогноз помечен неполным.
+  — `tests/test_forecast.py::test_observation_without_the_accrual_is_a_question_with_the_difference`:
+  тот же вход без наблюдения — прогноз полон, с наблюдением «тело минус движения»
+  (10 000) — вопрос `("заём", 10 000, 10 200,00, −200,00)` и `not complete`;
+  прежний `test_unexplained_discrepancy_is_an_open_question` (8 000 против 10 000
+  → −2 000) остаётся зелёным. Положительная разница закрыта отдельным
+  `test_observation_above_the_computed_balance_is_a_question_too`: наблюдение
+  10 500 при расчёте 10 200,00 → вопрос `("заём", 10 500, 10 200,00, **+300,00**)
+  и `not complete` — кредитор начислил больше, чем движок
+- [x] Синтетика: сальдо по контрагенту включает начисленное (больше «тела минус движения» на накопленные проценты).
+  — `tests/test_settlements.py::test_saldo_includes_accrued_interest`: долг 10 000
+  с 01.07.2025 под 24 %, движение 1 000 от 20.01 — сальдо и `deal_balance` на
+  31.01 = **10 486,86**, «тело минус движения» 9 000 → сальдо больше ровно на
+  1 486,86 начисленного; числом ту же привязку уже держал
+  `test_the_model_holds_together` (50 026,88)
+- [x] Синтетика: у сделки без ставки сверка идёт и сходится при совпадении чисел.
+  — `tests/test_forecast.py::test_a_deal_without_a_rate_is_reconciled_and_can_agree`:
+  `validate` проходит, канон = 10 000,00 («тело минус движения»), наблюдение
+  10 000 → `questions == []`; наблюдение 9 000 → вопрос (9 000, 10 000,00,
+  −1 000,00) — сверка не пропущена. Отдельного «сверять нечего» для неё нет,
+  оно осталось у регулярного расхода
+- [x] Документация сверки перестала утверждать, что сошедшейся сверки не бывает, и называет возможные причины расхождения.
+  — «сошедшейся здесь не бывает» снято в `finance_core/forecast.py`
+  (`Discrepancy`, `_questions`) и заменено на «сверка идёт по канону и может
+  сойтись»; то же в докстринге `ObservedBalance` (`finance_core/settlements.py`).
+  Причины названы везде: **иная ставка, база начисления, начало долга, комиссия** —
+  правило начисления движка не совпало с правилом кредитора; закрывается правкой
+  условий сделки или записью факта, а не правкой числа
+- [x] `python3 -m pytest tests/` зелёные; `finance_core/README.md` и `CONTEXT.md` описывают сверку на новом каноне.
+  — 311 passed; `finance_core/README.md`: «Фактический остаток» (сверка по канону
+  может сойтись, сверяется и сделка без ставки, список `questions` только из
+  ненулевых разниц), «Сальдо … включает начисленное», «Ни остаток, ни сальдо не
+  хранятся» (сальдо — суммой канонических остатков), раздел прогноза; `CONTEXT.md`:
+  термины «Фактический остаток», «Расхождение» (разница «наблюдение минус расчёт»
+  и её причины) и «Сальдо» (включает начисленное)
+
+**Мутации на копиях в `/tmp` (ворктри не трогали; лог `/tmp/ld08-mutations.log`,
+перепрогнан после раунда ревью на батарее 311 тестов):**
+
+| # | Было → стало | Упавший тест |
+|---|---|---|
+| а | `if row.computed is not None and row.difference != 0:` → `if row.computed is not None:` | `test_observation_matching_the_accrued_balance_leaves_no_question` (+3: `test_agreed_check_is_not_a_question`, `test_a_deal_without_a_rate_is_reconciled_and_can_agree`, `test_non_convergence_makes_the_forecast_incomplete`) — 4 failed, 307 passed |
+| б | в `_questions`: `deal_balance(...)` → `_principal_left(...)` (сверка от «тела минус движения») | `test_observation_matching_the_accrued_balance_leaves_no_question`, `test_observation_without_the_accrual_is_a_question_with_the_difference` и `test_observation_above_the_computed_balance_is_a_question_too` — 3 failed, 308 passed |
+| в | в `_sides`: `outstanding = deal_balance(...)` → `outstanding = _principal_left(...)` | `test_saldo_includes_accrued_interest` (+ существующий `test_the_model_holds_together`) — 2 failed, 309 passed |
+| г | в `_questions`: `continue` для сделки без ставки | `test_a_deal_without_a_rate_is_reconciled_and_can_agree` — 1 failed, 310 passed |
+| д | `Forecast.complete` читает новое поле `reconciled: bool = True` вместо `not self.questions` | `test_observation_without_the_accrual_is_a_question_with_the_difference` и `test_observation_above_the_computed_balance_is_a_question_too` — 2 failed, 309 passed |
+| е | поля неполноты про сверку нет | тесты его и не требуют: обращений к полю `Forecast.reconciled` в `tests/` нет (`grep -rn '\.reconciled' tests/` — 0 совпадений, тот же греп по `finance_core/` — 0, поле отсутствует и в списке полей `Forecast`); грубый `grep reconciled` ловит имя теста `test_a_deal_without_a_rate_is_reconciled_and_can_agree`. Неполнота читается только через `complete`/`questions` (`not f.complete` ×7, `f.questions` ×6, `q.difference` ×4) |
+| RC | `if row.computed is not None and row.difference != 0:` → `if row.computed is not None and row.difference < 0:` (вопрос только при отрицательной разнице) | `test_observation_above_the_computed_balance_is_a_question_too` — 1 failed, 310 passed. До раунда ревью мутация проходила всю батарею (310 passed): ни одно наблюдение не было больше расчёта — закрыто N3 |
+
+**Раунд ревью (неблокирующие N1–N5; отчёт `.scratch/code-review-2026-09-26.md`,
+блокирующих нет, все 6 пунктов приёмки подтверждены независимо числами ревьюера
+и регрессом 15 сценариев — байт-в-байт, кроме пути модуля):**
+
+- **N1** — `docs/plans/long-debts-single-values/08-saldo-and-reconciliation.md:17-20`
+  «Сегодня расхождение не закрывается никогда…» переведено в прошлое: «До тикета 06
+  расхождение не закрывалось никогда… это закрыл канон остатка (тело − движения +
+  начисленное, тикет 06), а тикет 08 закрепляет результат синтетикой и приводит
+  документацию сверки к настоящему».
+- **N2** — `finance_core/settlements.py::_validate_observed`: «иначе оно навсегда
+  осталось бы открытым вопросом» заменено на «иначе оно молча выпало бы из сверки
+  (`_questions` берёт только то, у чего `computed` не None), а провалидировать книгу
+  вручную нельзя» — текст теперь совпадает с поведением.
+- **N3** — `tests/test_forecast.py::test_observation_above_the_computed_balance_is_a_question_too`:
+  наблюдение **10 500** при расчёте **10 200,00** → вопрос `("заём", 10 500, 10 200,00,
+  +300,00)` и `not complete` (кредитор начислил больше, чем движок). Мутация RC
+  (`difference != 0` → `difference < 0`) после этого падает; до правки она проходила
+  всю батарею.
+- **N4** — `finance_core/forecast.py::_questions`: сказано, что валидация книги —
+  обязательный вход в прогноз: громкий отказ («остатка нет — сверять нечего») даёт
+  только `validate()`, без него наблюдение по регулярному расходу молча выпадает из
+  `questions`, а не становится вопросом.
+- **N5** — свидетельство по мутации (е) исправлено в таблице выше: обращений к полю
+  `Forecast.reconciled` в `tests/` нет (`grep -rn '\.reconciled' tests/` — 0, тот же
+  греп по `finance_core/` — 0, поле отсутствует и в списке полей `Forecast`); грубый
+  `grep reconciled` ловит имя теста `test_a_deal_without_a_rate_is_reconciled_and_can_agree`.
+  Объём правки `tests/` уточнён по `git diff --numstat 202b845`:
+  `test_forecast.py` — **+87/−2** (85 чистых добавлений + 2 переписанные строки
+  импорта), `test_settlements.py` — **+16/−0**.
