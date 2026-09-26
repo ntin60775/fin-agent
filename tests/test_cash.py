@@ -492,6 +492,54 @@ def test_floor_gap_counts_the_consumed_minimum():
     assert r.floor_gap_date == date(2026, 1, 15)
 
 
+def test_the_living_floor_rounds_up_so_free_money_never_overstates():
+    """Сторона округления минимума выбрана: вверх — свободные деньги занижаются.
+
+    `F × дней / 30` с дробью меньше половины копейки: вверх (`ROUND_CEILING`)
+    даёт 233,34 и 1 033,34, половина вверх (`HALF_UP`) дала бы 233,33 и
+    1 033,33 — владелец увидел бы на копейку больше свободных, чем есть.
+    Сторона записана словами рядом с формулой свободных денег в
+    `finance_core/README.md` и `CONTEXT.md`.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("3000"))],
+        income=[Income(date(2026, 1, 1), D("500"), "main"),
+                Income(date(2026, 1, 7), D("1000"), "main")],
+        payments=[Payment(date(2026, 1, 4), D("200"), account="main",
+                          counterparty="x")],
+        living_floor_monthly=D("1000"),
+    )
+    r = run(s, main="main")
+    months = roll_cash(s, date(2026, 1, 1), max_months=1, main="main")
+    # Линия: отрезок 01.01–07.01 включительно — 7 дней, 1 000 × 7/30 =
+    # 233,333… → вверх до 233,34: 4 300 − 233,34.
+    assert r.free == D("4066.66")
+    # Январь целиком: 1 000 × 31/30 = 1 033,333… → 1 033,34: 4 300 − 1 033,34.
+    assert months[0].free == D("3266.66")
+
+
+def test_the_floor_requirement_and_consumed_round_up_by_a_kopek():
+    """Требование до прихода и прожитое округляются вверх, а не половина вверх.
+
+    Точка 05.01 при приходе 15.01: требование 10 000 × 10/30 = 3 333,333…,
+    прожитое с 01.01 (10 000 × 4/30 = 1 333,333…) вычтено из ликвидности
+    800. Половина вверх дала бы 3 333,33 − (800 − 1 333,33) = 3 866,66,
+    вверх — 3 866,68: копейка вверх в обеих слагаемых.
+    """
+    s = Scenario(
+        accounts=[Account("main", D("10000"))],
+        payments=[Payment(date(2026, 1, 1), D("9000"), account="main",
+                          counterparty="x"),
+                  Payment(date(2026, 1, 5), D("200"), account="main",
+                          counterparty="y")],
+        income=[Income(date(2026, 1, 15), D("5000"), "main")],
+        living_floor_monthly=D("10000"),
+    )
+    r = run(s, main="main")
+    assert r.floor_gap == D("3866.68")
+    assert r.floor_gap_date == date(2026, 1, 5)
+
+
 def test_floor_gap_none_when_floor_unknown():
     """Минимум `?` → «не оценено», а не ноль."""
     r = run(_floor_case(living_floor_monthly=None), main="main")
