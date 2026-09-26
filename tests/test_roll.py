@@ -8,12 +8,14 @@ import pytest
 
 from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
-                          SKIPPED, Counterparty, Deal, FirstPayment,
-                          Movement, OccurrenceEdit, ScheduleRule, Settlements,
-                          Wallet, accrued_interest, compare_deal_strategies,
-                          deal_balance, occurrences, roll_deals, validate)
+                          SKIPPED, AVALANCHE, Assignment, Counterparty, Deal,
+                          FirstPayment, Movement, OccurrenceEdit, ScheduleRule,
+                          Settlements, Wallet, accrued_interest,
+                          compare_deal_strategies, deal_balance, occurrences,
+                          roll_deals, validate)
 from finance_core import (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
                           WINDOW_MONTH_CAP, roll_window)
+from finance_core.roll import _DealsRoll
 
 START = date(2026, 1, 1)
 
@@ -31,7 +33,8 @@ def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     return Deal(**base)
 
 
-def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Settlements:
+def _book(*deals, counterparties=(), wallets=None, movements=(), edits=(),
+          assignments=()) -> Settlements:
     if wallets is None:
         wallets = [Wallet("карта", "Карта", "карта", D("0"))]
     return Settlements(
@@ -40,6 +43,7 @@ def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Se
         deals=list(deals),
         movements=list(movements),
         edits=list(edits),
+        assignments=list(assignments),
     )
 
 
@@ -370,7 +374,7 @@ def test_prepayment_is_a_debt_payment():
 # --- копилка ---------------------------------------------------------------
 
 def test_closure_unit_is_a_piggy_bank():
-    """Копилка: платежи копятся, остаток не падает, цель не растёт, закрытие разом."""
+    """Копилка: платежи копятся в котёл и падают в остаток участника, цель не растёт, закрытие разом."""
     first = _deal(uid="первый", amount=D("2000"), rate_per_year=D("0.5"),
                   closure_unit="копилка", schedule=_rule(payment=D("1000")))
     second = _deal(uid="второй", amount=D("1000"), closure_unit="копилка",
@@ -381,12 +385,17 @@ def test_closure_unit_is_a_piggy_bank():
 
     assert roll.months[0].units["копилка"].target == D("3000")
     assert roll.months[0].units["копилка"].pot == D("2000")
-    assert roll.months[0].balances["первый"] == D("2000")   # остаток не падает
+    # Остаток участника — канон: упал платежами (2 000 − 1 000) и начислился
+    # (2 000 × 0,5 / 12 = 83,33) — то же число, что расчётный остаток.
+    assert roll.months[0].balances["первый"] == D("1083.33")
     assert roll.months[1].units["копилка"].closed
     assert all(m.units["копилка"].target == D("3000") for m in roll.months)
     assert roll.months[1].balances["первый"] == D("0")      # закрылись разом
     assert roll.months[1].balances["второй"] == D("0")
-    assert roll.total_interest == D("0")                    # процентов внутри нет
+    # Проценты идут в остаток участника, а не в котёл: котёл ровно на
+    # платежах (2 000), цель — ровно на телах (3 000), ни то ни другое
+    # процентами не выросло.
+    assert roll.total_interest == D("128.47")               # 83,33 + 45,14
     assert {p.unit for p in roll.months[0].payments} == {"копилка"}   # деньги идут в котёл
 
 
@@ -441,6 +450,146 @@ def test_unit_pot_takes_an_in_window_movement_in_its_own_month():
     unit = roll.months[0].units["копилка"]
     assert unit.pot == D("6500")            # 5 000 + 500 января + 1 000 платежа
     assert unit.remaining == D("13500")
+
+
+def test_pot_member_balance_falls_with_pot_payments_and_equals_the_canon():
+    """Остаток участника копилки падает платежами и равен расчётному остатку.
+
+    Платежи проката записываются движениями по сделке — так их записывает зона,
+    и на них уже не прокат считает, а канон остатка (тот же путь, что у обычной
+    сделки в тесте канона). После записи остаток участника на конец месяца и
+    расчётный остаток — одно число: обязательные платежи, досрочка в котёл
+    (числится за первым участником) и начисление проводятся одинаково.
+    """
+    first = _deal(uid="первый", amount=D("20000"), start=date(2025, 6, 1),
+                  rate_per_year=D("0.24"), rate_per_day=None,
+                  closure_unit="копилка", schedule=_rule(payment=D("1000")))
+    second = _deal(uid="второй", amount=D("10000"), start=date(2025, 6, 1),
+                   rate_per_year=D("0.24"), rate_per_day=None,
+                   closure_unit="копилка", schedule=_rule(payment=D("500")))
+    book = _book(first, second,
+                 movements=[Movement(date(2025, 12, 15), D("5000"), "первый")])
+    validate(book)
+    opening = deal_balance(book, "первый", date(2025, 12, 31))
+    # Бюджет досрочек уходит в котёл — единица не набирается и не закрывается.
+    roll = roll_deals(book, START, D("2000"), max_months=3)
+
+    assert roll.months[0].balances["первый"] < opening    # остаток падает
+    assert not roll.months[2].units["копилка"].closed     # единица открыта
+    for index, month in enumerate(roll.months):
+        for payment in month.payments:
+            book.movements.append(Movement(payment.date, payment.amount,
+                                           payment.deal,
+                                           occurrence=payment.planned))
+        on = (date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31))[index]
+        assert month.balances["первый"] == \
+            deal_balance(book, "первый", on)
+        assert month.balances["второй"] == \
+            deal_balance(book, "второй", on)
+
+
+def test_pot_member_balance_and_accrual_are_kopeks_like_the_roll():
+    """Остаток и начисление участника копилки округляются тем же кодом, что прокат.
+
+    `model.kopek` — копейка, половина вверх (`HALF_UP`): 10 000 × 0,1249 / 12 =
+    104,0833… идёт в остаток 104,08 (округление вверх дало бы 104,09), а ровно
+    половина копейки — 10 000 × 0,12495 / 12 = 104,125 — вверх до 104,13.
+    """
+    def _roll(rate: D) -> tuple[D, D]:
+        member = _deal(uid="участник", amount=D("10000"),
+                       closure_unit="копилка", rate_per_year=rate,
+                       rate_per_day=None, schedule=_rule(payment=D("1000")))
+        book = _book(member)
+        validate(book)
+        roll = roll_deals(book, START, D(0), max_months=1)
+        return (roll.months[0].interest,
+                roll.months[0].balances["участник"])
+
+    interest, balance = _roll(D("0.1249"))
+    assert interest == D("104.08")                # третья цифра 3 — вниз
+    assert balance == D("9104.08")                # 10 000 + 104,08 − 1 000
+    assert balance == balance.quantize(D("0.01"))  # остаток в целых копейках
+    assert _roll(D("0.12495"))[0] == D("104.13")  # ровно половина — вверх
+
+
+def test_an_inside_window_assignment_enters_the_member_balance_and_the_target():
+    """Цессия внутри окна проведена и в остаток участника, и в цель единицы.
+
+    Дельта-ревью тикета 06 (N8): остаток проката стоял на теле, канон рос, а
+    цель единицы дельты не видела. Теперь остаток участника — канон на каждую
+    дату, цель — сумма актуальных тел участников, а денег от цессии в котёл не
+    приходит: передача меняет тело, а не платежи.
+    """
+    member = _deal(uid="участник", amount=D("120000"), counterparty="коллектор",
+                   start=date(2025, 6, 1), rate_per_year=D("0.24"),
+                   rate_per_day=None, closure_unit="копилка",
+                   schedule=_rule(payment=D("1000")))
+    book = _book(
+        member,
+        counterparties=[_counterparty(uid="коллектор", name="Коллектор",
+                                      subtype="ПКО")],
+        assignments=[Assignment(date(2026, 3, 1), "участник", from_holder="банк",
+                                to_holder="коллектор", amount=D("100000"),
+                                delta=D("20000"))])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3)
+
+    # Цель до передачи — прежнее тело, с марта — тело с дельтой.
+    assert [m.units["копилка"].target for m in roll.months] == [
+        D("100000"), D("100000"), D("120000")]
+    # Деньги в котёл приходят только платежами: дельта в котёл не идёт.
+    assert [m.units["копилка"].pot for m in roll.months] == [
+        D("1000"), D("2000"), D("3000")]
+    # Остаток участника — канон на каждый конец месяца, месяц передачи включительно.
+    for index, month in enumerate(roll.months):
+        for payment in month.payments:
+            book.movements.append(Movement(payment.date, payment.amount,
+                                           payment.deal,
+                                           occurrence=payment.planned))
+        on = (date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31))[index]
+        assert month.balances["участник"] == \
+            deal_balance(book, "участник", on)
+
+
+def test_repeating_the_month_step_keeps_the_transfer_delta_once():
+    """Повтор шага месяца проводит дельту цессии в цель единицы ровно один раз.
+
+    Драйвер повторяет шаг, пока бюджет месяца не перестанет меняться
+    (`entry` → `begin` → `restore` → `begin`), — снимок обязан вернуть и цель:
+    без этого дельта передачи внутри окна задвоилась бы (цель 120 000 →
+    140 000), единица закрылась бы раньше и все последующие остатки и `short`
+    сдвинулись. Повтор того же шага обязан дать те же числа.
+    """
+    member = _deal(uid="участник", amount=D("120000"), counterparty="коллектор",
+                   start=date(2025, 6, 1), rate_per_year=D("0.24"),
+                   rate_per_day=None, closure_unit="копилка",
+                   schedule=_rule(payment=D("1000")))
+    book = _book(
+        member,
+        counterparties=[_counterparty(uid="коллектор", name="Коллектор",
+                                      subtype="ПКО")],
+        assignments=[Assignment(date(2026, 1, 15), "участник", from_holder="банк",
+                                to_holder="коллектор", amount=D("100000"),
+                                delta=D("20000"))])
+    validate(book)
+    deals = _DealsRoll(book, START, strategy=AVALANCHE,
+                       consent_to_second=False, max_months=3)
+    snap = deals.entry()
+    deals.begin(1, D(0))
+    first = (deals.open_units["копилка"].target,
+             deals.open_deals["участник"].balance,
+             deals.open_units["копилка"].pot,
+             deals.total_interest)
+    deals.restore(snap)
+    deals.begin(1, D(0))
+    assert (deals.open_units["копилка"].target,
+            deals.open_deals["участник"].balance,
+            deals.open_units["копилка"].pot,
+            deals.total_interest) == first
+    # Цель — тело с одной дельтой (100 000 + 20 000); остаток — канон открытия
+    # плюс начисление января плюс дельта минус платёж в котёл:
+    # 114 868,56 + 2 697,37 + 20 000 − 1 000. Котёл — деньги, дельта в него не идёт.
+    assert first == (D("120000"), D("136565.93"), D("1000"), D("2697.37"))
 
 
 # --- требования и приоритеты -----------------------------------------------
@@ -832,7 +981,9 @@ def test_unit_with_a_forbidden_member_is_not_prepaid():
     roll = roll_deals(book, START, D("1000"), max_months=6)
     assert all(sp.planned is not None for dm in roll.months for sp in dm.payments)
     assert roll.months[0].prepaid == D("0")
-    assert roll.months[0].balances["первый"] == D("600")
+    # Остаток упал ровно на обязательный платёж (600 − 300): досрочки не было —
+    # в этом суть теста, а не «остаток стоит».
+    assert roll.months[0].balances["первый"] == D("300.00")
 
 
 def test_unknown_strategy_is_rejected():
