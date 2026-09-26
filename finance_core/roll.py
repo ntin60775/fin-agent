@@ -17,8 +17,11 @@
   нагрузка, посчитанная на начало проката, плюс свободные деньги: закрылась сделка
   раньше срока — её платёж идёт другим. Это и есть снежный ком.
 - **Копилка.** Сделки одной единицы закрытия гасят друг друга вместе: платежи
-  копятся в котёл, остаток не падает, цель (сумма по единице) фиксирована и не
-  растёт — процентов внутри копилки нет.
+  копятся в котёл и падают в остаток участника — его остаток канон, как у
+  любой сделки. «Закрывается разом» — правило единицы: закрыта, когда
+  накоплено не меньше её цели, и тогда остатки участников обнуляются разом.
+  Цель (сумма тел участников) фиксирована при договорённости и не растёт —
+  процентов внутрь копилки не идут.
 - **Второй приоритет сам не платится.** Прокат показывает срез свободных
   денег месяца — сколько их не нашло места (`DealMonth.offer`) — и предлагает
   направить его туда; считать погашение он начинает только после
@@ -82,8 +85,8 @@ class ScheduledPayment:
     """Платёж расписания: что, когда и с какого кошелька уходит.
 
     `planned` — плановая дата вхождения, по которой платёж опознаётся; `None` —
-    досрочка: вхождения у неё нет, деньги уходят сверх графика. `unit` — копилка,
-    если платёж идёт в неё, а не в остаток сделки.
+    досрочка: вхождения у неё нет, деньги уходят сверх графика. `unit` —
+    копилка: платёж копится в котёл и падает в остаток её участника.
 
     `debt` — платёж долговой: у сделки с остатком платёж гасит долг, у
     регулярного расхода — нет, а досрочка долговая всегда. Признак нужен кассе:
@@ -118,8 +121,10 @@ class UnitMonth:
 class DealMonth:
     """Месяц проката сделок: начислено, уплачено и что осталось.
 
-    `balances` — остатки сделок на конец месяца. У сделки в копилке остаток не
-    падает, пока единица не закроется: платежи копятся, и это видно в `units`.
+    `balances` — остатки сделок на конец месяца. У сделки в копилке остаток
+    падает платежами в котёл и начисляется, как у любой сделки; когда единица
+    закрыта (котёл ≥ цель), остатки её участников обнуляются разом. Сама
+    копилка — цель и котёл — видна в `units`.
     `total` — итог по сделкам первого приоритета, `interest` — начислено за
     месяц, `paid` — ушло за месяц, из него `prepaid` — досрочки, `short` —
     урезано: сколько из обязательного `want` не заплачено (сумма `want − amount`
@@ -366,11 +371,13 @@ def _facts_at(book: Settlements, deal_uid: str, start: date) -> date:
     """Дата, на которую остаток сделки — факт: движения это факт, когда бы ни случились.
 
     Нужна там, где важен **последний известный факт, а не момент окна**:
-    закрытость сделки (`_rollable` — съедено ли тело к последнему движению),
-    цель копилки и плоский остаток участника (их считают от тела на ту же
-    дату). Состояние открытой сделки при этом считается не здесь, а каноном на
+    закрытость сделки (`_rollable` — съедено ли тело к последнему движению).
+    Состояние открытой сделки при этом считается не здесь, а каноном на
     открытие окна (`_opened_balance`): закрытость отвечает на вопрос «есть ли
-    что прокатывать», состояние — на вопрос «сколько долгу».
+    что прокатывать», состояние — на вопрос «сколько долгу». Цель копилки тоже
+    считается на открытие окна (тела участников на момент открытия, той же
+    датой, что и их остатки), а дельты передачи внутри окна проводятся в неё
+    своим месяцем.
     """
     on = start
     for m in book.movements:
@@ -629,6 +636,7 @@ class _DealsEntry:
     """Снимок состояния сделок на входе месяца: повтор шага начинается с него."""
     balances: dict[str, Decimal]
     pots: dict[str, Decimal]
+    targets: dict[str, Decimal]
     total_interest: Decimal
 
 
@@ -707,8 +715,12 @@ class _DealsRoll:
                 self.open_units[unit] = _Unit(uid=unit, target=Decimal(0),
                                               second=opened.deal.second_priority)
             target = self.open_units[unit]
-            on = _facts_at(book, uid, start)
-            amount = deal_amount_at(book, uid, on) or Decimal(0)
+            # Цель — сумма тел участников на открытие окна, той же датой, что
+            # и их остатки: версии тела до окна уже входят в неё, а дельта
+            # передачи внутри окна проводится в цель своим месяцем в `begin`
+            # (иначе цель либо недосчиталась бы передачи, либо посчитала её
+            # дважды — в котле и в проводке).
+            amount = deal_amount_at(book, uid, _opening(start)) or Decimal(0)
             target.members.append(uid)
             target.target += amount
             target.second = target.second and opened.deal.second_priority
@@ -717,20 +729,18 @@ class _DealsRoll:
             # (платятся они остатком участника, а не котлом), дата — та же, что
             # у открытия окна: движения внутри окна придут в котёл своим
             # месяцем через `unit.pay`, второй раз их считать нельзя.
-            body = deal_amount_at(book, uid, _opening(start)) or Decimal(0)
             target.pot += max(
-                body - (_principal_left(book, uid, _opening(start)) or Decimal(0)),
+                amount - (_principal_left(book, uid, _opening(start))
+                          or Decimal(0)),
                 Decimal(0))
 
-        for uid, unit in self.open_units.items():
+        for unit in self.open_units.values():
             unit.pot = min(unit.pot, unit.target)
-            for member in unit.members:
-                # В копилке остаток сделки не падает: он стоит, пока единица не
-                # закроется, — платежи копятся в котёл, а не в остаток.
-                self.open_deals[member].balance = (deal_amount_at(book, member,
-                                                                  _facts_at(book, member, start))
-                                                   or Decimal(0))
-                if unit.closed:
+            if unit.closed:
+                # Единица закрыта — остатки участников обнуляются разом.
+                # Открытые участники при этом стоят каноном (первая петля):
+                # остаток участника — остаток сделки, падающий платежами.
+                for member in unit.members:
                     self.open_deals[member].balance = Decimal(0)
 
         until = self.window.until
@@ -791,6 +801,7 @@ class _DealsRoll:
         return _DealsEntry(
             {uid: o.balance for uid, o in self.open_deals.items()},
             {uid: u.pot for uid, u in self.open_units.items()},
+            {uid: u.target for uid, u in self.open_units.items()},
             self.total_interest)
 
     def restore(self, snap: _DealsEntry) -> None:
@@ -799,6 +810,8 @@ class _DealsRoll:
             self.open_deals[uid].balance = balance
         for uid, pot in snap.pots.items():
             self.open_units[uid].pot = pot
+        for uid, target in snap.targets.items():
+            self.open_units[uid].target = target
         self.total_interest = snap.total_interest
 
     def begin(self, index: int, extra: Decimal) -> _MonthLoad:
@@ -841,12 +854,14 @@ class _DealsRoll:
         for uid, opened in self.open_deals.items():
             moves = moves_by_deal.get(uid, ())
             shifts = shifts_by_deal.get(uid, ())
-            if opened.unit is not None:
-                # Движение участника идёт в котёл, а не в остаток: остаток
-                # участника стоит, пока единица не закроется.
+            unit = (self.open_units[opened.unit]
+                    if opened.unit is not None else None)
+            if unit is not None:
+                # Движение участника копится в котёл; в остаток участника оно
+                # проводится ниже тем же путём, что у любой сделки: остаток
+                # участника — канон, он падает и движением, и платежами.
                 for _, signed in moves:
-                    self.open_units[opened.unit].pay(signed)
-                continue
+                    unit.pay(signed)
             if opened.balance > 0:
                 # Платежи месяца — с суммой вхождения на начало месяца: на них
                 # считается дневная база, а платится по шагу 2 сколько выйдет.
@@ -879,8 +894,13 @@ class _DealsRoll:
                 opened.balance -= signed
             # Смена тела идёт в ту же дату: проценты месяца уже посчитаны с
             # ней (см. `deltas` у начисления), остаток её догоняет здесь.
+            # У участника копилки той же датой догоняет и цель единицы: цель —
+            # сумма тел участников, а версия тела изменилась (денег это не
+            # добавило — в котёл дельта не идёт, проценты в копилку не идут).
             for _, delta in shifts:
                 opened.balance += delta
+                if unit is not None:
+                    unit.target += delta
         self.total_interest += interest
         # Остаток на начало месяца: от него считается обязательный платёж процентом —
         # платёж дня на неё не влияет.
@@ -908,7 +928,10 @@ class _DealsRoll:
             pool -= amount
             paid += amount
             if unit is not None:
+                # В котёл и в остаток участника одним платежом: копятся деньги
+                # и падает его остаток — как у любой сделки.
                 unit.pay(amount)
+                opened.pay(amount)
             elif opened.deal.amount is not None:
                 opened.pay(amount)
             payments.append(ScheduledPayment(
@@ -1097,7 +1120,15 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
         # Ставка копилки — максимальная ставка участника: дорогая копилка
         # гасится первой, а не после любой standalone-сделки с ненулевой ставкой.
         rate = max(_rate(open_deals[member].deal) for member in unit.members)
-        rows.append(_Target(uid, rate, unit.remaining, unit.pay))
+
+        def pay(amount: Decimal, unit: _Unit = unit) -> None:
+            # Досрочка копилки — в котёл и в остаток первого участника тем же
+            # платёжом: у копилки платёж числится за первым участником
+            # (`_prepayment`), и его остаток падает, как движение по нему.
+            unit.pay(amount)
+            open_deals[unit.members[0]].pay(amount)
+
+        rows.append(_Target(uid, rate, unit.remaining, pay))
     return rows
 
 
