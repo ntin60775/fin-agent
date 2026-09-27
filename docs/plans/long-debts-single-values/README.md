@@ -2,8 +2,8 @@
 node_type: plan
 title: Длинный долг считается, у величин один базис
 service: _platform
-status: active
-updated: 2026-09-25
+status: archived
+updated: 2026-09-27
 links:
   documents: [../../../finance_core/roll.py, ../../../finance_core/solver.py, ../../../finance_core/settlements.py, ../../../finance_core/forecast.py, ../../../finance_core/actions.py]
   depends_on: [../../decisions/derived-balances.md, ../../decisions/wallet-pays-what-it-has.md, ../../decisions/unknown-is-not-zero.md, ../../decisions/what-means-out.md, ../../decisions/schedule-to-cash.md]
@@ -158,7 +158,7 @@ links:
 | 06 | [Дата начала долга и канон остатка](06-deal-start-and-balance-canon.md) | 04 | archived |
 | 07 | [Копилка и округление — следствия канона](07-pot-balance-and-rounding.md) | 06 | archived |
 | 08 | [Сальдо, сверка и неполнота прогноза](08-saldo-and-reconciliation.md) | 06 | archived |
-| 09 | [Хвосты ревью — сборник неблокирующих замечаний](09-review-tails.md) | 08 | draft |
+| 09 | [Хвосты ревью — сборник неблокирующих замечаний](09-review-tails.md) | 08 | archived |
 
 01 и 03 независимы: окно и выделение функции начисления проверяются сами по себе. 02 идёт после
 01: срок по графику определяется против окна и окном не сужается — это связка, которую нельзя
@@ -167,6 +167,10 @@ links:
 бюджета месяца, который живёт в перестроенной связке; 06 меняет остаток сделки и инициализацию
 проката. 07 и 08 — следствия канона остатка. 09 — сборник, заполняется по ходу тикетов 03–08,
 идёт последним; план не архивируется, пока он не закрыт.
+
+**План закрыт: все девять тикетов в статусе `archived`.** Последним закрыт 09 —
+три раунда независимого ревью, счёт тестов 311 → 327, линт чист; план
+архивирован вместе с ним 27.09.
 
 ## Ход работы
 
