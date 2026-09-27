@@ -3,7 +3,7 @@ node_type: index
 title: Планы
 service: _platform
 status: active
-updated: 2026-09-27
+updated: 2026-09-28
 links:
   part_of: [../README.md]
 ---
@@ -18,6 +18,7 @@ links:
 выполнение — `/ship` по одному тикету.
 
 - [long-debts-single-values/](long-debts-single-values/README.md) — длинный долг считается, у величин один базис: сходимость проходом по месяцам, единое определение свободных денег и остатка сделки
+- [penalties-and-charges/](penalties-and-charges/README.md) — пени, штрафы и начисления от события: долг должен уметь расти — начисления от события, неустойка от просрочки, долг по частям, распределение платежа правилом зоны
 - [zone-split.md](zone-split.md) — разделение проекта на архитектурную и финансовую зоны
 - [engine-wording.md](engine-wording.md) — докстринги движка называют вещи как глоссарий
 - [engine-messages.md](engine-messages.md) — сообщения движка называют кошелёк кошельком
@@ -32,5 +33,7 @@ links:
   блокирующие закрыты»);
 - `model-audit-fixes` — цепочка solver'а: **01 → 02 → (03, 04)**, 09 ждёт 01;
   05–08 независимы (см. `model-audit-fixes/README.md`);
+- `penalties-and-charges` — в работе: грилл плана идёт, цепочка тикетов появится
+  после разбивки (см. `penalties-and-charges/README.md`);
 - `long-debts-single-values`, `zone-split`, `engine-wording` и `engine-messages` —
   архивные, порядок не задают.
