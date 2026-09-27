@@ -774,6 +774,42 @@ def test_short_sees_the_piggy_bank_room():
     assert [m.short for m in roll.months] == [D("1000.00")]   # want 1 500 при котле 500
 
 
+def test_a_unit_closed_together_stops_showing_a_shortfall():
+    """Единица закрыта разом — её вхождения не копят нехватку.
+
+    Окно держит отдельная сделка, поэтому прокат после закрытия продолжается.
+    Раньше у уже закрытой единицы каждое вхождение участника добавляло `want`
+    в `short` (1 000 → 2 000 → 2 000), хотя урезать нечего: обязательства
+    участников закрыты разом. Платежи, котёл и остатки при этом не меняются —
+    меняется только ответ «не хватило».
+    """
+    first = _deal(uid="первый", amount=D("2000"), rate_per_year=D("0.5"),
+                  start=date(2025, 6, 1), closure_unit="копилка",
+                  schedule=_rule(payment=D("1000")))
+    second = _deal(uid="второй", amount=D("1000"), rate_per_year=D("0"),
+                   start=date(2025, 6, 1), closure_unit="копилка",
+                   schedule=_rule(payment=D("1000")))
+    alone = _deal(uid="одиночная", amount=D("9000"), rate_per_year=D("0.2"),
+                  schedule=_rule(payment=D("500")))
+    book = _book(first, second, alone)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=4)
+    # Котёл догнал цель на втором месяце — остатки участников обнулены разом.
+    assert roll.months[1].units["копилка"].closed
+    assert roll.months[1].units["копилка"].pot == D("3000")
+    assert [roll.months[i].balances["первый"] for i in range(1, 4)] == [D("0")] * 3
+    assert [roll.months[i].balances["второй"] for i in range(1, 4)] == [D("0")] * 3
+    # Ни в месяц закрытия, ни после — нехватки нет.
+    assert [m.short for m in roll.months] == [D("0")] * 4
+    # Равенство `prepaid == short` на такой книге не выполняется (В-2):
+    # нехватки нет, а освободившийся из графика единицы платёж уходит
+    # досрочкой живым сделкам.
+    assert [m.prepaid for m in roll.months] == [D("0"), D("1000"), D("2000"),
+                                                D("2000")]
+    # Прокат не изменился: те же платежи каждый месяц.
+    assert [m.paid for m in roll.months] == [D("2500")] * 4
+
+
 def test_short_never_exceeds_want_on_a_negative_pool():
     """Отрицательный бюджет: не заплачено ровно want — недоплата не больше него."""
     deal = _deal(amount=D("10000"), rate_per_year=D("0.36"),
@@ -783,6 +819,35 @@ def test_short_never_exceeds_want_on_a_negative_pool():
     jan = roll_deals(book, START, D("-2000"), max_months=1).months[0]
     assert jan.paid == D(0)
     assert jan.short == D("1030.00")           # want целиком, а не 1 030 + пул
+
+
+def test_a_deficit_month_pays_the_out_of_segment_rows_before_the_calendar():
+    """Дефицитный месяц: внеотрезочные строки получают деньги первыми.
+
+    Три сделки и пул 1 500 из 3 000: начало «а» (строка 25-го) и «б» (строка
+    10-го) — 31-е, их строки вне отрезка и платятся до процентов в своей дате;
+    строка «в» (5-го) — самая ранняя по календарю, но она внутри отрезка и
+    ждёт процентов. Деньги получают «б», потом «а»; «в» — нет, его нехватка
+    названа числом. Приоритет — «вне отрезка → отрезок», внутри группы дата;
+    сортировка внеотрезочных строк по сделке меняет получателя.
+    """
+    late = _deal(uid="а", amount=D("100000"), start=date(2026, 1, 31),
+                 schedule=_rule(days=(25,), payment=D("1000")))
+    early = _deal(uid="б", amount=D("100000"), start=date(2026, 1, 31),
+                  schedule=_rule(days=(10,), payment=D("1000")))
+    inside = _deal(uid="в", amount=D("100000"),
+                   schedule=_rule(days=(5,), payment=D("1000")))
+    book = _book(late, early, inside)
+    validate(book)
+    roll = roll_deals(book, START, D("-1500"), max_months=1)
+    month = roll.months[0]
+    assert [(p.deal, p.amount) for p in month.payments] == [
+        ("б", D("1000")), ("а", D("500"))]
+    assert month.paid == D("1500")
+    # Не хватило «а» (500 из 1 000) и «в» (ничего из 1 000).
+    assert month.short == D("1500")
+    assert month.balances == {"а": D("99500.00"), "б": D("99000.00"),
+                              "в": D("100000.00")}
 
 
 # --- пробелы ---------------------------------------------------------------
@@ -1150,6 +1215,205 @@ def test_a_payment_before_the_debt_start_stays_in_the_accrual_base():
     assert deal_balance(book, "заём", date(2026, 1, 31)) == D("99063.87")
     assert roll.months[0].balances["заём"] == \
         deal_balance(book, "заём", date(2026, 1, 31))
+
+
+def test_an_occurrence_on_the_debt_start_day_stays_inside_the_segment():
+    """Вхождение ровно на дату начала долга — внутри отрезка, а не до него.
+
+    Граница «раньше начала» строгая: платёж в саму дату начала не считается
+    оплаченным до процентов, он идёт шагом 3 — вместе с остальными в отрезке,
+    после процентов, — и в базу не вычитается: прокат и канон сходятся до
+    копейки на всех трёх месяцах.
+    """
+    deal = _deal(amount=D("100000"), start=date(2026, 1, 20),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 schedule=_rule(days=(20,), payment=D("1000")))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3)
+    expected = [D("99774.19"), D("100769.67"), D("101785.06")]
+    ends = (date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31))
+    assert [m.interest for m in roll.months] == [D("774.19"), D("1995.48"),
+                                                 D("2015.39")]
+    for index, on in enumerate(ends):
+        month = roll.months[index]
+        assert month.balances["заём"] == expected[index]
+        for row in month.payments:
+            book.movements.append(Movement(row.date, row.amount, row.deal,
+                                           occurrence=row.planned))
+        assert deal_balance(book, "заём", on) == expected[index]
+
+
+def test_an_early_percent_row_is_counted_from_the_balance_before_interest():
+    """Минималка процентом у внеотрезочной строки — от остатка до процентов.
+
+    Вхождение 20-го при начале долга 31-м платится до процентов, поэтому
+    `percent` считается от остатка 100 000: 5 % = 5 000,00 и нехватки нет.
+    От остатка с процентом 31-го вышло бы 5 003,23 и фантомные 3,23.
+    """
+    deal = _deal(amount=D("100000"), start=date(2026, 1, 31),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 schedule=_rule(days=(20,), percent=D("0.05")))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=1)
+    month = roll.months[0]
+    assert [p.amount for p in month.payments] == [D("5000.00")]
+    assert month.short == D(0)                 # фантомной нехватки нет
+    assert month.interest == D("61.29")        # 95 000 × 0,24 / 12 × 1/31
+    for row in month.payments:
+        book.movements.append(Movement(row.date, row.amount, row.deal,
+                                       occurrence=row.planned))
+    assert month.balances["заём"] == D("95061.29")
+    assert month.balances["заём"] == \
+        deal_balance(book, "заём", date(2026, 1, 31))
+
+
+def test_an_early_occurrence_belongs_only_to_its_own_deal():
+    """Вхождение раньше начала одного долга не трогает базу другого.
+
+    Две сделки в одном месяце: у «а» начало 31-го и вхождение 20-го (вне её
+    отрезка), у «б» начало в начале окна и обычное вхождение 10-го. Каждый
+    остаток сходится со своим каноном — чужое вхождение в чужую базу не идёт.
+    """
+    early = _deal(uid="а", amount=D("100000"), start=date(2026, 1, 31),
+                  rate_per_year=D("0.24"), rate_per_day=None,
+                  schedule=_rule(days=(20,), payment=D("1000")))
+    plain = _deal(uid="б", amount=D("50000"), rate_per_year=D("0.24"),
+                  rate_per_day=None, schedule=_rule(days=(10,), payment=D("500")))
+    book = _book(early, plain)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=2)
+    expected = {"а": [D("99063.87"), D("100045.15")],
+                "б": [D("50500.00"), D("51010.00")]}
+    ends = (date(2026, 1, 31), date(2026, 2, 28))
+    for index, on in enumerate(ends):
+        month = roll.months[index]
+        for uid in ("а", "б"):
+            assert month.balances[uid] == expected[uid][index], uid
+        for row in month.payments:
+            book.movements.append(Movement(row.date, row.amount, row.deal,
+                                           occurrence=row.planned))
+        for uid in ("а", "б"):
+            assert deal_balance(book, uid, on) == expected[uid][index], uid
+
+
+def test_a_movement_on_the_debt_start_day_is_not_taken_from_the_base():
+    """Движение в саму дату начала долга — платёж отрезка, а не вычет из базы.
+
+    Граница у движений та же, что у вхождений: строго раньше. Движение 20-го
+    при начале долга 20-го в базу января не вычитается (иначе двойной счёт:
+    и вычет, и день-цикл), и оба носителя сходятся.
+    """
+    deal = _deal(amount=D("100000"), start=date(2026, 1, 20),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 schedule=_rule(days=(20,), payment=D("1000"),
+                                start=date(2026, 2, 1)))
+    book = _book(deal, movements=[Movement(date(2026, 1, 20), D("1000"), "заём")])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=2)
+    assert roll.months[0].interest == D("774.19")   # база 100 000, не 99 000
+    for index, on in enumerate((date(2026, 1, 31), date(2026, 2, 28))):
+        month = roll.months[index]
+        for row in month.payments:
+            book.movements.append(Movement(row.date, row.amount, row.deal,
+                                           occurrence=row.planned))
+        assert month.balances["заём"] == deal_balance(book, "заём", on), index
+
+
+def test_a_truncated_early_occurrence_keeps_the_base_at_what_was_paid():
+    """Урезанное вхождение раньше начала: база — на неуплаченное, а не на план.
+
+    Пул месяца урезан (`monthly_extra = −1 000`), вхождение 1 000 от 20-го не
+    проходит: январь считается на полных 100 000 — как канон без движения, —
+    а не на 99 000 по плану. Нехватка при этом названа числом.
+    """
+    deal = _deal(amount=D("100000"), start=date(2026, 1, 31),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 schedule=_rule(days=(20,), payment=D("1000")))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D("-1000"), max_months=3)
+    expected = [D("100064.52"), D("102065.81"), D("104107.13")]
+    assert [m.interest for m in roll.months] == [D("64.52"), D("2001.29"),
+                                                 D("2041.32")]
+    assert [m.paid for m in roll.months] == [D("0")] * 3
+    assert [m.short for m in roll.months] == [D("1000")] * 3
+    ends = (date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31))
+    for index, on in enumerate(ends):
+        month = roll.months[index]
+        assert month.balances["заём"] == expected[index]
+        for row in month.payments:
+            book.movements.append(Movement(row.date, row.amount, row.deal,
+                                           occurrence=row.planned))
+        assert deal_balance(book, "заём", on) == expected[index]
+
+
+@pytest.mark.parametrize("name,rates,payment,expected", [
+    ("годовая", dict(rate_per_year=D("0.24"), rate_per_day=None), D("1000"),
+     [D("99063.87"), D("100045.15"), D("101046.05")]),
+    ("дневная", dict(rate_per_year=None, rate_per_day=D("0.001")), D("50000"),
+     [D("50050.00"), D("1001.40"), D("0.00")]),
+])
+def test_a_planned_payment_before_the_debt_start_gives_one_number(
+        name, rates, payment, expected):
+    """Вхождение графика раньше начала долга: прокат и канон — одно число.
+
+    Платёж по графику (а не записанное движение) стоит 20-го, а долг начался
+    31-го: в день-цикл отрезка [31.01, 31.01] он не входит и в `paid` не
+    берётся, а в базу идёт вычтенным — так же, как в каноне. Оба сценария
+    ревью тикета 06 сходятся до копейки на всех трёх месяцах.
+    """
+    deal = _deal(uid="заём", amount=D("100000"), start=date(2026, 1, 31),
+                 schedule=_rule(payment=payment), **rates)
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3)
+    ends = (date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31))
+    for index, on in enumerate(ends):
+        month = roll.months[index]
+        assert month.balances["заём"] == expected[index], name
+        # Платежи проката записываются движениями — так их записывает зона.
+        for payment_row in month.payments:
+            book.movements.append(Movement(payment_row.date, payment_row.amount,
+                                           payment_row.deal,
+                                           occurrence=payment_row.planned))
+        assert deal_balance(book, "заём", on) == expected[index], name
+
+
+def test_the_budgets_and_window_path_keeps_the_early_payment_out_of_the_segment():
+    """Путь `budgets=`/`window=` у `roll_deals`: платёж вне отрезка применяется раз.
+
+    Готовое окно и **ненулевой** бюджет по месяцам — тот же вызов проката, что
+    и в связке с кассой: переданные 500/300/100 уходят досрочками и меняют
+    остаток (без них месяцы дали бы 99 063,87 / 100 045,15 / 101 046,05), то
+    есть тест держит именно `budgets=`, а не `monthly_extra`. Вхождение 20-го
+    раньше начала долга 31-го лежит вне отрезка января, поэтому январь
+    считается на 99 000 (платёж уже оплачен до процентов), а не применяется
+    им второй раз в день-цикле; прокат и канон сходятся на всех месяцах
+    переданного окна.
+    """
+    deal = _deal(uid="заём", amount=D("100000"), start=date(2026, 1, 31),
+                 rate_per_year=D("0.24"), rate_per_day=None,
+                 schedule=_rule(payment=D("1000")))
+    book = _book(deal)
+    validate(book)
+    window = roll_window(book, START, 3)
+    roll = roll_deals(book, START, D(0), window=window, max_months=3,
+                      budgets={1: D("500"), 2: D("300"), 3: D("100")})
+    assert roll.window is window                  # переданное окно взято как есть
+    assert [m.interest for m in roll.months] == [D("63.87"), D("1971.28"),
+                                                 D("1984.70")]
+    assert [m.prepaid for m in roll.months] == [D("500"), D("300"), D("100")]
+    expected = [D("98563.87"), D("99235.15"), D("100119.85")]
+    ends = (date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31))
+    for index, on in enumerate(ends):
+        month = roll.months[index]
+        assert month.balances["заём"] == expected[index]
+        for row in month.payments:
+            book.movements.append(Movement(row.date, row.amount, row.deal,
+                                           occurrence=row.planned))
+        assert month.balances["заём"] == deal_balance(book, "заём", on)
 
 
 def test_an_in_window_movement_enters_the_months_accrual():

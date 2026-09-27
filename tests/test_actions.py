@@ -9,7 +9,7 @@ import pytest
 
 from finance_core import (LEGAL, Bridge, Counterparty, Deal, Direct,
                           ForecastInput, ImpossibleAction, Income, Movement,
-                          OccurrenceEdit, Payment, Prepay, ScheduleRule,
+                          OccurrenceEdit, Prepay, ScheduleRule,
                           Settlements, Move, Variant, Wallet, applied, baseline,
                           deal_balance, facts, forecast, horizon, impossible,
                           occurrences, price, prices, roll_deals, roll_months,

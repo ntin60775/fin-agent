@@ -481,8 +481,11 @@ def _validate_deals(book: Settlements) -> None:
                              f"отрицательной")
         if d.rate_per_year is not None and d.rate_per_day is not None:
             raise ValueError(f"сделка {d.uid!r}: ставка либо годовая, либо дневная")
-        if ((d.rate_per_year is not None or d.rate_per_day is not None)
-                and d.amount is not None and d.start is None):
+        if (d.amount is not None and d.start is None
+                and (d.rate_per_year not in (None, Decimal(0))
+                     or d.rate_per_day not in (None, Decimal(0)))):
+            # Нулевая ставка — не ставка: начисление равно нулю при любой дате,
+            # поэтому дата у такой сделки не нужна — как у беспроцентной.
             raise ValueError(
                 f"сделка {d.uid!r}: ставка и сумма есть, а начала долга нет — "
                 f"без него долг на дату не считается; укажите дату начала "
@@ -806,8 +809,7 @@ def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
         return Decimal(0)
     by_day: dict[date, Decimal] = {}
     for when, amount in payments:
-        if since <= when <= until:
-            by_day[when] = by_day.get(when, Decimal(0)) + amount
+        by_day[when] = by_day.get(when, Decimal(0)) + amount
     shift: dict[date, Decimal] = {}
     for when, amount in deltas:
         if since <= when <= until:

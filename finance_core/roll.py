@@ -560,7 +560,9 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
 
     Бюджет месяца — обязательная нагрузка по графику плюс `monthly_extra`;
     нагрузка считается один раз, на начало проката, поэтому освободившийся платёж
-    остаётся в бюджете. Обязательные вхождения платятся по датам, свободные
+    остаётся в бюджете. Обязательные вхождения платятся по датам, но раньше
+    всех — строки с датой раньше начала долга: они вне отрезка начисления и
+    платятся до процентов, в своей дате; затем по датам идут остальные. Свободные
     деньги уходят по стратегии — сначала обязательный график, потом досрочки.
 
     `budgets` — бюджет досрочек по месяцам (индекс → сумма); если задан,
@@ -596,7 +598,7 @@ def roll_deals(book: Settlements, start: date, monthly_extra: Decimal,
     # Срок по графику — отдельный проход без бюджета досрочек; он считается
     # один раз на весь прокат, а не повторяется внутри связки с кассой.
     graph = _graph_pass(book, start, strategy, max_months, consent_to_second)
-    payoff, reason = _payoff_pair(graph, start)
+    payoff, reason = _payoff_pair(graph, start, book)
 
     return _roll_pass(book, start, monthly_extra, strategy, max_months,
                       consent_to_second, budgets, income_horizon, window,
@@ -618,11 +620,39 @@ def _graph_pass(book: Settlements, start: date, strategy: str,
                       payoff_by_graph_reason=None)
 
 
-def _payoff_pair(graph: DealRoll, start: date) -> tuple[date | None, str | None]:
+def _accrual_since(deal: Deal, month: date) -> date:
+    """Начало отрезка начисления сделки в этом месяце: месяц или позже — начало долга.
+
+    Одна граница на два вопроса: от неё считаются проценты отрезка и до неё
+    (строго раньше) вхождение считается уже оплаченным — оно лежит вне
+    отрезка и в базу входит не плановой суммой, а уплаченным.
+    """
+    if deal.start is not None and deal.start > month:
+        return deal.start
+    return month
+
+
+def mandatory_gaps(gaps: list[Gap], book: Settlements) -> list[Gap]:
+    """Чей пробел — пробел обязательного графика: его и спрашиваем.
+
+    Пробел требования (в прокат входит отдельным списком) и пробел второго
+    приоритета (платится из свободных, а не по графику) обязательного графика
+    не смоделировывают: книга, где такой пробел один, — не книга без
+    посчитанного графика.
+    """
+    deals = {d.uid: d for d in book.deals}
+    return [g for g in gaps
+            if (deal := deals.get(g.deal)) is not None
+            and deal.direction == I_OWE and not deal.second_priority]
+
+
+def _payoff_pair(graph: DealRoll, start: date,
+                 book: Settlements) -> tuple[date | None, str | None]:
     """Дата и причина срока по графику — по прокату с нулевым бюджетом."""
-    if graph.start_total <= 0 and not graph.gaps:
+    if graph.start_total <= 0 and not mandatory_gaps(graph.gaps, book):
         # Закрывать было нечего: долг погашен до начала проката. Пробел сюда не
-        # попадает: не смоделированный долг — не закрытый, а не посчитанный.
+        # попадает, только если это пробел обязательного графика: не
+        # смоделированный долг — не закрытый, а не посчитанный.
         return _month_start(start, 0), PAYOFF_CLOSED_BEFORE
     if graph.start_total <= 0 or graph.freedom is None:
         # Пробелы вместо прокатываемых долгов либо долг не закрылся за
@@ -828,7 +858,69 @@ class _DealsRoll:
         short = Decimal(0)
         payments: list[ScheduledPayment] = []
 
-        # 1. Проценты: до платежей месяца, по базе начисления каждой сделки.
+        def pay_row(when: date, uid: str, occ: Occurrence, basis: Decimal) -> None:
+            """Одно обязательное вхождение: `want` от базы `basis`, урезание, платёж."""
+            nonlocal pool, paid, short
+            opened = self.open_deals[uid]
+            unit = (self.open_units[opened.unit]
+                    if opened.unit is not None else None)
+            want = _payment_amount(opened.deal, occ, basis)
+            # Единица закрыта разом — её участники больше не должны ничего,
+            # и их вхождения не копят нехватку: след графика, а не урезанный
+            # платёж. Сумма урезанного так и остаётся у сделки, чей остаток
+            # или чей котёл урезал платёж при живом обязательстве.
+            done = unit is not None and unit.closed
+            if unit is not None:
+                room = unit.remaining
+            elif opened.deal.amount is None:
+                room = want     # регулярный расход: остатка нет, платится целиком
+            else:
+                room = opened.balance
+            amount = min(want, room, pool)
+            # Урезание видно всегда, даже когда не прошло ничего: недоплата
+            # месяца — сумма want − max(amount, 0) (в отрицательном пуле не
+            # заплачено ровно want), аррерисом она не станет.
+            if not done:
+                short += want - max(amount, Decimal(0))
+            if amount <= 0:
+                return
+            pool -= amount
+            paid += amount
+            if unit is not None:
+                # В котёл и в остаток участника одним платежом: копятся деньги
+                # и падает его остаток — как у любой сделки.
+                unit.pay(amount)
+                opened.pay(amount)
+            elif opened.deal.amount is not None:
+                opened.pay(amount)
+            payments.append(ScheduledPayment(
+                date=when, amount=amount, deal=uid,
+                counterparty=deal_holder_at(self.book, uid, when),
+                wallet=funding_wallet(opened.deal), planned=occ.planned,
+                unit=opened.unit,
+                # Сделка с остатком — долг, регулярный расход — жизнь.
+                debt=opened.deal.amount is not None))
+
+        # 1. Вхождения раньше начала долга — до процентов месяца. Дата такого
+        # вхождения лежит вне отрезка начисления `[since, month_end]`: день-цикл
+        # и `paid` отрезка его не видят, поэтому и в базу оно входит не
+        # плановой суммой, а тем, что реально уплачено — урезал пул, в базу
+        # ушло урезанное. Платёж идёт до процентов, иначе база увидела бы
+        # план, а остаток — уплаченное. Принадлежность считается по своей
+        # сделке (`row[1] == uid`): чужое вхождение — чужая база. Такие
+        # вхождения платятся первыми: у своей сделки их дата раньше любой
+        # даты её отрезка; у соседней сделки дата вхождения может быть раньше,
+        # но оно ждёт процентов — принят порядок «вне отрезка → отрезок».
+        early = [row for uid, opened in self.open_deals.items()
+                 for row in rows
+                 if row[1] == uid and row[0] < _accrual_since(opened.deal, month)]
+        early.sort(key=lambda row: (row[0], row[1]))
+        for when, uid, occ in early:
+            pay_row(when, uid, occ, self.open_deals[uid].balance)
+        early_ids = {id(row) for row in early}
+        rows = [row for row in rows if id(row) not in early_ids]
+
+        # 2. Проценты: до платежей месяца, по базе начисления каждой сделки.
         # Их считает settlements (`accrued_interest`): слагаемые округлены
         # там, второй раз проценты здесь не округляются. Начало долга позже
         # начала окна — не ошибка: до него начисления нет, и отрезок месяца
@@ -871,12 +963,13 @@ class _DealsRoll:
                 # Движение месяца — тоже платеж отрезка: день платежа уменьшает
                 # остаток до начисления за этот день, как требует канон.
                 month_payments += list(moves)
-                since = month
-                if opened.deal.start is not None and opened.deal.start > since:
-                    since = opened.deal.start
-                # База отрезка — как в каноне: платежи до начала долга уже
-                # вычтены из тела, а остаток на начало месяца их ещё не видит
-                # (движение месяца списывается после процентов).
+                since = _accrual_since(opened.deal, month)
+                # База отрезка — как в каноне: движение до начала долга уже
+                # вычтено из тела, а остаток на начало месяца его ещё не видит
+                # (движение месяца списывается после процентов). Вхождения
+                # графика раньше начала долга к этому моменту уже оплачены
+                # (шаг 1) — их в базе отдельно не вычитают: остаток их уже не
+                # видит, а урезал пул — не видит ровно на уплаченное.
                 base = opened.balance - sum(
                     (amount for day, amount in moves if day < since),
                     Decimal(0))
@@ -902,45 +995,14 @@ class _DealsRoll:
                 if unit is not None:
                     unit.target += delta
         self.total_interest += interest
-        # Остаток на начало месяца: от него считается обязательный платёж процентом —
-        # платёж дня на неё не влияет.
+        # Остаток на начало месяца: от него считается обязательный платёж
+        # процентом. Вхождения, оплаченные до процентов (шаг 1), уже легли в
+        # этот остаток; остальные платежи дня на него не влияют.
         month_start = {uid: o.balance for uid, o in self.open_deals.items()}
 
-        # 2. Обязательные вхождения месяца — по датам, из общего бюджета.
+        # 3. Остальные обязательные вхождения месяца — по датам, из общего бюджета.
         for when, uid, occ in rows:
-            opened = self.open_deals[uid]
-            unit = (self.open_units[opened.unit]
-                    if opened.unit is not None else None)
-            want = _payment_amount(opened.deal, occ, month_start[uid])
-            if unit is not None:
-                room = unit.remaining
-            elif opened.deal.amount is None:
-                room = want             # регулярный расход: остатка нет, платится целиком
-            else:
-                room = opened.balance
-            amount = min(want, room, pool)
-            # Урезание видно всегда, даже когда не прошло ничего: недоплата
-            # месяца — сумма want − max(amount, 0) (в отрицательном пуле не
-            # заплачено ровно want), аррерисом она не станет.
-            short += want - max(amount, Decimal(0))
-            if amount <= 0:
-                continue
-            pool -= amount
-            paid += amount
-            if unit is not None:
-                # В котёл и в остаток участника одним платежом: копятся деньги
-                # и падает его остаток — как у любой сделки.
-                unit.pay(amount)
-                opened.pay(amount)
-            elif opened.deal.amount is not None:
-                opened.pay(amount)
-            payments.append(ScheduledPayment(
-                date=when, amount=amount, deal=uid,
-                counterparty=deal_holder_at(self.book, uid, when),
-                wallet=funding_wallet(opened.deal), planned=occ.planned,
-                unit=opened.unit,
-                # Сделка с остатком — долг, регулярный расход — жизнь.
-                debt=opened.deal.amount is not None))
+            pay_row(when, uid, occ, month_start[uid])
         self.load = _MonthLoad(index, month, pool, paid, short, interest,
                                payments)
         return self.load
@@ -1355,7 +1417,7 @@ def roll_months(book: Settlements, start: date,
     # считается один раз на весь прокат, а не повторяется на каждой
     # сходимости, как повторяла его прежняя глобальная петля.
     graph = _graph_pass(book, start, strategy, max_months, consent_to_second)
-    payoff, reason = _payoff_pair(graph, start)
+    payoff, reason = _payoff_pair(graph, start, book)
 
     deals = _DealsRoll(book, start, strategy=strategy,
                        consent_to_second=consent_to_second,
