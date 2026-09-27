@@ -12,7 +12,8 @@ from finance_core import (FAMILY, LEGAL, OWED_TO_ME, PERSON, Counterparty, Deal,
                           ForecastInput, Income, Movement, ObservedBalance,
                           Payment, ScheduleRule, Settlements, Wallet, deal_balance,
                           forecast, forecast_shifts, validate, widest)
-from finance_core import WINDOW_INCOME_ENDS, WINDOW_MONTH_CAP
+from finance_core import (PAYOFF_CLOSED_BEFORE, WINDOW_INCOME_ENDS,
+                          WINDOW_MONTH_CAP)
 from finance_core.forecast import _roll_of
 
 START = date(2026, 1, 1)
@@ -649,6 +650,65 @@ def test_payoff_by_graph_outlives_the_window_that_income_ends():
     assert WINDOW_INCOME_ENDS in f.first_priority.reason
     assert f.payoff_by_graph.month == date(2030, 12, 1)
     assert f.payoff_by_graph.month > f.window.until      # окном не сужается
+
+
+#: Причина первой даты на книге, где обязательный график — пробел.
+GAP_PHRASE = "обязательный график не смоделирован: пробел — не закрытие"
+
+
+def test_a_book_of_gaps_is_not_called_closed_next_to_not_closed():
+    """Книга из пробелов: ни молчаливой первой даты, ни «закрыт» рядом.
+
+    Пробел — не закрытие (тикет 09, Код-1): прокат не получил ни одного
+    остатка, но и не погасил долг — он не посчитан. Раньше первая дата окна
+    стояла без причины рядом с «не закрывается» у срока по графику; фраза
+    причины сверяется целиком, а не подстрокой.
+    """
+    book = _book(_deal(uid="заём", amount=D("3000"), schedule=None))
+    f = forecast(_input(book, incomes=_incomes(D("5000"), 1, 2),
+                        living_floor=D("0"), max_months=3))
+    assert [g.deal for g in f.gaps] == ["заём"]
+    assert f.payoff_by_graph.month is None
+    assert f.payoff_by_graph.reason == "за отведённые месяцы долг не закрылся"
+    assert f.first_priority.month is None           # первая дата окна — не закрытие
+    assert not f.first_priority.reached
+    assert f.first_priority.reason == GAP_PHRASE
+
+
+def test_a_gap_that_is_not_the_mandatory_graph_never_says_it_is_not_modeled():
+    """Чей пробел: требование и второй приоритет обязательный график не ломают.
+
+    Пробел требования (в прокат входит отдельным списком) и пробел второго
+    приоритета (платится из свободных, а не по графики) — не пробел
+    обязательного графика: книга, где они одни, отвечает «закрыт к началу»,
+    и обе даты согласны. Книга без долгов вовсе — та же граница: без пробела
+    фраза не выдаётся.
+    """
+    closed = _deal(uid="заём", amount=D("1000"),
+                   schedule=ScheduleRule(days=(20,), payment=D("1000")))
+    settled = [Movement(date(2025, 12, 20), D("1000"), "заём")]
+    claim = _deal(uid="требование", amount=D("3000"), direction=OWED_TO_ME,
+                  schedule=None)
+    second = _deal(uid="взыскание", amount=D("3000"), second_priority=True,
+                   rate_per_year=None, schedule=None)
+    cases = {
+        "только пробел требования": (_book(claim), ["требование"]),
+        "закрытый долг и пробел требования": (_book(closed, claim, movements=settled),
+                                              ["требование"]),
+        "закрытый долг и пробел второго приоритета": (_book(closed, second,
+                                                            movements=settled),
+                                                      ["взыскание"]),
+        "пустая книга": (_book(), []),
+    }
+    for name, (book, gapped) in cases.items():
+        f = forecast(_input(book, living_floor=D("0"), max_months=3))
+        assert [g.deal for g in f.gaps] == gapped, name
+        # Ни молчаливой даты, ни чужого пробела в причине обязательного графика.
+        assert f.first_priority.reason is None, name
+        assert f.first_priority.month == START, name
+        # Обе даты одного ответа: закрывать нечего — закрыт к началу.
+        assert f.payoff_by_graph.month == f.first_priority.month, name
+        assert f.payoff_by_graph.reason == PAYOFF_CLOSED_BEFORE, name
 
 
 def test_both_dates_say_not_closed_with_one_phrasing():

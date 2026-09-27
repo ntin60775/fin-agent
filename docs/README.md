@@ -3,7 +3,7 @@ node_type: index
 title: База знаний ядра расчёта
 service: _platform
 status: active
-updated: 2026-09-25
+updated: 2026-09-27
 links:
   part_of: [../AGENTS.md]
 ---
@@ -66,3 +66,7 @@ python3 skill://kb-search/gitmark.py inventory             # перегенер�
 пакета, где бы тот ни стоял, — поэтому работает и там, где `.omp/skills/` нет.
 В переменную такую команду положить нельзя: в присваивании `skill://` не
 разрешается.
+
+Линт гоняют копией, установленной в репозитории (`.omp/plugins/node_modules/…`), —
+чужая старая версия `gitmark.py` из другого репозитория даёт ложные ERR I7. Счёт
+разошёлся — первым делом сверить версию инструмента: `gitmark.py version`.

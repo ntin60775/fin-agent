@@ -26,7 +26,8 @@ from typing import Any
 
 from .model import Income, Payment, Transfer
 from .roll import (AVALANCHE, PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, DealRoll,
-                   Expectation, Gap, MonthsRoll, Window, roll_months)
+                   Expectation, Gap, MonthsRoll, Window, mandatory_gaps,
+                   roll_months)
 from .settlements import FAMILY, I_OWE, Settlements, Wallet, deal_balance
 from .solver import CashMonth
 
@@ -286,7 +287,7 @@ def forecast(inp: ForecastInput) -> Forecast:
         unconverged=_shown(roll.unconverged, until),
         step1=step1,
         step2=step2,
-        first_priority=_first_priority(roll, window_reason),
+        first_priority=_first_priority(roll, window_reason, inp.book),
         payoff_by_graph=_payoff_by_graph(roll.deal_roll),
         second_priority=_second_priority(inp, roll, window_reason),
         cushion=_cushion(roll.cash_months, inp.cushion, window_reason),
@@ -428,7 +429,8 @@ def _payoff_by_graph(deal_roll: DealRoll) -> Milestone:
                      reason=deal_roll.payoff_by_graph_reason)
 
 
-def _first_priority(roll: MonthsRoll, window_reason: str) -> Milestone:
+def _first_priority(roll: MonthsRoll, window_reason: str,
+                    book: Settlements) -> Milestone:
     """Когда закрыт обязательный график: закрывать нечего — закрыт сразу.
 
     Это **срок с досрочками** — при текущем бюджете свободных денег; рядом лежит
@@ -436,7 +438,19 @@ def _first_priority(roll: MonthsRoll, window_reason: str) -> Milestone:
     сужается. Срок с досрочками может лежать за концом окна — тогда он назван
     той же фразой, что и срок по графику («не закрывается» — одна формулировка),
     и причиной, которой окно кончилось: молчание выдало бы окно за весь срок.
+
+    Прокатывать нечего не только когда закрывать нечего: книга, где
+    обязательный график — пробел, тоже не даёт прокату ни одного остатка, но
+    долг при этом не закрыт, а не посчитан — назвать его первым месяцом окна
+    значило бы «закрыт» рядом с «не закрывается» на той же книге. Пробел
+    при этом спрашивается чей: пробел требования и пробел второго приоритета
+    обязательного графика не смоделировывают (`mandatory_gaps`), и книга с
+    ними отвечает как книга без обязательных долгов — закрывать нечего.
     """
+    if (roll.deal_roll.start_total <= 0
+            and mandatory_gaps(roll.deal_roll.gaps, book)):
+        return Milestone(
+            reason="обязательный график не смоделирован: пробел — не закрытие")
     if roll.deal_roll.freedom is None:
         return Milestone(
             reason=f"{PAYOFF_NOT_CLOSED}: {window_reason}")

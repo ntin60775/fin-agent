@@ -247,6 +247,52 @@ def test_a_free_deal_and_a_regular_expense_never_ask_for_a_debt_start():
     assert deal_balance(book, "аренда", date(2026, 1, 31)) is None
 
 
+def test_a_zero_rate_deal_never_asks_for_a_debt_start():
+    """Нулевая ставка — не ставка: дата начала не спрашивается, как у 0 %.
+
+    Начисление равно нулю при любой дате, поэтому сделка «0 % (график)» без
+    даты — обычная беспроцентная: проходит `validate`, в пробел не уходит и
+    считается «тело минус движения». Ненулевая ставка без даты по-прежнему
+    падает (`test_a_rated_deal_without_a_debt_start_falls_with_a_clear_text`).
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        wallets=[Wallet("карта", "Карта", "карта", D("0"))],
+        deals=[_deal(uid="рассрочка", start=None, rate_per_year=D("0"),
+                     wallet="карта",
+                     schedule=ScheduleRule(days=(20,), payment=D("1000")))],
+        movements=[Movement(date(2026, 1, 10), D("3000"), "рассрочка")],
+    )
+    validate(book)                    # нулевая ставка без даты — не ошибка
+    assert deal_balance(book, "рассрочка", date(2026, 1, 31)) == D("7000")
+    assert roll_deals(book, START, D(0), max_months=1).gaps == []
+
+
+def test_a_rated_regular_expense_and_a_free_claim_never_ask_for_a_debt_start():
+    """Ставка без суммы и требование с нулевой ставкой начала не спрашивают.
+
+    Регулярный расход остатка не имеет — закрывать нечего, дата ему не нужна
+    даже со ставкой; требование с нулевой ставкой начисления не даёт — как
+    обычная беспроцентная сделка.
+    """
+    book = Settlements(
+        counterparties=[_counterparty(),
+                        _counterparty(uid="арендодатель", name="Арендодатель",
+                                      subtype="прочее")],
+        wallets=[Wallet("карта", "Карта", "карта", D("0"))],
+        deals=[_deal(uid="аренда", amount=None, counterparty="арендодатель",
+                     start=None, rate_per_year=D("0.12"), wallet="карта",
+                     schedule=ScheduleRule(days=(5,), payment=D("3000"))),
+               _deal(uid="требование", start=None, rate_per_year=D("0"),
+                     direction=OWED_TO_ME, wallet="карта",
+                     schedule=ScheduleRule(days=(10,), payment=D("1000")))],
+    )
+    validate(book)                    # ни одна дата не спрашивается
+    assert roll_deals(book, START, D(0), max_months=1).gaps == []
+    # У нулевой ставки канон тот же, что и «тело минус движения».
+    assert deal_balance(book, "требование", date(2026, 1, 31)) == D("10000")
+
+
 # --- начисление процентов ---------------------------------------------------
 
 def _daily(rate: D = D("0.001")) -> Deal:
@@ -303,6 +349,30 @@ def test_segment_boundaries_are_inclusive_on_both_ends():
                             date(2026, 1, 15), []) == D("77.42")   # 2 400 / 31
     assert accrued_interest(daily, D("100000"), date(2026, 1, 16),
                             date(2026, 1, 15), []) == D("0")       # пустой отрезок
+
+
+def test_payments_outside_the_segment_do_not_change_the_accrual():
+    """Платежи вне отрезка [since, until] на начисление не влияют.
+
+    Дни вне отрезка циклом не посещаются, а `paid` месяца берётся по границам
+    отрезка, — поэтому платёж до `since` и платёж после `until` ничего не
+    меняют (тикет 09, Код-3: условие на входе построения `by_day` было этому
+    условию избыточно и убрано).
+    """
+    inside = [(date(2026, 2, 10), D("5000"))]
+    outside = [(date(2026, 1, 5), D("7000")),       # до since
+               (date(2026, 4, 12), D("9000"))]      # после until
+    since, until = date(2026, 2, 1), date(2026, 3, 31)
+    daily = accrued_interest(_daily(), D("100000"), since, until, inside)
+    yearly = accrued_interest(_yearly(), D("100000"), since, until, inside)
+    assert accrued_interest(_daily(), D("100000"), since, until,
+                            inside + outside) == daily
+    assert accrued_interest(_yearly(), D("100000"), since, until,
+                            inside + outside) == yearly
+    # Сами числа отрезка: 100 000 × 0,24 / 12 за февраль плюс март на 95 000
+    # (после февральского платежа), и дни февраля–мартовские по 100,00/95,00.
+    assert yearly == D("3940.00")
+    assert daily == D("5734.01")
 
 
 def test_every_day_is_rounded_on_its_own():
@@ -575,6 +645,34 @@ def test_an_assignment_inside_the_window_enters_the_accrual_of_its_month():
         deal_balance(book, "заём", date(2026, 1, 31))
     assert roll.months[1].balances["заём"] == \
         deal_balance(book, "заём", date(2026, 2, 28))
+
+
+def test_an_assignment_mid_month_enters_the_whole_months_base():
+    """Дельта передачи середины месяца входит в базу месяца целиком.
+
+    Передача 25.03 даёт те же числа, что и 01.03: долг вырос, а не был
+    уплачен (решение `deal-balance-canon`, вариант 11), поэтому дельта идёт
+    в базу своего месяца по своей дате — без пропорции дням и без перезапуска
+    начисления с даты передачи.
+    """
+    def movements() -> list[Movement]:
+        return [Movement(date(2026, month, 20), D("1000"), "заём",
+                         occurrence=date(2026, month, 20)) for month in (1, 2, 3)]
+
+    mid = _transfer_book(date(2026, 3, 25), movements())
+    first = _transfer_book(date(2026, 3, 1), movements())
+    validate(mid)
+    validate(first)
+    # До марта версии тела ещё нет — обе книги дают одно число.
+    assert deal_balance(mid, "заём", date(2026, 2, 28)) == \
+        deal_balance(first, "заём", date(2026, 2, 28))
+    # Март считается на теле с дельтой: середина месяца не даёт ни меньшей
+    # базы (пропорция дням), ни перезапуска начисления с даты передачи.
+    assert deal_balance(mid, "заём", date(2026, 3, 31)) == D("139239.04")
+    assert deal_balance(first, "заём", date(2026, 3, 31)) == D("139239.04")
+    # Прокат того же числа — одна формулировка у обоих носителей.
+    roll = roll_deals(mid, START, D(0), max_months=3)
+    assert roll.months[2].balances["заём"] == D("139239.04")
 
 
 def test_holder_and_amount_agree_with_the_last_assignment():
