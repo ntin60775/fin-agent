@@ -7,10 +7,10 @@ updated: 2026-09-28
 links:
   documents: [../../../finance_core/README.md, ../../../CONTEXT.md, ../../decisions/README.md]
   part_of: [README.md]
-  depends_on: [07-overdue-triggers.md, 09-roll-parts.md, 10-cash-paid-vs-charged.md, 11-forecast-gaps.md, 12-what-if-overdue.md, 13-prepay-parts.md, 14-closure-unit-parts.md, 15-assignment-parts.md]
+  depends_on: [07-overdue-triggers.md, 09-roll-parts.md, 10-roll-stalled-window.md, 11-cash-paid-vs-charged.md, 12-forecast-gaps.md, 13-what-if-overdue.md, 14-prepay-parts.md, 15-closure-unit-parts.md, 16-assignment-parts.md]
 ---
 
-# 16: Доки, термины и записи решений
+# 17: Доки, термины и записи решений
 
 **Суть.** KB и код обязаны называть одно и то же одними словами, а решения
 грилла — жить в `docs/decisions/`, чтобы свежий контекст не пересматривал их
@@ -33,7 +33,7 @@ links:
 R4-Q22 (приёмка: линт KB, синхронизация документации с кодом); документирует
 решения раундов 1–4 и правки 1–3. Новых решений не принимает.
 
-**Blocked by:** 07, 09, 10, 11, 12, 13, 14, 15 (документация описывает
+**Blocked by:** 07, 09, 10, 11, 12, 13, 14, 15, 16 (документация описывает
 финальное состояние всех способностей).
 
 ## Приёмка
