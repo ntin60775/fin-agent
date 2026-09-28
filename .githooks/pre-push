@@ -1,0 +1,11 @@
+#!/bin/sh
+# Хук публикации: не даёт отправить личные данные в открытый репозиторий.
+#
+# Правила и что считается личным — docs/ops/публикация.md (пункт 1).
+# Свои шаблоны (имена кредиторов, реальные суммы) — .forbidden-names.txt в корне
+# репозитория; файл в .gitignore, потому что сами шаблоны — тоже личные данные.
+#
+# Подключение (один раз на клон): git config core.hooksPath .githooks
+# Ручная проверка всей истории: python3 .githooks/publication-check.py --all
+# Обойти проверку осознанно: git push --no-verify
+exec python3 "$(dirname "$0")/publication-check.py" --pre-push

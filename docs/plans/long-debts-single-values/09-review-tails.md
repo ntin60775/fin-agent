@@ -3,7 +3,7 @@ node_type: ticket
 title: Хвосты ревью — сборник неблокирующих замечаний
 service: _platform
 status: archived
-updated: 2026-09-27
+updated: 2026-09-28
 links:
   documents: [../../../finance_core/roll.py, ../../../finance_core/forecast.py, ../../../finance_core/settlements.py, ../../../tests/test_actions.py, ../../../tests/test_forecast.py, ../../../tests/test_roll.py, ../../../tests/test_settlements.py, ../../../CONTEXT.md, ../../../finance_core/README.md, ../../README.md, ../../decisions/deal-balance-canon.md]
   part_of: [README.md]
@@ -230,8 +230,9 @@ links:
 ВЕРЕН: канонический линт проекта (ontoship 0.4.8, `.omp/plugins/node_modules/…`,
 байт-в-байт = копия из `~/.omp/plugins/cache/…/0.4.8/…`) даёт «✓ чисто (75
 файлов), 0 ERR / 0 WARN», `gitmark inventory --check` — «реестр синхронен
-(13 команд · 12 навыков)»; 14 ERR I7 приходят из **gitmark 0.1.0**
-(`<путь>`)
+(13 команд · 12 навыков)»; 14 ERR I7 приходят из **gitmark 0.1.0** — старой копии
+пакета из другого репозитория (`skills/kb-search/gitmark.py`; абсолютный путь здесь
+не приводится — в зоне их нет)
 — чужой старой версии инструмента из другого репозитория, её правила к KB этого
 проекта не относятся (та же 14 и на базе 0f4e1b6, и в ворктри). Проверка в
 приёмке: обе копии прогнаны, счёт каждой назван.
@@ -362,7 +363,7 @@ N8 (глоссарий запрещал «горизонт»): `CONTEXT.md:264` 
   100 000 — 5 000,00, а не 5 003,23 с фантомной нехваткой 3,23) и тест
   `tests/test_roll.py::test_an_early_percent_row_is_counted_from_the_balance_before_interest`
   (платёж 5 000,00, `short` 0, проценты 61,29, прокат = канон 95 061,29) —
-  ловит сдвиг базы на <сумма> (мутация M17/R9).
+  ловит сдвиг базы на 1 денежную единицу (мутация M17/R9).
 - [x] Третий раунд, **устаревшие тексты**: докстринг
   `tests/test_roll.py::test_an_occurrence_on_the_debt_start_day_stays_inside_the_segment`
   («шаг 2» → «шаг 3» по новой нумерации шагов) и глоссарий `CONTEXT.md`

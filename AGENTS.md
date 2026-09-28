@@ -31,6 +31,7 @@ finance_core/  движок: model, касса (solver), взаиморасчё�
 tests/         синтетические тесты движка — без личных данных
 inbox/         заявки из финансовой зоны (сырьё: потребность, а не решение)
 docs/          база знаний (это KB): reference, decisions, plans, ops
+.githooks/     хук публикации (pre-push) и проверка перед push
 CONTEXT.md     доменные термины
 AGENTS.md      этот файл — читается первым
 ```
@@ -57,6 +58,7 @@ HTML-карта — регенерируется из md и в git не комм
 python3 -m pytest tests/                          # синтетические тесты движка
 python3 skill://kb-search/gitmark.py lint         # инварианты KB (I1–I9)
 python3 skill://kb-search/gitmark.py index        # индекс поиска
+python3 .githooks/publication-check.py --all      # личные данные перед публикацией
 ```
 
 `skill://` разрешает агентская среда; в обычной оболочке линт гоняют копией пакета
