@@ -84,11 +84,11 @@ def messages(rev_args):
 
 def added_amounts(rev_args):
     """Суммы без валюты, добавленные этим набором коммитов в docs/ и inbox/."""
-    out = git("log", "-p", "--format=%h %s", *rev_args, "--", *KB_PREFIXES).stdout
+    out = git("log", "-p", "--format=%x00%h %s", *rev_args, "--", *KB_PREFIXES).stdout
     subject, hits = "", []
     for line in out.splitlines():
-        if not line.startswith(("+", "-", "@", "diff", "index", "---", "+++")):
-            subject = line.strip()
+        if line.startswith("\x00"):
+            subject = line[1:].strip()
         elif line.startswith("+") and not line.startswith("+++"):
             for found in AMOUNT.findall(line[1:]):
                 hits.append((subject, found, line[1:].strip()[:110]))
