@@ -33,7 +33,7 @@ links:
   блокирующие закрыты»);
 - `model-audit-fixes` — цепочка solver'а: **01 → 02 → (03, 04)**, 09 ждёт 01;
   05–08 независимы (см. `model-audit-fixes/README.md`);
-- `penalties-and-charges` — контракт готов (грилл: раунды 1–4 и правки по
-  независимой проверке), ждёт разбивки на тикеты (см. `penalties-and-charges/README.md`);
+- `penalties-and-charges` — грилл пройден (раунды 1–4 и правки по независимой
+  проверке), тикеты 01–16 ждут `/ship` (см. `penalties-and-charges/README.md`);
 - `long-debts-single-values`, `zone-split`, `engine-wording` и `engine-messages` —
   архивные, порядок не задают.
