@@ -1,6 +1,13 @@
 ---
+node_type: reference
+title: Заявки из финансовой зоны — правило зоны
+service: _platform
+status: active
+updated: 2026-09-28
 description: Заявки из финансовой зоны в inbox/ — вход в работу; разобрать прежде чем начинать своё.
 alwaysApply: true
+links:
+  relates_to: [../../inbox/README.md]
 ---
 
 # Заявки из финансовой зоны

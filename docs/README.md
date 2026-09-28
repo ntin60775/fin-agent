@@ -3,7 +3,7 @@ node_type: index
 title: База знаний ядра расчёта
 service: _platform
 status: active
-updated: 2026-09-27
+updated: 2026-09-28
 links:
   part_of: [../AGENTS.md]
 ---
@@ -39,7 +39,7 @@ Markdown — источник правды. Всё производное — п
 
 ## Планы
 
-- [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [engine-wording.md](plans/engine-wording.md), [engine-messages.md](plans/engine-messages.md), [obligations/](plans/obligations/README.md), [long-debts-single-values/](plans/long-debts-single-values/README.md)
+- [plans/](plans/README.md) — контракты планов: [zone-split.md](plans/zone-split.md), [engine-wording.md](plans/engine-wording.md), [engine-messages.md](plans/engine-messages.md), [obligations/](plans/obligations/README.md), [long-debts-single-values/](plans/long-debts-single-values/README.md), [model-audit-fixes/](plans/model-audit-fixes/README.md), [penalties-and-charges/](plans/penalties-and-charges/README.md)
 
 ## Ops
 
@@ -57,7 +57,7 @@ Markdown — источник правды. Всё производное — п
 ```bash
 python3 skill://kb-search/gitmark.py index                 # построить индекс
 python3 skill://kb-search/gitmark.py search "<запрос>"     # bm25 ∪ trigram ∪ fuzzy
-python3 skill://kb-search/gitmark.py lint                  # инварианты I1–I8
+python3 skill://kb-search/gitmark.py lint                  # инварианты I1–I9
 python3 skill://kb-search/gitmark.py map -o docs-map.html  # HTML-карта и граф
 python3 skill://kb-search/gitmark.py inventory             # перегенерировать таблицы реестра
 ```
@@ -70,3 +70,19 @@ python3 skill://kb-search/gitmark.py inventory             # перегенер�
 Линт гоняют копией, установленной в репозитории (`.omp/plugins/node_modules/…`), —
 чужая старая версия `gitmark.py` из другого репозитория даёт ложные ERR I7. Счёт
 разошёлся — первым делом сверить версию инструмента: `gitmark.py version`.
+
+**Код возврата.** По умолчанию линт завершается нулём даже при ERR — «чисто» читается
+по выводу (`✓ чисто`), а не по коду. Машинная проверка (CI, гейт в скрипте) обязана
+звать его с `--strict`: только тогда ERR даёт ненулевой код.
+
+## Соглашения
+
+- **`updated:`** — дата последней смысловой правки. Правка формы (ссылка, формулировка
+  команды, порядок строк) её не двигает; правка смысла — двигает, в тот же заход.
+  Расхождение с датой коммита само по себе не дефект, но если документ правился по
+  смыслу, а дата стоит старая — сверить устаревание не с чем.
+- **`_Плановое_` в терминах.** `CONTEXT.md` — словарь текущего состояния движка.
+  Понятие, которое вводит ещё не исполненный план, помечается в записи словом
+  `_Плановое_` со ссылкой на план и тикеты: читатель не примет план за факт.
+- **Производное** (`.gitmark/`, `*-map.html`) не коммитится и правится только
+  пересборкой: `index` после правок md, `map` — когда менялась структура.

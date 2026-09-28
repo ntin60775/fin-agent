@@ -3,7 +3,7 @@ node_type: decision
 title: Заявки из финансовой зоны идут в inbox/, а не в код
 service: _platform
 status: active
-updated: 2026-09-11
+updated: 2026-09-15
 links:
   relates_to: [zone-split.md, ../reference/how-to-work.md]
 ---

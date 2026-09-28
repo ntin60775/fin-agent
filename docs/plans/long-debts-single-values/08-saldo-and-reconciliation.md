@@ -117,7 +117,8 @@ links:
 | е | поля неполноты про сверку нет | тесты его и не требуют: обращений к полю `Forecast.reconciled` в `tests/` нет (`grep -rn '\.reconciled' tests/` — 0 совпадений, тот же греп по `finance_core/` — 0, поле отсутствует и в списке полей `Forecast`); грубый `grep reconciled` ловит имя теста `test_a_deal_without_a_rate_is_reconciled_and_can_agree`. Неполнота читается только через `complete`/`questions` (`not f.complete` ×7, `f.questions` ×6, `q.difference` ×4) |
 | RC | `if row.computed is not None and row.difference != 0:` → `if row.computed is not None and row.difference < 0:` (вопрос только при отрицательной разнице) | `test_observation_above_the_computed_balance_is_a_question_too` — 1 failed, 310 passed. До раунда ревью мутация проходила всю батарею (310 passed): ни одно наблюдение не было больше расчёта — закрыто N3 |
 
-**Раунд ревью (неблокирующие N1–N5; отчёт `.scratch/code-review-2026-09-26.md`,
+**Раунд ревью (неблокирующие N1–N5; отчёт `.scratch/code-review-2026-09-26.md` —
+слой эфемерный, в git не версионируется, существо ниже,
 блокирующих нет, все 6 пунктов приёмки подтверждены независимо числами ревьюера
 и регрессом 15 сценариев — байт-в-байт, кроме пути модуля):**
 

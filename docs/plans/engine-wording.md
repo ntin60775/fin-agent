@@ -3,7 +3,7 @@ node_type: plan
 title: Докстринги движка — называть вещи как глоссарий
 service: _platform
 status: archived
-updated: 2026-09-19
+updated: 2026-09-22
 links:
   documents: [../../finance_core/__init__.py, ../../finance_core/roll.py, ../../finance_core/settlements.py]
   relates_to: [../plans/obligations/README.md]

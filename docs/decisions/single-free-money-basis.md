@@ -3,7 +3,7 @@ node_type: decision
 title: Свободные деньги — одно число на одном базисе
 service: _platform
 status: active
-updated: 2026-09-25
+updated: 2026-09-28
 links:
   depends_on: [schedule-to-cash.md, month-by-month-convergence.md]
   relates_to: [../plans/long-debts-single-values/README.md, ../plans/long-debts-single-values/05-single-free-money-basis.md]
@@ -107,12 +107,12 @@ links:
 - Сравнение сценариев (`compare()`) читает одно и то же число в конце линии
   каждого варианта; порог резерва у вызывающего взять больше негде — только
   в самом сценарии.
-- **Снос публичных имён задевает зону-потребителя (`../finance`) —
-  ожидаемо, в зоне в этом цикле ничего не правится.** Зона вызывает
-  `optional_cap()`, `compare(..., reserve=)`, поле `Outcome.cap`,
+- **Снос публичных имён задевал зону-потребителя (`../finance`) — переписан её циклом.**
+  Зона вызывала `optional_cap()`, `compare(..., reserve=)`, поле `Outcome.cap`,
   `DealMonth.free` и `DealRoll.total_free` (`scenarios/month.py`,
-  `scenarios/september_2026.py`, `scenarios/debts_2026_09.py`,
-  `tests/test_scenarios.py`) — эти вызовы переписываются на `free` в цикле
-  зоны.
+  `scenarios/september_2026.py`, `scenarios/debts_2026_09.py`, `tests/test_scenarios.py`);
+  на 2026-09-28 вызовы переписаны: `optional_cap` в зоне не встречается вовсе,
+  `compare()` зовут без `reserve`, имя `total_free` осталось только в докстринге-эпитафии
+  тестов зоны.
 - Величины «за весь срок» не заводятся: свободные деньги — остаток, а не
   поток; «сколько денег не нашло места» — срез месяца, а не накопление.

@@ -3,7 +3,7 @@ node_type: guide
 title: Как работать с двумя зонами
 service: _platform
 status: active
-updated: 2026-09-11
+updated: 2026-09-28
 links:
   depends_on: [../decisions/zone-split.md]
 ---
@@ -92,7 +92,18 @@ flowchart LR
 5. Синтетические тесты движка: `python3 -m pytest tests/`.
 6. **Сценарные тесты потребителя — это и есть интеграционный тест движка:**
    `cd ../finance && python3 tests/test_scenarios.py`.
-7. База знаний: `python3 skill://kb-search/gitmark.py lint`.
+   На 2026-09-28 они **красные** — 21 failed, 5 passed: зона не заполнила дату начала
+   долга (`Deal.start`), и валидация движка справедливо падает с «ставка и сумма есть,
+   а начала долга нет». Красность — сигнал зоны, а не дефект движка: данные её, и цикл
+   её. Разбор — `../plans/model-audit-fixes/README.md` (Done-10) и
+   `../decisions/deal-balance-canon.md`.
+7. База знаний: `python3 skill://kb-search/gitmark.py lint` — адрес разрешает агентская
+   среда. В обычной оболочке линт гоняют копией пакета и **со `--strict`** (без него
+   код возврата нулевой и при ERR):
+
+   ```bash
+   python3 .omp/plugins/node_modules/ontoship/skills/kb-search/gitmark.py lint --strict
+   ```
 
 ## Установка движка
 
@@ -118,4 +129,6 @@ flowchart LR
 
 **Как проверить, что всё цело?**
 `python3 -m pytest tests/` в архитектурной зоне, `python3 tests/test_scenarios.py`
-в финансовой, `gitmark lint` в обеих.
+в финансовой, `gitmark lint` в обеих. В архитектурной зоне всё зелёное; в финансовой
+сценарные тесты красные, пока зона не заполнит дату начала долга (шаг 6 выше) — это
+её данные и её цикл.

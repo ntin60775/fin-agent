@@ -1,3 +1,14 @@
+---
+node_type: index
+title: finance-core — ядро расчёта личных финансов
+service: _platform
+status: active
+updated: 2026-09-28
+links:
+  documents: [finance_core, tests]
+  relates_to: [AGENTS.md, CONTEXT.md, docs/README.md]
+---
+
 # finance-core — ядро расчёта личных финансов
 
 Библиотека арифметики для личных финансов: **касса** (хватит ли денег, где дыра,
@@ -15,7 +26,7 @@
 |---|---|
 | Хватит ли денег в периоде, где дыра и когда | `run()` → `Result.hole`, `hole_date` |
 | Что не прошло из-за ёмкости кошелька и что перевести | `run()` → `Result.unsecured` |
-| Сколько я должен и сколько должны мне | `counterparty_balance()`, `deal_balance()` |
+| Каково сальдо по контрагенту и каков долг на дату | `counterparty_balance()` (одно число — сальдо), `deal_balance()` |
 | Когда закроются сделки и когда я выйду из долгов | `roll_deals()`, `roll_months()` |
 | Когда владелец выберется и что даёт сдвиг одного параметра | `forecast()`, `forecast_shifts()` |
 
@@ -33,7 +44,7 @@ python3 -m pip install -e .     # поставить как библиотеку
 ## Устройство
 
 ```
-finance_core/  движок: model + касса (solver) + взаиморасчёты (settlements) + прокат (roll) + прогноз (forecast) + старые долги (debt)
+finance_core/  движок: model + касса (solver) + взаиморасчёты (settlements) + прокат (roll) + прогноз (forecast) + действия (actions)
 tests/         синтетические тесты — без личных данных
 inbox/         заявки от зоны-потребителя (вход в работу)
 docs/          база знаний: reference, decisions, plans, ops

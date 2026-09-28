@@ -3,7 +3,7 @@ node_type: decision
 title: Кошелёк платит тем, что у него есть
 service: _platform
 status: active
-updated: 2026-09-14
+updated: 2026-09-18
 links:
   depends_on: [library-not-database.md, unknown-is-not-zero.md]
   relates_to: [../plans/obligations/README.md]

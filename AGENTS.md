@@ -1,3 +1,14 @@
+---
+node_type: guide
+title: Ядро расчёта личных финансов — точка входа
+service: _platform
+status: active
+updated: 2026-09-28
+links:
+  documents: [finance_core, tests, docs, inbox]
+  relates_to: [CONTEXT.md, docs/README.md]
+---
+
 # Ядро расчёта личных финансов — точка входа
 
 Это **архитектурная зона**: движок расчёта (`finance_core`) и всё, что нужно для
@@ -16,7 +27,7 @@
   plugins/   конфигурация плагинов; навыки, команды и остальные правила
              приходят пакетом ontoship
 finance_core/  движок: model, касса (solver), взаиморасчёты (settlements), прокат (roll),
-               прогноз (forecast), действия и цена варианта (actions), старые долги (debt)
+               прогноз (forecast), действия и цена варианта (actions)
 tests/         синтетические тесты движка — без личных данных
 inbox/         заявки из финансовой зоны (сырьё: потребность, а не решение)
 docs/          база знаний (это KB): reference, decisions, plans, ops
@@ -44,13 +55,18 @@ HTML-карта — регенерируется из md и в git не комм
 
 ```bash
 python3 -m pytest tests/                          # синтетические тесты движка
-python3 skill://kb-search/gitmark.py lint         # инварианты KB (I1–I8)
+python3 skill://kb-search/gitmark.py lint         # инварианты KB (I1–I9)
 python3 skill://kb-search/gitmark.py index        # индекс поиска
 ```
+
+`skill://` разрешает агентская среда; в обычной оболочке линт гоняют копией пакета
+(`.omp/plugins/node_modules/ontoship/skills/kb-search/gitmark.py`) с флагом `--strict` —
+без него код возврата нулевой и при ERR.
 
 ## Потребитель
 
 Финансовая зона подключает движок как библиотеку и держит свои сценарии с
 реальными цифрами. Изменение движка — это цикл разработки: замысел → контракт
 плана → тикеты → код → синтетические тесты → ревью → сценарные тесты потребителя.
-Порядок — навык `dev-flow`, правила — `.omp/rules/ship-gate.md`.
+Порядок — навык `dev-flow` и правило «Ship gate» пакета `ontoship` (в проектном
+`.omp/rules/` лежит только правило зоны, `inbox-first.md`).
