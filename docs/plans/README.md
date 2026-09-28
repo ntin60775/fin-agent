@@ -28,12 +28,11 @@ links:
 **Порядок.** Считается по блокирующим связям, а не по дате: план или тикет берётся,
 когда все его `depends_on` закрыты.
 
-- `obligations` — цепочка по зависимостям тикетов: **08 → 09 → 10**
-  (см. `obligations/README.md`, там же правило «тикет выполняется, когда все
-  блокирующие закрыты»);
-- `model-audit-fixes` — цепочка solver'а: **01 → 02 → (03, 04)**, 09 ждёт 01;
-  05–08 независимы (см. `model-audit-fixes/README.md`);
-- `penalties-and-charges` — грилл пройден (раунды 1–6 и правки по независимой
-  проверке), тикеты 01–17 ждут `/ship` (см. `penalties-and-charges/README.md`);
-- `long-debts-single-values`, `zone-split`, `engine-wording` и `engine-messages` —
-  архивные, порядок не задают.
+- `obligations` — живой цепочки нет: все 15 тикетов `archived`, план остаётся
+  `active` и ждёт архивации — решение об архивации отдельное (см.
+  `obligations/README.md`);
+- `penalties-and-charges` — грилл пройден (10 раундов, вопросы Q1–Q39 и правки
+  1–3), тикеты 01–17 в статусе `draft` ждут `/ship` (см.
+  `penalties-and-charges/README.md`);
+- `long-debts-single-values`, `zone-split`, `engine-wording`, `engine-messages`
+  и `model-audit-fixes` — архивные, порядок не задают.
