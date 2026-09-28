@@ -88,8 +88,9 @@ links:
 - `finance_core/actions.py` — досрочка и `facts()` с распределением платежа;
   новых измерений цены варианта не появляется.
 - `finance_core/__init__.py` — экспорт новых публичных имён (`Charge`, `PARTS`,
-  `deal_parts`, `allocate_payment`, `rule_at`, формы правил) правится сознательно:
-  список полон, а не «что попало».
+  `deal_parts`, `allocate_payment`, `rule_at`, формы правил, `overdue_amounts`,
+  `overdue_amount`, `accrued_penalty`, `trigger_charges`, `TriggeredCharge`)
+  правится сознательно: список полон, а не «что попало».
 - `tests/` — синтетика: равенства канона и частей, формула неустойки,
   идемпотентность, what-if, валидация и тексты ошибок.
 - `docs/` — `finance_core/README.md`, `CONTEXT.md` (термины Q24),

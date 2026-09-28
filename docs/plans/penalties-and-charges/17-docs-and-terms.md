@@ -41,7 +41,8 @@ R4-Q22 (приёмка: линт KB, синхронизация документ
 - [ ] Факт: термины в `CONTEXT.md`, докстринги кода и `finance_core/README.md`
   называют вещи одинаково; у новых терминов есть «не говорить».
 - [ ] Факт: новые публичные имена (`Charge`, `PARTS`, `deal_parts`,
-  `allocate_payment`, `rule_at`, формы правил) экспортированы в
+  `allocate_payment`, `rule_at`, формы правил, `overdue_amounts`, `overdue_amount`,
+  `accrued_penalty`, `trigger_charges`, `TriggeredCharge`) экспортированы в
   `finance_core/__init__.py` осознанно — список полон, лишнего не завезено.
 - [ ] Факт: записи решений в `docs/decisions/` заведены, связаны и ссылаются на
   раунды грилла; линт KB канонической копией чист, индекс перестроен.
