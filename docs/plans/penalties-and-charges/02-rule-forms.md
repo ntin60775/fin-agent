@@ -113,7 +113,8 @@ tuple[PenaltyStep, ...]`, `cap: PenaltyCap`, `effective: date | None = None`.
 
 ➡️ Рекомендация (принята): **`PenaltyCap(kind: str, value: Decimal | None)`** с
 константами `CAP_NONE = "без потолка"`, `CAP_SUM = "сумма"`,
-`CAP_SHARE = "доля просроченной суммы"`. Поле `cap` у `PenaltyRule`
+`CAP_SHARE = "доля просроченной суммы"` (доля исходной просроченной суммы,
+Q36). Поле `cap` у `PenaltyRule`
 обязательно, включая `CAP_NONE` (правка 1). Валидация: у `CAP_NONE` —
 `value is None`; у `CAP_SUM` и `CAP_SHARE` — `value > 0`. Различимость
 «без потолка» и «правила нет» запирается тестом (приёмка 02).
