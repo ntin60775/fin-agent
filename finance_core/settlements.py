@@ -2,8 +2,10 @@
 
 Сторона, отвечающая на вопрос «сколько я должен и сколько должны мне». Сделка
 несёт условия — сумму, ставку, правило графика — и направление; движения —
-факты: когда, сколько, куда и кому уплачено. Ни расчётный остаток по сделке, ни
-сальдо по контрагенту не хранятся: и то и другое считается из условий и движений
+факты: когда, сколько, куда и кому уплачено; начисления (`Charge`) — факты
+роста долга: решение, штраф, пошлина, издержки растут со своей даты. Ни
+расчётный остаток по сделке, ни сальдо по контрагенту не хранятся: и то и
+другое считается из условий, движений и начислений
 (`docs/decisions/derived-balances.md`). Начисление процентов — тоже производное:
 одно правило на отрезок дат (`accrued_interest`), которым считает и прокат.
 
@@ -67,6 +69,16 @@ PAID_LATE = "исполнен с опозданием"
 SKIPPED = "пропущен"
 POSTPONED = "перенесён"
 OCCURRENCE_STATUSES = (EXPECTED, PAID, PAID_LATE, SKIPPED, POSTPONED)
+
+#: Части одного долга — закрытый набор: долг раскладывается по ним, и в них
+#: приходят начисления (`Charge.part`) и платежи. Штраф, пошлина, решение суда —
+#: основания начисления со свободной меткой (`Charge.basis`), а не части: части
+#: различает механика, основания группируют.
+BODY = "тело"
+INTEREST = "проценты"
+PENALTY = "неустойка"
+COSTS = "издержки"
+PARTS = (BODY, INTEREST, PENALTY, COSTS)
 
 
 # --- сущности --------------------------------------------------------------
@@ -219,6 +231,10 @@ class Deal:
     кредитку: закрывать её досрочкой бессмысленно, лимит освобождается
     минимальным платежом и снова тратится. Признак — про конкретную сделку, а не
     про стратегию: стратегия говорит, чью ставку гасить первой.
+
+    `triggers` — правила триггеров сделки: записи, опознаваемые уидом правила.
+    По ним проверяется ссылка на правило у факта-начисления (`Charge.trigger`):
+    правило — данные зоны, движок его не выдумывает.
     """
     uid: str
     title: str
@@ -229,6 +245,7 @@ class Deal:
     rate_per_year: Decimal | None = None
     rate_per_day: Decimal | None = None
     schedule: ScheduleRule | None = None
+    triggers: tuple = ()                # правила триггеров сделки — по уиду правила
     second_priority: bool = False
     wallet: str | None = None
     channel: str | None = None
@@ -271,6 +288,34 @@ class Movement:
     benefit_for: str | None = None
     purpose: str | None = None
     occurrence: date | None = None
+
+
+@dataclass
+class Charge:
+    """Начисление — факт роста долга: решение суда, штраф, пошлина, издержки.
+
+    Долг растёт не только договорённостью и передачей: событие мира приносит
+    сумму, которой раньше не было, и ей нужен носитель. `uid` — уид события:
+    запись опознаётся им, поэтому одно событие не записывается дважды.
+    `date` — дата события: с неё начисление растёт, и не раньше — запись задним
+    числом допустима и меняет расчёт с даты события, как любое поздно
+    записанное условие. `part` — часть долга, в которую идёт сумма (`PARTS`):
+    штраф, пошлина и решение — основания начисления (`basis`, свободная метка),
+    а не новые части. `trigger` — уид правила триггера, чей случай записан этим
+    фактом: по нему факт и производное срабатывание опознаются одним случаем —
+    «уид правила, дата срабатывания»; запись без правила ссылки не несёт.
+
+    Начислено — не уплачено: долг растёт, а денег это не двигает. Деньги по
+    сделке несёт `Movement`, деньги кошелька — `Payment`; «начислено и уплачено»
+    одним фактом не записывается.
+    """
+    uid: str
+    date: date
+    amount: Decimal
+    deal: str
+    part: str
+    basis: str | None = None
+    trigger: str | None = None
 
 
 @dataclass
@@ -384,7 +429,8 @@ class Settlements:
 
     Собранную книгу сначала проверяют `validate`, а потом спрашивают производные
     величины: проверка ловит ссылки на необъявленное и расхождения, на которых
-    остаток и сальдо посчитались бы неверно. `edits` — правки вхождений из
+    остаток и сальдо посчитались бы неверно. `charges` — начисления: факты роста
+    долга от события, опознаваемые уидом события. `edits` — правки вхождений из
     журнала зоны: они меняют график, а не условия сделки. `observed` —
     наблюдения извне: фактический остаток с датой, с которым сверяется расчётный.
     """
@@ -392,6 +438,7 @@ class Settlements:
     wallets: list[Wallet] = field(default_factory=list)
     deals: list[Deal] = field(default_factory=list)
     movements: list[Movement] = field(default_factory=list)
+    charges: list[Charge] = field(default_factory=list)
     assignments: list[Assignment] = field(default_factory=list)
     edits: list[OccurrenceEdit] = field(default_factory=list)
     observed: list[ObservedBalance] = field(default_factory=list)
@@ -423,6 +470,7 @@ def validate(book: Settlements) -> None:
     _validate_wallets(book)
     _validate_deals(book)
     _validate_movements(book)
+    _validate_charges(book)
     _validate_assignments(book)
     _validate_edits(book)
     _validate_observed(book)
@@ -560,6 +608,74 @@ def _validate_movements(book: Settlements) -> None:
         _declared(m.benefit_for, counterparties, "движение: получатель выгоды")
 
 
+def _rule_uids(deal: Deal) -> set[str]:
+    """Уиды триггер-правил сделки: правило опознаётся уидом, без него — не правило.
+
+    Форму правила держит зона (её проверяет валидация правил), а здесь нужен
+    только уид: по нему факт ссылается на правило, и по нему же опознаётся
+    случай — «уид правила, дата срабатывания» (Q35). Правило без уида опознать
+    нечем, и это текст ошибки, а не падение.
+    """
+    uids: set[str] = set()
+    for rule in deal.triggers:
+        uid = getattr(rule, "uid", None)
+        if not uid:
+            raise ValueError(f"сделка {deal.uid!r}: триггер-правило без уида — "
+                             f"сверять нечем")
+        uids.add(uid)
+    return uids
+
+
+def _validate_charges(book: Settlements) -> None:
+    """Начисления: уид события, сумма, часть, сделка и случай правила триггера.
+
+    Начислено — не уплачено: запись растёт долг, а денег не двигает — денег у
+    неё нет по устройству, их несут `Movement` (по сделке) и `Payment`
+    (кошелёк). Части живут у долга «сколько я должен»: у требования и у
+    регулярного расхода растить нечего. Уид события обязателен и уникален в
+    книге — одно событие, одна запись; случай правила опознаётся тройкой
+    «сделка, уид правила, дата срабатывания»: уиды правил уникальны среди
+    правил сделки, а не среди правил книги.
+    """
+    deals = {d.uid: d for d in book.deals}
+    seen: set[str] = set()
+    cases: set[tuple[str, str, date]] = set()
+    for c in book.charges:
+        if not c.uid:
+            raise ValueError("начисление без уида события — опознать запись нечем")
+        if c.amount <= 0:
+            raise ValueError(f"начисление {c.uid!r}: сумма должна быть "
+                             f"положительной — это рост долга, а не возврат")
+        if c.part not in PARTS:
+            raise ValueError(f"начисление {c.uid!r}: часть {c.part!r} не входит "
+                             f"в набор частей: {', '.join(PARTS)}")
+        if c.deal not in deals:
+            raise ValueError(f"начисление {c.uid!r}: неизвестная сделка {c.deal!r}; "
+                             f"объявлены: {sorted(deals)}")
+        deal = deals[c.deal]
+        if deal.amount is None:
+            raise ValueError(f"начисление {c.uid!r}: у регулярного расхода "
+                             f"остатка нет — растить нечего")
+        if deal.direction == OWED_TO_ME:
+            raise ValueError(f"начисление {c.uid!r}: у требования начисления "
+                             f"не поддерживаются — части живут у долга "
+                             f"«сколько я должен»")
+        if c.uid in seen:
+            raise ValueError(f"начисление {c.uid!r}: уид события {c.uid!r} уже "
+                             f"записан — одно событие, одна запись")
+        seen.add(c.uid)
+        if c.trigger is None:
+            continue                     # событие мира: правила за ним нет
+        if c.trigger not in _rule_uids(deal):
+            raise ValueError(f"начисление {c.uid!r}: правило триггера {c.trigger!r} "
+                             f"не объявлено среди триггер-правил сделки {c.deal!r}")
+        if (c.deal, c.trigger, c.date) in cases:
+            raise ValueError(f"начисление {c.uid!r}: случай правила {c.trigger!r} "
+                             f"от {c.date} по сделке {c.deal!r} уже записан — "
+                             f"одно событие, одна запись")
+        cases.add((c.deal, c.trigger, c.date))
+
+
 def _validate_assignments(book: Settlements) -> None:
     counterparties = {c.uid for c in book.counterparties}
     deals = {d.uid: d for d in book.deals}
@@ -672,6 +788,16 @@ def _paid(deal: Deal, movements: Iterable[Movement]) -> Decimal:
     return sum((_signed(deal, m) for m in movements), Decimal(0))
 
 
+def _charged(book: Settlements, deal_uid: str, on: date) -> Decimal:
+    """Сколько начислено фактами по сделке до конца дня `on` включительно.
+
+    Начисление входит со своей даты и раньше неё канон не меняет: запись задним
+    числом пересчитывает остаток с даты события, а не с даты записи.
+    """
+    return sum((c.amount for c in book.charges
+                if c.deal == deal_uid and c.date <= on), Decimal(0))
+
+
 def deal_holder_at(book: Settlements, deal_uid: str, on: date) -> str:
     """Кому должны по сделке на дату: до передачи долга — прежний держатель."""
     deal = _deal(book, deal_uid)
@@ -706,12 +832,17 @@ def deal_balance(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
     дату окна и расчётный остаток на ту же дату — одно число.
 
     Считается, а не хранится, — чтобы его можно было сверить с фактическим
-    остатком. Начисление идёт той же функцией `accrued_interest`, что и в
-    прокате: от начала долга (`Deal.start`) до конца дня `on`, отрезок внутри
+    остатком. Начисление процентов идёт той же функцией `accrued_interest`, что
+    и в прокате: от начала долга (`Deal.start`) до конца дня `on`, отрезок внутри
     месяца — пропорционально дням, база — бегущий остаток, округление —
     `model.kopek`. Ставки нет — начисления нет, и канон сводится к «тело минус
     движения»; начала долга ещё нет (дата позже `on`) — начисленного тоже нет.
     У регулярного расхода остатка нет — `None`.
+
+    Начисление-факт (`Charge`) входит слагаемым со своей даты: долг растёт от
+    случившегося, а не только от договорённости, и раньше своей даты канон не
+    меняет. Базы процентов это не касается: `accrued_interest` считает от тела
+    и платежей по сделке, а части долга — предмет раскладки.
     """
     amount = deal_amount_at(book, deal_uid, on)
     if amount is None:
@@ -720,7 +851,8 @@ def deal_balance(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
     movements = [m for m in book.movements
                  if m.deal == deal_uid and m.date <= on]
     return kopek(amount - _paid(deal, movements)
-                 + _accrued(book, deal, movements, on))
+                 + _accrued(book, deal, movements, on)
+                 + _charged(book, deal_uid, on))
 
 
 def _accrued(book: Settlements, deal: Deal, movements: Sequence[Movement],

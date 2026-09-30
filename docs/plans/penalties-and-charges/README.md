@@ -3,7 +3,7 @@ node_type: plan
 title: Пени, штрафы и начисления от события — долг должен уметь расти
 service: _platform
 status: active
-updated: 2026-09-28
+updated: 2026-09-30
 links:
   documents: [../../../finance_core/settlements.py, ../../../finance_core/roll.py, ../../../finance_core/actions.py, ../../../finance_core/forecast.py, ../../../finance_core/README.md]
   depends_on: [../../decisions/deal-balance-canon.md, ../../decisions/derived-balances.md, ../../decisions/unknown-is-not-zero.md, ../../decisions/schedule-to-cash.md, ../../decisions/month-by-month-convergence.md]
@@ -221,7 +221,7 @@ links:
 
 | # | Тикет | Единица | Blocked by | Статус |
 |---|---|---|---|---|
-| 01 | [Начисление от события — запись-факт](01-charge-fact.md) | долг растёт от события: запись с датой, суммой, частью и основанием | — | draft |
+| 01 | [Начисление от события — запись-факт](01-charge-fact.md) | долг растёт от события: запись с датой, суммой, частью и основанием | — | archived |
 | 02 | [Формы правил зоны, их версии и валидация](02-rule-forms.md) | зона задаёт правила, движок их проверяет и датирует | 01 | draft |
 | 03 | [Распределение платежа по частям](03-payment-allocation.md) | «куда ушёл платёж»: разбивка-факт либо правило зоны | 01, 02 | draft |
 | 04 | [Остатки частей — канон остаётся одним числом](04-parts-balances.md) | «долг на дату по частям»: канон = сумма частей | 01, 03 | draft |
