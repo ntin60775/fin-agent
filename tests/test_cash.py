@@ -7,9 +7,13 @@ from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER, Account,
-                          Income, Payment, Scenario, Transfer, TransferHint,
-                          compare, cover_cost, roll_cash, run)
+from finance_core import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER, IN, LEGAL,
+                          Account, Charge, Counterparty, Deal, ForecastInput,
+                          Income, Movement, Payment, Prepay, ScheduleRule,
+                          Scenario, Settlements, Transfer, TransferHint,
+                          Variant, Wallet,
+                          applied, baseline, compare, cover_cost,
+                          deal_balance, facts, roll_cash, roll_months, run)
 
 
 # --- каскад ---------------------------------------------------------------
@@ -740,3 +744,109 @@ def test_compare_returns_outcomes_in_requested_order():
     rows = compare({"без траты": base, "с тратой": with_extra}, main="main")
     assert [r.label for r in rows] == ["без траты", "с тратой"]
     assert [r.end_balance for r in rows] == [D("1000"), D("900")]
+
+
+# --- начислено не есть уплачено (11) ---------------------------------------
+
+def _wallet_like() -> Wallet:
+    return Wallet("карта", "Карта", "карта", D("20000"))
+
+
+def _book(*deals, charges=(), movements=()) -> Settlements:
+    return Settlements(
+        counterparties=[Counterparty(uid="банк", name="Банк", kind=LEGAL,
+                                     subtype="банк", groups=("долги",))],
+        wallets=[_wallet_like()],
+        deals=list(deals), charges=list(charges), movements=list(movements))
+
+
+def _debted_deal(amount: D = D("10000")) -> Deal:
+    return Deal(uid="заём", title="Заём", counterparty="банк", amount=amount,
+                start=date(2026, 1, 1), rate_per_year=D("0"), wallet="карта",
+                schedule=ScheduleRule(days=(20,), payment=D("1000"), count=12,
+                                      start=date(2026, 1, 1),
+                                      shift_weekend=False))
+
+
+def test_a_charge_moves_no_cash():
+    """Начисление — рост долга без денег: касса его не видит (11-Т4.1).
+
+    Две книги — с начислением и без: месяцы кассы совпадают (платежей от
+    начисления не появляется, кошельки одинаковы), обязательные платятся те же,
+    а расчётный остаток вырос ровно на начисление.
+    """
+    charge = Charge("решение", date(2026, 1, 15), D("1500"), "заём", "неустойка",
+                    basis="решение")
+    plain_book = _book(_debted_deal())
+    charged_book = _book(_debted_deal(), charges=[charge])
+    plain = roll_months(plain_book, date(2026, 1, 1),
+                        [_wallet_like()], [], [], D("0"), max_months=2)
+    charged = roll_months(charged_book, date(2026, 1, 1),
+                          [_wallet_like()], [], [], D("0"), max_months=2)
+    assert [(m.balances, m.hole, m.free) for m in charged.cash_months] == [
+        (m.balances, m.hole, m.free) for m in plain.cash_months]
+    assert [month.paid for month in charged.deal_roll.months] == [
+        month.paid for month in plain.deal_roll.months]
+    # Книга не мутируется прокатом: канон — тело плюс начисление,
+    # платежей в книге нет (расписание — проекция, а не факт книги).
+    assert deal_balance(charged_book, "заём", date(2026, 1, 31)) == D("11500")
+    assert deal_balance(plain_book, "заём", date(2026, 1, 31)) == D("10000")
+
+
+def test_a_wallet_payment_is_one_edit_with_two_carriers():
+    """Платёж кошельком — пара «движение + платёж» одной суммы и даты (11-Т2).
+
+    Одна правка, два носителя: долговая сторона читает движение, кассовая —
+    платёж. `facts()` отдаёт движение (без «полупары» платежа), `applied()` —
+    платёж в разовых событиях кассы.
+    """
+    inp = ForecastInput(book=_book(_debted_deal()),
+                        start=date(2026, 1, 1),
+                        wallets=[_wallet_like()],
+                        living_floor=D("0"), max_months=3)
+    base = baseline(inp)
+    variant = Variant("досрочка", (Prepay(deal="заём", date=date(2026, 1, 15),
+                                          amount=D("2000")),))
+    moved = applied(base, variant)
+    [movement] = [m for m in moved.book.movements]
+    [payment] = moved.one_offs
+    assert (movement.date, movement.amount) == (payment.date, payment.amount) == (
+        date(2026, 1, 15), D("2000"))
+    rows = facts(base, variant)
+    assert len(rows) == 1 and rows[0].amount == D("2000")
+    assert all(not isinstance(row, Payment) for row in rows)
+
+
+def test_a_return_through_a_wallet_is_income_plus_a_movement():
+    """Возврат через кошелёк — пара «приход + движение против сделки» (11-Т3).
+
+    Деньги пришли обратно: книга видит возврат движением против сделки (остаток
+    вырос), касса — приход тем же числом и в тот же день; возврат без кошелька
+    (взаимозачёт) — только движение: касса его не видит вовсе.
+    """
+    refund = Movement(date(2026, 1, 15), D("3000"), "заём", direction=IN)
+    income = Income(date(2026, 1, 15), D("3000"), "карта")
+    assert (income.date, income.amount) == (refund.date, refund.amount)
+    book = _book(_debted_deal(), movements=[refund])
+    plain = _book(_debted_deal())
+    wallets = [_wallet_like()]
+    through = roll_months(book, date(2026, 1, 1), wallets, [income],
+                          [], D("0"), max_months=2)
+    # Взаимозачёт: то же движение, кассовой стороны нет.
+    off_the_books = roll_months(book, date(2026, 1, 1), wallets, [], [],
+                                D("0"), max_months=2)
+    untouched = roll_months(plain, date(2026, 1, 1), [_wallet_like()], [], [],
+                            D("0"), max_months=2)
+    # Касса видит приход: свободные деньги января выше ровно на 3000
+    # (конечные остатки выравнивают досрочки — бюджет месяца вырос).
+    assert (through.cash_months[0].free
+            - off_the_books.cash_months[0].free) == D("3000")
+    # Взаимозачёт кассы как события не имеет: касса та же, как у долга,
+    # просто большего на сумму возврата, — движение денег не принесло.
+    same_debt = roll_months(_book(_debted_deal(D("13000"))), date(2026, 1, 1),
+                            [_wallet_like()], [], [], D("0"), max_months=2)
+    assert [(m.balances, m.hole, m.free) for m in off_the_books.cash_months] == [
+        (m.balances, m.hole, m.free) for m in same_debt.cash_months]
+    # Книга видит возврат движением против сделки: остаток вырос на 3000.
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == D("13000")
+    assert deal_balance(plain, "заём", date(2026, 1, 31)) == D("10000")
