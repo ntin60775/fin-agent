@@ -359,6 +359,18 @@ class Deal:
 
 
 @dataclass
+class PartPayment:
+    """Строка разбивки платежа: сколько из движения ушло в часть долга.
+
+    Факт кредитора («куда ушёл платёж»): живёт в `Movement.allocation`; пустая
+    разбивка — платёж распределяет правило зоны производно. Разбивка и правило
+    не суммируются: записанный факт вытесняет производное.
+    """
+    part: str
+    amount: Decimal
+
+
+@dataclass
 class Movement:
     """Факт по сделке: когда, сколько, куда и кому уплачено.
 
@@ -373,8 +385,18 @@ class Movement:
     `occurrence` — какое вхождение движение закрывает, по его плановой дате:
     плановая не меняется, поэтому и годится в опознание. Вхождение считается
     исполненным по такому движению — фактическая дата вхождения и есть его дата.
-    Движение без ссылки вхождение не закрывает: это досрочка или платёж вне
-    графика — деньги ушли, а ряд платежей идёт своим чередом.
+
+    Движение без ссылки гасит просрочку: самые старые исполняемые вхождения,
+    чей срок уже прошёл (вхождение в день срока ещё не просрочено), в пределах
+    суммы — по возрастанию срока, частичное гашение оставляет остаток. Наступившие
+    и будущие вхождения оно не закрывает: досрочка и платёж вне графика не
+    отменяют ряд платежей. Возврат вхождения не закрывает — это не уплата.
+    Остаток движения сверх просрочек — платёж по сделке, он идёт в части.
+
+    `allocation` — разбивка платежа по частям (`PartPayment`), факт кредитора.
+    Пустой кортеж — разбивки нет: платёж распределяет правило зоны
+    (`Deal.allocations`) производно. Разбивка вытесняет правило — они не
+    суммируются; сумма строк равна сумме движения (валидация).
     """
     date: date
     amount: Decimal
@@ -386,6 +408,7 @@ class Movement:
     benefit_for: str | None = None
     purpose: str | None = None
     occurrence: date | None = None
+    allocation: tuple[PartPayment, ...] = ()
 
 
 @dataclass
@@ -806,11 +829,37 @@ def _validate_movements(book: Settlements) -> None:
         if m.amount <= 0:
             raise ValueError(f"движение по сделке {m.deal!r}: сумма должна быть "
                              f"положительной, а направление — у движения")
+        _validate_allocation_lines(m)
         _declared(m.deal, deals, "движение: сделка")
         _declared(m.wallet, wallets, "движение: финансирующий кошелёк")
         _declared(m.paid_to, counterparties, "движение: кому уплачено")
         _declared(m.channel, counterparties, "движение: канал платежа")
         _declared(m.benefit_for, counterparties, "движение: получатель выгоды")
+
+
+def _validate_allocation_lines(m: Movement) -> None:
+    """Разбивка платежа: положительные строки, объявленные части, сумма сходится.
+
+    Тихой нормализации нет — ни обрезки, ни доводки, ни подстановки части:
+    правятся данные зоны, а не движок, и текст называет причину.
+    """
+    seen: set[str] = set()
+    total = Decimal(0)
+    for line in m.allocation:
+        if line.amount <= 0:
+            raise ValueError(f"разбивка платежа: строка части {line.part!r} — "
+                             f"сумма должна быть положительной")
+        if line.part not in PARTS:
+            raise ValueError(f"разбивка платежа: часть {line.part!r} не входит "
+                             f"в набор частей: {', '.join(PARTS)}")
+        if line.part in seen:
+            raise ValueError(f"разбивка платежа: часть {line.part!r} встречается "
+                             f"дважды")
+        seen.add(line.part)
+        total += line.amount
+    if seen and total != m.amount:
+        raise ValueError(f"разбивка платежа сделки {m.deal!r} от {m.date}: сумма "
+                         f"разбивки {total} не равна сумме движения {m.amount}")
 
 
 def _rule_uids(deal: Deal) -> set[str]:
@@ -968,6 +1017,32 @@ def _validate_observed(book: Settlements) -> None:
 
 # --- производные величины --------------------------------------------------
 
+def allocate_payment(amount: Decimal, order: Sequence[str],
+                     balances: dict[str, Decimal]) -> dict[str, Decimal]:
+    """Куда идёт платёж: сколько в каждую часть.
+
+    Части гасятся по `order` в пределах их остатков (`balances` — остатки частей,
+    их передаёт вызывающий); части в минус не уходят — остаток части потолок
+    доли. Избыток сверх всех частей несёт тело — переплата по сделке: тело может
+    уйти в минус. Сумма долей равна `amount` — раскладка не теряет и не выдумывает
+    деньги. Очерёдность — про гашение: пополнение (возврат) ей не описывается.
+    """
+    shares = {part: Decimal(0) for part in order}
+    left = amount
+    for part in order:
+        if left <= 0:
+            break
+        room = balances.get(part, Decimal(0))
+        if room < 0:
+            room = Decimal(0)
+        take = min(left, room)
+        shares[part] += take
+        left -= take
+    if left > 0:
+        shares[BODY] = shares.get(BODY, Decimal(0)) + left
+    return shares
+
+
 def rule_at(rules: Sequence, on: date):
     """Действующая версия правила на дату — последняя с датой действия ≤ `on`.
 
@@ -1000,11 +1075,15 @@ def _assignments(book: Settlements, deal_uid: str) -> list[Assignment]:
                   key=lambda a: a.date)
 
 
+def _along(deal: Deal, movement: Movement) -> bool:
+    """Движение по сделке (в зачёт остатка), а не против неё (возврат)."""
+    return ((deal.direction == I_OWE and movement.direction == OUT)
+            or (deal.direction == OWED_TO_ME and movement.direction == IN))
+
+
 def _signed(deal: Deal, movement: Movement) -> Decimal:
     """Движение со знаком для остатка: по сделке — плюс, против неё — минус."""
-    along = ((deal.direction == I_OWE and movement.direction == OUT)
-             or (deal.direction == OWED_TO_ME and movement.direction == IN))
-    return movement.amount if along else -movement.amount
+    return movement.amount if _along(deal, movement) else -movement.amount
 
 
 def _paid(deal: Deal, movements: Iterable[Movement]) -> Decimal:
@@ -1344,9 +1423,46 @@ def _linked(deal: Deal, planned: date,
     return when, total
 
 
+def _loose_closings(book: Settlements, deal: Deal,
+                    found: list[Occurrence]) -> dict[date, tuple[Decimal, date]]:
+    """Гашение просрочек несвязанными движениями: FIFO по сроку.
+
+    Расход по сделке (без ссылки на вхождение) гасит самые старые исполняемые
+    вхождения, чей срок уже прошёл: `due` раньше даты движения — вхождение в день
+    срока ещё не просрочено (опоздание — это факт после срока). Пропущенные и
+    отложенные без даты не гасятся — платить туда некому и некуда; наступившие и
+    будущие — тем более. Сумма закрытий в пределах движения: излишек сверх
+    просрочек — платёж, а не закрытие графика. Возврат вхождения не закрывает.
+    """
+    loose = [m for m in book.movements
+             if m.deal == deal.uid and m.occurrence is None and _along(deal, m)]
+    if not loose:
+        return {}
+    paid: dict[date, Decimal] = {}
+    when: dict[date, date] = {}
+    for m in sorted(loose, key=lambda m: m.date):
+        left = m.amount
+        for occ in sorted(found, key=lambda o: o.due or o.planned):
+            if left <= 0:
+                break
+            if (occ.due is None or occ.due >= m.date or occ.amount is None
+                    or occ.status == SKIPPED):
+                continue
+            done = paid.get(occ.planned, Decimal(0))
+            remaining = occ.amount - occ.paid - done
+            if remaining <= 0:
+                continue
+            take = min(left, remaining)
+            paid[occ.planned] = done + take
+            when[occ.planned] = m.date
+            left -= take
+    return {planned: (done, when[planned]) for planned, done in paid.items()}
+
+
 def _occurrence(book: Settlements, deal: Deal, planned: date,
                 amount: Decimal | None,
-                edits: dict[tuple[str, date], OccurrenceEdit]) -> Occurrence:
+                edits: dict[tuple[str, date], OccurrenceEdit],
+                extra: tuple[Decimal, date] | None = None) -> Occurrence:
     """Вхождение на плановую дату: правило, правки, факты — и статус."""
     edit = edits.get((deal.uid, planned))
     moved: date | None = None
@@ -1358,6 +1474,11 @@ def _occurrence(book: Settlements, deal: Deal, planned: date,
             amount = edit.amount
 
     actual, paid = _linked(deal, planned, book.movements)
+    if extra is not None:
+        extra_paid, extra_when = extra
+        paid += extra_paid
+        if extra_when is not None and (actual is None or extra_when > actual):
+            actual = extra_when                   # закрыл не связанный, а FIFO
     postponed = edit is not None and edit.postponed
     due = moved if moved is not None else planned
     if skipped:
@@ -1381,14 +1502,16 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
     он раскладывает вхождения по месяцам, когда платить.
 
     Вхождения считаются, а не лежат: движок их не хранит, а получает правило,
-    правки и движения — и возвращает список.
+    правки и движения — и возвращает список. Связанные движения (`occurrence`)
+    закрывают своё вхождение; несвязанный расход гасит самые старые просроченные
+    — FIFO по сроку (`_loose_closings`), наступившие и будущие не трогает.
     """
     deal = _deal(book, deal_uid)
     rule = deal.schedule
     if rule is None:
         return []
     edits = _merged_edits(book)
-    found: list[Occurrence] = []
+    entries: list[tuple[date, Decimal | None]] = []
     # Доход сдвигается назад, платёж вперёд: выходной переезжает по стороне денег.
     backward = deal.direction == OWED_TO_ME
 
@@ -1397,7 +1520,7 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
         when = planned_date(first.year, first.month, first.day, rule.shift_weekend,
                             backward=backward)
         if since <= when <= until:
-            found.append(_occurrence(book, deal, when, rule.first.amount, edits))
+            entries.append((when, rule.first.amount))
 
     if rule.days:
         # Месяц до и после окна: сдвиг с выходного уводит дату за его край.
@@ -1420,11 +1543,18 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
                              * len(days) + position + 1)
                     if index > rule.count:
                         continue
-                found.append(_occurrence(book, deal, when, rule.payment, edits))
+                entries.append((when, rule.payment))
 
-    found.sort(key=lambda o: o.planned)
-    for left, right in zip(found, found[1:]):
-        if left.planned == right.planned:
-            raise ValueError(f"сделка {deal_uid!r}: два вхождения на {left.planned} — "
+    entries.sort(key=lambda entry: entry[0])
+    for left, right in zip(entries, entries[1:]):
+        if left[0] == right[0]:
+            raise ValueError(f"сделка {deal_uid!r}: два вхождения на {left[0]} — "
                              f"правьте правило графика")
+    found = [_occurrence(book, deal, planned, amount, edits)
+             for planned, amount in entries]
+    closings = _loose_closings(book, deal, found)
+    if closings:
+        found = [_occurrence(book, deal, planned, amount, edits,
+                             closings.get(planned))
+                 for planned, amount in entries]
     return found

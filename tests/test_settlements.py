@@ -5,16 +5,19 @@ from datetime import date
 from decimal import Decimal as D
 import pytest
 
-from finance_core import (BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM, CREDITOR,
-                          DEBTOR, IN, LEGAL, OWED_TO_ME, PARTS, PENALTY, PERSON,
-                          STARTER_GROUPS, TRIGGERS, TRIGGER_OVERDUE,
-                          TRIGGER_OVERDUE_DAYS, TRIGGER_OVERDUE_SUM, Account,
-                          AllocationRule, Assignment, Charge, Counterparty, Deal,
-                          Movement, Payment, PenaltyCap, PenaltyRule, PenaltyStep,
-                          Scenario, ScheduleRule, Settlements, TriggerRule, Wallet,
-                          accrued_interest, beneficiary, counterparty_balance,
+from finance_core import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
+                          COSTS, CREDITOR, DEBTOR, EXPECTED, IN, INTEREST, LEGAL,
+                          OWED_TO_ME, PAID, PAID_LATE, PARTS, PENALTY, PERSON, SKIPPED,
+                          STARTER_GROUPS,
+                          TRIGGERS, TRIGGER_OVERDUE, TRIGGER_OVERDUE_DAYS,
+                          TRIGGER_OVERDUE_SUM, Account, AllocationRule,
+                          Assignment, Charge, Counterparty, Deal, Movement,
+                          OccurrenceEdit, PartPayment, Payment, PenaltyCap,
+                          PenaltyRule, PenaltyStep, Scenario, ScheduleRule,
+                          Settlements, TriggerRule, Wallet, accrued_interest,
+                          allocate_payment, beneficiary, counterparty_balance,
                           counterparty_role, deal_amount_at, deal_balance,
-                          deal_holder_at, funding_wallet, liquidity,
+                          deal_holder_at, funding_wallet, liquidity, occurrences,
                           payment_channel, roll_deals, rule_at, run, validate)
 
 START = date(2026, 1, 1)
@@ -1119,3 +1122,157 @@ def test_trigger_thresholds_are_declared_forms():
     """Набор условий — закрытый, и все четыре условия проходят форму."""
     assert len(TRIGGERS) == 4
     assert TRIGGER_OVERDUE in TRIGGERS and TRIGGER_OVERDUE_SUM in TRIGGERS
+
+
+# --- распределение платежа по частям (03) ------------------------------------
+
+def _order(*parts: str) -> tuple[str, ...]:
+    return parts or PARTS
+
+
+def test_allocate_payment_follows_the_zone_order():
+    """Части гасятся по порядку зоны, в пределах их остатков."""
+    shares = allocate_payment(D("700"), ("неустойка", "проценты", "тело", "издержки"),
+                              {BODY: D("10000"), INTEREST: D("500"),
+                               PENALTY: D("300"), COSTS: D("50")})
+    assert shares == {PENALTY: D("300"), INTEREST: D("400"),
+                      BODY: D("0"), COSTS: D("0")}
+
+
+def test_allocate_payment_never_drives_parts_but_body_below_zero():
+    """Части, кроме тела, в минус не уходят: остаток части — потолок доли."""
+    shares = allocate_payment(D("100"), _order(),
+                              {BODY: D("0"), INTEREST: D("0"),
+                               PENALTY: D("0"), COSTS: D("0")})
+    assert shares == {BODY: D("100"), INTEREST: D("0"),
+                      PENALTY: D("0"), COSTS: D("0")}     # избыток несёт тело
+    overpaid = allocate_payment(D("100"), _order(),
+                                {BODY: D("-50"), INTEREST: D("0"),
+                                 PENALTY: D("0"), COSTS: D("0")})
+    assert overpaid[BODY] == D("100")            # минус телу места не даёт
+    assert sum(overpaid.values()) == D("100")
+
+
+def test_payment_bigger_than_all_parts_goes_to_the_body():
+    """Платёж больше суммы частей гасит их все, избыток уходит в тело (R6-Q33)."""
+    shares = allocate_payment(D("11200"), _order(),
+                              {BODY: D("10000"), INTEREST: D("500"),
+                               PENALTY: D("300"), COSTS: D("0")})
+    assert shares == {BODY: D("10400"), INTEREST: D("500"),
+                      PENALTY: D("300"), COSTS: D("0")}
+    assert sum(shares.values()) == D("11200")    # раскладка не теряет деньги
+
+
+def test_allocation_lines_are_validated_with_a_reason():
+    """Разбивка: часть объявлена, строка положительна, без повторов, сумма сходится."""
+    def movement(**kw) -> Movement:
+        base = dict(date=date(2026, 3, 5), amount=D("1000"), deal="заём")
+        base.update(kw)
+        return Movement(**base)
+
+    book = Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                       movements=[movement(allocation=(PartPayment(BODY, D("1000")),))])
+    validate(book)
+    with pytest.raises(ValueError, match="сумма разбивки 900 не равна сумме "
+                                        "движения 1000"):
+        validate(Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                             movements=[movement(allocation=(
+                                 PartPayment(BODY, D("900")),))]))
+    with pytest.raises(ValueError, match="часть 'пени' не входит в набор частей"):
+        validate(Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                             movements=[movement(allocation=(
+                                 PartPayment("пени", D("1000")),))]))
+    with pytest.raises(ValueError, match="сумма должна быть положительной"):
+        validate(Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                             movements=[movement(allocation=(
+                                 PartPayment(BODY, D("0")),))]))
+    with pytest.raises(ValueError, match="часть 'тело' встречается дважды"):
+        validate(Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                             movements=[movement(allocation=(
+                                 PartPayment(BODY, D("500")),
+                                 PartPayment(BODY, D("500")),))]))
+
+
+def _rule(**kw) -> ScheduleRule:
+    base = dict(days=(20,), payment=D("1000"), shift_weekend=False,
+                start=date(2026, 1, 1))
+    base.update(kw)
+    return ScheduleRule(**base)
+
+
+def _scheduled_book(movements: list[Movement], **deal) -> Settlements:
+    return Settlements(counterparties=[_counterparty()],
+                       deals=[_deal(amount=D("10000"), schedule=_rule(), **deal)],
+                       movements=movements)
+
+
+def test_a_loose_payment_settles_the_oldest_overdue_first():
+    """Несвязанный расход гасит самые старые просрочки FIFO, в пределах суммы."""
+    book = _scheduled_book([Movement(date(2026, 2, 25), D("1500"), "заём")])
+    validate(book)
+    jan, feb, mar = occurrences(book, "заём", START, date(2026, 3, 31))
+    assert jan.status == PAID_LATE and jan.paid == D("1000")  # самая старая — вся
+    assert feb.status == EXPECTED and feb.paid == D("500")    # вторая — остатком
+    assert mar.status == EXPECTED and mar.paid == D("0")      # будущее не тронуто
+    assert feb.remaining == D("500")
+
+
+def test_a_loose_payment_on_the_due_day_settles_nothing():
+    """В день срока вхождение ещё не просрочено — несвязанный расход его не гасит."""
+    book = _scheduled_book([Movement(date(2026, 1, 20), D("1000"), "заём")])
+    validate(book)
+    jan, feb = occurrences(book, "заём", START, date(2026, 2, 28))
+    assert jan.status == EXPECTED and jan.paid == D("0")
+    assert feb.status == EXPECTED
+
+
+def test_a_loose_payment_beyond_overdue_settles_no_future():
+    """Излишек сверх просрочек — платёж, а не закрытие: будущие вхождения целы."""
+    book = _scheduled_book([Movement(date(2026, 2, 25), D("5000"), "заём")])
+    validate(book)
+    jan, feb, mar = occurrences(book, "заём", START, date(2026, 3, 31))
+    assert (jan.paid, feb.paid, mar.paid) == (D("1000"), D("1000"), D("0"))
+    assert jan.status == PAID_LATE and feb.status == PAID_LATE
+    assert mar.status == EXPECTED
+
+
+def test_skipped_and_postponed_overdue_are_settled_by_their_own_rules():
+    """Пропущенное не гасится — платить не будут; перенесённое гасится по новому сроку."""
+    skipped = Settlements(
+        counterparties=[_counterparty()], deals=[_deal(amount=D("10000"),
+                                                       schedule=_rule())],
+        edits=[OccurrenceEdit("заём", date(2026, 1, 20), skipped=True)],
+        movements=[Movement(date(2026, 1, 25), D("1000"), "заём")])
+    validate(skipped)
+    jan, feb = occurrences(skipped, "заём", START, date(2026, 2, 28))
+    assert jan.status == SKIPPED and jan.paid == D("0")
+    assert feb.paid == D("0")                    # 25.01 гасить больше нечего
+
+    moved = Settlements(
+        counterparties=[_counterparty()], deals=[_deal(amount=D("10000"),
+                                                       schedule=_rule())],
+        edits=[OccurrenceEdit("заём", date(2026, 1, 20), postponed=True,
+                              moved_to=date(2026, 1, 24))],
+        movements=[Movement(date(2026, 1, 25), D("1000"), "заём")])
+    validate(moved)
+    jan = occurrences(moved, "заём", START, date(2026, 1, 31))[0]
+    assert jan.due == date(2026, 1, 24) and jan.status == PAID_LATE
+
+
+def test_a_return_never_settles_an_occurrence():
+    """Возврат — не уплата: вхождения он не закрывает."""
+    book = _scheduled_book([Movement(date(2026, 2, 25), D("1000"), "заём",
+                                     direction=IN)])
+    validate(book)
+    jan, feb = occurrences(book, "заём", START, date(2026, 2, 28))
+    assert jan.paid == D("0") and feb.paid == D("0")
+
+
+def test_partial_overdue_settlement_accumulates_across_movements():
+    """Два движения по одной просрочке добивают её вместе: остаток сходится."""
+    book = _scheduled_book([Movement(date(2026, 1, 25), D("400"), "заём"),
+                            Movement(date(2026, 1, 26), D("600"), "заём")])
+    validate(book)
+    jan = occurrences(book, "заём", START, date(2026, 1, 31))[0]
+    assert jan.paid == D("1000") and jan.status == PAID_LATE
+    assert jan.actual == date(2026, 1, 26)       # закрыл последний
