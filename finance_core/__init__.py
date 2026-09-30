@@ -21,8 +21,8 @@ from .actions import (Action, Base, Bridge, Direct, ImpossibleAction, Move,
                       Prepay, Price, Variant, applied, baseline, facts,
                       impossible, price, prices, variants)
 from .forecast import (Deficit, Discrepancy, FamilyTransfer, Forecast,
-                       ForecastInput, Milestone, Shift, forecast,
-                       forecast_shifts, widest)
+                       ForecastInput, Milestone, Shift, ALLOCATION_NOT_SET,
+                       SCALE_NOT_SET, forecast, forecast_shifts, widest)
 from .model import Account, Income, Payment, Scenario, Transfer
 from .roll import (AVALANCHE, PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, SNOWBALL,
                    STRATEGIES, WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
@@ -82,6 +82,7 @@ __all__ = [
     # прогноз
     "forecast", "forecast_shifts", "widest", "Forecast", "ForecastInput",
     "Milestone", "Deficit", "FamilyTransfer", "Discrepancy", "Shift",
+    "SCALE_NOT_SET", "ALLOCATION_NOT_SET",
     # действия и цена варианта
     "Move", "Bridge", "Prepay", "Direct", "Action", "Variant", "Base", "Price",
     "ImpossibleAction", "baseline", "impossible", "applied", "price", "prices",
