@@ -1126,30 +1126,134 @@ def deal_amount_at(book: Settlements, deal_uid: str, on: date) -> Decimal | None
     return assignments[0].amount if assignments else deal.amount
 
 
+def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] | None:
+    """Раскладка канона по частям на дату — или `None`, если раскладка не известна.
+
+    Тело — версии тела плюс начисления в тело минус платежи в тело; проценты —
+    начисленное минус платежи в проценты; неустойка и издержки — свои начисления
+    минус свои платежи. Раскладка известна, когда у сделки есть правило
+    распределения или у платежей есть явные разбивки; иначе — `None`: пробел,
+    а не выдумка (Q12, Q34). Платёж без разбивки и без правила на свою дату
+    раскладку делает неопределённой целиком: половинок не бывает.
+
+    Платежи распределяются хронологически по остаткам частей на день платежа
+    (`allocate_payment`, правило версии на дату платежа); возврат части не гасит,
+    а наполняет — по разбивке, без неё в тело (03-Т5). База процентов — тело
+    плюс проценты (правка 2): платежи входят в неё своей долей в тело/проценты,
+    начисления в тело — тем же списком приростов, что и дельты передачи
+    (04-Т3). Начисление считает та же `accrued_interest`, окно от начала долга.
+    """
+    deal = _deal(book, deal_uid)
+    if deal.amount is None or deal.direction == OWED_TO_ME:
+        return None                # части живут у долга «сколько я должен» (Q23)
+    movements = sorted((m for m in book.movements
+                        if m.deal == deal_uid and m.date <= on),
+                       key=lambda m: m.date)
+    if not deal.allocations and not any(m.allocation for m in movements):
+        return None                # раскладка не определена — пробел (Q34)
+    since = deal.start
+    charged = {part: Decimal(0) for part in PARTS}
+    paid = {part: Decimal(0) for part in PARTS}
+    into_base: list[tuple[date, Decimal]] = []   # доли платежей в тело+проценты
+    grows = [(a.date, a.delta) for a in book.assignments if a.deal == deal_uid]
+    body_before = Decimal(0)       # начисления в тело до начала долга — в базе
+
+    def interest(until: date) -> Decimal:
+        """Начисленное к дате: одна функция, база — тело плюс проценты."""
+        if since is None or until < since:
+            return Decimal(0)      # начисляться нечему: долга ещё нет
+        base = (deal_amount_at(book, deal_uid, since)
+                - sum((share for when, share in into_base if when < since),
+                      Decimal(0))
+                + body_before)
+        return accrued_interest(deal, base, since, until, into_base, grows)
+
+    for event in sorted([*movements,
+                         *(c for c in book.charges if c.deal == deal_uid
+                           and c.date <= on)], key=lambda e: e.date):
+        if isinstance(event, Charge):
+            charged[event.part] += event.amount
+            if event.part == BODY:
+                if since is not None and event.date < since:
+                    body_before += event.amount
+                else:
+                    grows.append((event.date, event.amount))
+            continue
+        movement = event
+        sign = Decimal(1) if _along(deal, movement) else Decimal(-1)
+        if movement.allocation:
+            shares = {line.part: line.amount for line in movement.allocation}
+        elif movement.direction == IN:
+            shares = {BODY: movement.amount}    # возврат без разбивки — в тело
+        else:
+            rule = rule_at(deal.allocations, movement.date)
+            if rule is None:
+                return None        # платёж без правила — раскладки нет (04-Т5)
+            day_before = movement.date - timedelta(days=1)
+            balances = {
+                BODY: max(deal_amount_at(book, deal_uid, movement.date)
+                          + charged[BODY] - paid[BODY], Decimal(0)),
+                INTEREST: max(interest(day_before) - paid[INTEREST], Decimal(0)),
+                PENALTY: max(charged[PENALTY] - paid[PENALTY], Decimal(0)),
+                COSTS: max(charged[COSTS] - paid[COSTS], Decimal(0)),
+            }
+            shares = allocate_payment(movement.amount, rule.order, balances)
+        for part in PARTS:
+            paid[part] += sign * shares.get(part, Decimal(0))
+        into_base.append((movement.date,
+                          sign * (shares.get(BODY, Decimal(0))
+                                  + shares.get(INTEREST, Decimal(0)))))
+
+    return {BODY: deal_amount_at(book, deal_uid, on) + charged[BODY] - paid[BODY],
+            INTEREST: interest(on) - paid[INTEREST],
+            PENALTY: charged[PENALTY] - paid[PENALTY],
+            COSTS: charged[COSTS] - paid[COSTS]}
+
+
+def deal_parts(book: Settlements, deal_uid: str,
+               on: date) -> dict[str, Decimal] | None:
+    """Долг на дату по частям: тело, проценты, неустойка, издержки.
+
+    Все четыре ключа всегда, включая нули: кредитор показывает четыре строки, и
+    отчёт тем же. Раскладка не известна (нет правила и разбивок) или у сделки
+    нет остатка — `None`: пробел, а не ноль; канон при этом отвечает всегда
+    (`deal_balance`). Инвариант «канон = сумма частей» держится, когда
+    раскладка известна, — по построению, одним путём расчёта.
+    """
+    return _parts_at(book, deal_uid, on)
+
+
 def deal_balance(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
-    """Долг на дату — канон остатка: тело минус движения плюс начисленное.
+    """Долг на дату — канон остатка: сумма частей, а без раскладки — одним числом.
 
     Одно определение на все пути: по нему идут расчётный остаток, сальдо по
     контрагенту и сверка с выпиской, и он же — состояние проката: прокат
     инициализируется этим каноном на открытие окна, поэтому остаток проката на
     дату окна и расчётный остаток на ту же дату — одно число.
 
-    Считается, а не хранится, — чтобы его можно было сверить с фактическим
-    остатком. Начисление процентов идёт той же функцией `accrued_interest`, что
-    и в прокате: от начала долга (`Deal.start`) до конца дня `on`, отрезок внутри
-    месяца — пропорционально дням, база — бегущий остаток, округление —
-    `model.kopek`. Ставки нет — начисления нет, и канон сводится к «тело минус
-    движения»; начала долга ещё нет (дата позже `on`) — начисленного тоже нет.
-    У регулярного расхода остатка нет — `None`.
+    Когда раскладка известна (правило распределения или разбивки платежей),
+    канон — сумма частей `_parts_at`: инвариант «канон = сумма частей» выполняется
+    по построению. Без раскладки канон считается прежним путём: тело минус
+    движения плюс начисленное, — и даёт те же числа, что раньше: платёж в базе
+    процентов идёт целиком (04-Т5).
+
+    Начисление процентов идёт той же функцией `accrued_interest`, что и в
+    прокате: от начала долга (`Deal.start`) до конца дня `on`, отрезок внутри
+    месяца — пропорционально дням, округление — `model.kopek`. Ставки нет —
+    начисления нет; начала долга ещё нет — начисленного тоже нет. У регулярного
+    расхода остатка нет — `None`.
 
     Начисление-факт (`Charge`) входит слагаемым со своей даты: долг растёт от
     случившегося, а не только от договорённости, и раньше своей даты канон не
-    меняет. Базы процентов это не касается: `accrued_interest` считает от тела
-    и платежей по сделке, а части долга — предмет раскладки.
+    меняет. В раскладке начисление в тело растит и базу процентов — со своей
+    даты (04-Т3); в безраскладочном пути база прежняя — тело минус движения.
     """
     amount = deal_amount_at(book, deal_uid, on)
     if amount is None:
         return None
+    parts = _parts_at(book, deal_uid, on)
+    if parts is not None:
+        return (parts[BODY] + parts[INTEREST] + parts[PENALTY] + parts[COSTS])
     deal = _deal(book, deal_uid)
     movements = [m for m in book.movements
                  if m.deal == deal_uid and m.date <= on]
@@ -1181,17 +1285,23 @@ def _accrued(book: Settlements, deal: Deal, movements: Sequence[Movement],
 
 
 def _principal_left(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
-    """Тело долга на дату без начисления — служебная величина закрытости проката.
+    """Остаток части «тело» на дату — служебная величина закрытости проката.
 
     Не канон и не публичная величина: закрытость отвечает на вопрос «есть ли
     что прокатывать», а вхождения гасят тело — начисленное вхождением не
     является, и сделка с съеденным телом не возвращается в прокат, даже если
-    проценты за ней ещё числятся. «Сколько долгу на эту дату» — другой вопрос,
-    на него отвечает канон `deal_balance`, начисленное включающий.
+    проценты за ней ещё числятся (правка 3). Тело здесь — часть из той же
+    раскладки (`_parts_at`): версии плюс начисления в тело минус платежи в тело,
+    — поэтому начисление в тело меняет и закрытость. Раскладки нет — прежний
+    путь «версия минус все движения». «Сколько долгу на эту дату» — другой
+    вопрос, на него отвечает канон `deal_balance`, начисленное включающий.
     """
     amount = deal_amount_at(book, deal_uid, on)
     if amount is None:
         return None
+    parts = _parts_at(book, deal_uid, on)
+    if parts is not None:
+        return parts[BODY]
     deal = _deal(book, deal_uid)
     return amount - _paid(deal, (m for m in book.movements
                                  if m.deal == deal_uid and m.date <= on))

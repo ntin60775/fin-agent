@@ -1276,3 +1276,154 @@ def test_partial_overdue_settlement_accumulates_across_movements():
     jan = occurrences(book, "заём", START, date(2026, 1, 31))[0]
     assert jan.paid == D("1000") and jan.status == PAID_LATE
     assert jan.actual == date(2026, 1, 26)       # закрыл последний
+
+
+# --- раскладка канона по частям (04) -----------------------------------------
+
+from finance_core import deal_parts
+
+
+def _rate_deal(**kw) -> Deal:
+    base = dict(uid="заём", title="Заём", counterparty="банк", amount=D("10000"),
+                start=START, rate_per_year=D("0.12"))
+    base.update(kw)
+    return Deal(**base)
+
+
+def _rule_book(deal: Deal, movements: list[Movement] | None = None,
+               charges: list[Charge] | None = None,
+               assignments: list[Assignment] | None = None) -> Settlements:
+    return Settlements(counterparties=[_counterparty()], deals=[deal],
+                       movements=list(movements or []),
+                       charges=list(charges or []),
+                       assignments=list(assignments or []))
+
+
+def test_parts_sum_equals_the_canon_with_everything_inside():
+    """Инвариант: канон = сумма частей до копейки на любой дате (Q34)."""
+    deal = _rate_deal(amount=D("12000"), allocations=(AllocationRule(PARTS),))
+    book = _rule_book(
+        deal,
+        movements=[Movement(date(2026, 2, 20), D("500"), "заём",
+                            allocation=(PartPayment(PENALTY, D("500")),))],
+        charges=[Charge("решение", date(2026, 2, 15), D("1500"), "заём", PENALTY),
+                 Charge("пошлина", date(2026, 3, 10), D("100"), "заём", COSTS)],
+        assignments=[Assignment(date(2026, 3, 1), "заём", "банк", "банк",
+                                D("10000"), D("2000"))])
+    for day in (date(2026, 1, 31), date(2026, 2, 14), date(2026, 2, 15),
+                date(2026, 2, 20), date(2026, 2, 28), date(2026, 3, 1),
+                date(2026, 3, 9), date(2026, 3, 10), date(2026, 3, 31)):
+        parts = deal_parts(book, "заём", day)
+        assert parts is not None and set(parts) == set(PARTS)
+        assert sum(parts.values()) == deal_balance(book, "заём", day), day
+
+
+def test_a_charge_into_penalty_does_not_grow_interest():
+    """Неустойка в базе процентов не живёт: проценты — на теле и процентах."""
+    plain = _rule_book(_rate_deal())
+    assert deal_parts(plain, "заём", date(2026, 3, 31)) is None
+    assert deal_balance(plain, "заём", date(2026, 3, 31)) == D("10303.01")
+    penalized = _rule_book(_rate_deal(allocations=(AllocationRule(PARTS),)),
+                           charges=[Charge("неустойка", date(2026, 2, 1), D("500"),
+                                           "заём", PENALTY)])
+    parts = deal_parts(penalized, "заём", date(2026, 3, 31))
+    assert parts == {BODY: D("10000"), INTEREST: D("303.01"),
+                     PENALTY: D("500"), COSTS: D("0")}
+    assert sum(parts.values()) == deal_balance(penalized, "заём", date(2026, 3, 31))
+
+
+def test_a_payment_into_penalty_keeps_the_interest_base():
+    """Платёж в неустойку базу процентов не уменьшает; платёж в тело — уменьшает."""
+    charges = [Charge("неустойка", date(2026, 2, 1), D("500"), "заём", PENALTY)]
+    into_penalty = _rule_book(
+        _rate_deal(allocations=(AllocationRule(PARTS),)), charges=charges,
+        movements=[Movement(date(2026, 2, 15), D("500"), "заём",
+                            allocation=(PartPayment(PENALTY, D("500")),))])
+    parts = deal_parts(into_penalty, "заём", date(2026, 3, 31))
+    assert parts[INTEREST] == D("303.01")        # базу не тронул
+    assert parts[PENALTY] == D("0")              # а неустойку погасил
+    into_body = _rule_book(
+        _rate_deal(allocations=(AllocationRule(PARTS),)), charges=charges,
+        movements=[Movement(date(2026, 2, 15), D("500"), "заём",
+                            allocation=(PartPayment(BODY, D("500")),))])
+    parts = deal_parts(into_body, "заём", date(2026, 3, 31))
+    assert parts[INTEREST] == D("298.01")        # 10100−500 в феврале, 9701 в марте
+
+
+def test_an_explicit_allocation_displaces_the_zone_rule():
+    """Разбивка-факт вытесняет правило: они не суммируются (R4-Q27)."""
+    deal = _rate_deal(allocations=(AllocationRule(PARTS),))
+    book = _rule_book(
+        deal,
+        charges=[Charge("неустойка", date(2026, 2, 1), D("500"), "заём", PENALTY)],
+        movements=[Movement(date(2026, 2, 15), D("500"), "заём",
+                            allocation=(PartPayment(PENALTY, D("500")),))])
+    parts = deal_parts(book, "заём", date(2026, 3, 31))
+    assert parts[PENALTY] == D("0")              # правило тело-первым не сработало
+    assert parts[BODY] == D("10000")             # тело не тронуто
+
+
+def test_a_charge_into_body_grows_interest_from_its_own_date():
+    """Начисление в тело растит базу процентов со своей даты (правка 3, 04-Т3)."""
+    grown = _rule_book(_rate_deal(allocations=(AllocationRule(PARTS),)),
+                       charges=[Charge("дозаем", date(2026, 3, 1), D("2000"),
+                                       "заём", BODY)])
+    parts = deal_parts(grown, "заём", date(2026, 3, 31))
+    assert parts[BODY] == D("12000")
+    assert parts[INTEREST] == D("323.01")        # март: 12 201 × 1 %
+
+
+def test_a_backdated_body_charge_grows_the_base_from_the_event_date():
+    """Заднее число: до даты события проценты на старом теле, после — на новом."""
+    back = _rule_book(_rate_deal(allocations=(AllocationRule(PARTS),)),
+                      charges=[Charge("дозаем", date(2026, 2, 1), D("2000"),
+                                      "заём", BODY)])
+    assert deal_balance(back, "заём", date(2026, 1, 31)) == D("10100")
+    parts = deal_parts(back, "заём", date(2026, 3, 31))
+    assert parts[INTEREST] == D("343.21")        # февраль на 12 100, март на 12 221
+
+
+def test_without_rules_there_are_no_parts_but_the_canon_answers():
+    """Нет правила и разбивок — раскладка пробел (Q34), канон прежних чисел."""
+    plain = _rule_book(_rate_deal())
+    assert deal_parts(plain, "заём", date(2026, 3, 31)) is None
+    assert deal_balance(plain, "заём", date(2026, 3, 31)) == D("10303.01")
+    ruled = _rule_book(_rate_deal(allocations=(AllocationRule(PARTS),)))
+    assert deal_parts(ruled, "заём", date(2026, 3, 31)) == {
+        BODY: D("10000"), INTEREST: D("303.01"), PENALTY: D("0"), COSTS: D("0")}
+
+
+def test_overpayment_carries_the_surplus_on_the_body():
+    """Переплата: тело уходит в минус, канон равен сумме частей (R6-Q33)."""
+    deal = _rate_deal(rate_per_year=None, allocations=(AllocationRule(PARTS),))
+    book = _rule_book(deal,
+                      movements=[Movement(date(2026, 2, 1), D("11000"), "заём")])
+    parts = deal_parts(book, "заём", date(2026, 3, 31))
+    assert parts[BODY] == D("-1000")             # избыток некуда идти, кроме тела
+    assert parts[INTEREST] == parts[PENALTY] == parts[COSTS] == D("0")
+    assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 3, 31))
+
+
+def test_border_dates_move_exactly_their_own_day():
+    """Границы месяца: начисление и платёж меняют канон ровно своим днём."""
+    deal = _rate_deal(rate_per_year=None, allocations=(AllocationRule(PARTS),))
+    book = _rule_book(
+        deal,
+        charges=[Charge("решение", date(2026, 1, 31), D("500"), "заём", PENALTY)],
+        movements=[Movement(date(2026, 2, 1), D("500"), "заём",
+                            allocation=(PartPayment(PENALTY, D("500")),))])
+    assert deal_balance(book, "заём", date(2026, 1, 30)) == D("10000")
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == D("10500")
+    assert deal_balance(book, "заём", date(2026, 2, 1)) == D("10000")
+    assert deal_parts(book, "заём", date(2026, 1, 31))[PENALTY] == D("500")
+    assert deal_parts(book, "заём", date(2026, 2, 1))[PENALTY] == D("0")
+
+
+def test_claims_and_regular_expenses_have_no_parts():
+    """Части живут у долга «сколько я должен» (Q23): требованию и расходу — пробел."""
+    claim = _rule_book(_rate_deal(direction=OWED_TO_ME,
+                                  allocations=(AllocationRule(PARTS),)))
+    assert deal_parts(claim, "заём", date(2026, 3, 31)) is None
+    expense = _rule_book(_rate_deal(amount=None,
+                                    allocations=(AllocationRule(PARTS),)))
+    assert deal_parts(expense, "заём", date(2026, 3, 31)) is None

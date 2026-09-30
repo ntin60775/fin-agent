@@ -5,9 +5,11 @@ from datetime import date
 from decimal import ROUND_CEILING
 from decimal import Decimal as D
 
-from finance_core import (LEGAL, Counterparty, Deal, ScheduleRule,
+from finance_core import (BODY, LEGAL, PARTS, PENALTY, AllocationRule, Charge,
+                          Counterparty, Deal, Movement, ScheduleRule,
                           Settlements, Wallet, compare_deal_strategies,
                           roll_deals)
+from finance_core.settlements import _principal_left
 
 START = date(2026, 1, 1)
 
@@ -25,7 +27,8 @@ def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     return Deal(**base)
 
 
-def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Settlements:
+def _book(*deals, counterparties=(), wallets=None, movements=(), edits=(),
+          charges=()) -> Settlements:
     if wallets is None:
         wallets = [Wallet("карта", "Карта", "карта", D("0"))]
     return Settlements(
@@ -34,6 +37,7 @@ def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Se
         deals=list(deals),
         movements=list(movements),
         edits=list(edits),
+        charges=list(charges),
     )
 
 
@@ -188,3 +192,22 @@ def test_compare_strategies_runs_the_same_portfolio():
     rows = compare_deal_strategies(_book(*_two_deals()), START, D("20000"))
     assert [name for name, _ in rows] == ["avalanche", "snowball"]
     assert all(r.start_total == D("140000") for _, r in rows)
+
+
+# --- начисления и закрытость (04) --------------------------------------------
+
+def test_a_charge_into_body_counts_into_closure():
+    """Начисление в тело растит тело: закрытость его видит (правка 3)."""
+    deal = _deal("заём", amount=D("10000"), schedule=_rule(payment=D("10000")),
+                 allocations=(AllocationRule(PARTS),))
+    paid = [Movement(date(2026, 1, 20), D("10000"), "заём")]
+    plain = _book(deal, movements=paid)
+    assert _principal_left(plain, "заём", date(2026, 1, 31)) == D("0")
+    grown = _book(deal, movements=paid,
+                  charges=[Charge("дозаем", date(2026, 1, 1), D("500"),
+                                  "заём", BODY)])
+    assert _principal_left(grown, "заём", date(2026, 1, 31)) == D("500")
+    penalized = _book(deal, movements=paid,
+                      charges=[Charge("неустойка", date(2026, 1, 1), D("500"),
+                                      "заём", PENALTY)])
+    assert _principal_left(penalized, "заём", date(2026, 1, 31)) == D("0")
