@@ -440,6 +440,26 @@ class Charge:
 
 
 @dataclass
+class TriggeredCharge:
+    """Производное начисление штрафа: случай триггера, увиденный движком.
+
+    Триггер — правило зоны («не уплатил в срок — пойдёт штраф»), применяемое
+    движком к фактам книги; начисление по нему — производная величина, как
+    проценты: не хранится и повторный прогон даёт то же число (R3-Q11).
+    `trigger` — уид правила (Q35): по нему и дате срабатывания случай опознаётся
+    и вытесняется фактом. `date` — дата срабатывания: когда условие стало
+    истинным (R5-Q29). `part` — часть, в которую идёт штраф, `basis` — что
+    случилось (обе — из правила). Потребители (канон, части, прокат) суммируют
+    его как начисление; у события мира — свой носитель `Charge` с уидом события.
+    """
+    trigger: str
+    date: date
+    amount: Decimal
+    part: str
+    basis: str
+
+
+@dataclass
 class ObservedBalance:
     """Фактический остаток сделки на дату — наблюдение извне, а не второй источник.
 
@@ -1145,6 +1165,9 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
     Неустойка — своя производная: капает по правилу зоны на потоках просрочки
     (`_penalty_of`), входит в свою часть начисленным и не входит в базу
     процентов; день платежа видит её начисленной до прошлого дня (06-Т3).
+    Штрафы триггеров — тоже производные (`trigger_charges`), входят в часть из
+    правила с даты срабатывания, как записи-факты, — фактом случай вытесняется,
+    двойного входа нет (07-Т5).
     """
     deal = _deal(book, deal_uid)
     if deal.amount is None or deal.direction == OWED_TO_ME:
@@ -1174,8 +1197,11 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
 
     for event in sorted([*movements,
                          *(c for c in book.charges if c.deal == deal_uid
-                           and c.date <= on)], key=lambda e: e.date):
-        if isinstance(event, Charge):
+                           and c.date <= on),
+                         *trigger_charges(book, deal_uid,
+                                          _plan_since(deal, on), on)],
+                        key=lambda e: e.date):
+        if isinstance(event, (Charge, TriggeredCharge)):
             charged[event.part] += event.amount
             if event.part == BODY:
                 if since is not None and event.date < since:
@@ -1897,6 +1923,21 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
 
 # --- просроченная сумма -----------------------------------------------------
 
+def _facts_to(book: Settlements, deal_uid: str, on: date) -> Settlements:
+    """Книга на фактах сделки до конца дня `on`: состояние на дату — пересчёт.
+
+    Производная не помнит прошлого — она считается заново на фактах до даты
+    вопроса (derived-balances); правки, начисления и передачи передаются как
+    есть: их даты сами решают, входят ли они.
+    """
+    return Settlements(counterparties=book.counterparties, wallets=book.wallets,
+                       deals=book.deals,
+                       movements=[m for m in book.movements
+                                  if m.deal == deal_uid and m.date <= on],
+                       charges=book.charges, assignments=book.assignments,
+                       edits=book.edits, observed=book.observed)
+
+
 def overdue_amounts(book: Settlements, deal_uid: str,
                     on: date) -> tuple[tuple[date, Decimal, Decimal], ...]:
     """Потоки просрочек сделки на дату: «дата срока — исходная сумма — остаток».
@@ -1931,12 +1972,7 @@ def overdue_amounts(book: Settlements, deal_uid: str,
     since = _plan_since(deal, on)
     # Состояние на дату — пересчёт на фактах до `on`: производная не помнит
     # прошлого, она считается заново (derived-balances).
-    past = Settlements(counterparties=book.counterparties, wallets=book.wallets,
-                       deals=book.deals,
-                       movements=[m for m in book.movements
-                                  if m.deal == deal_uid and m.date <= on],
-                       charges=book.charges, assignments=book.assignments,
-                       edits=book.edits, observed=book.observed)
+    past = _facts_to(book, deal_uid, on)
     streams: list[tuple[date, Decimal, Decimal]] = []
     for occ in occurrences(past, deal_uid, since, on):
         if occ.status not in (EXPECTED, POSTPONED) or occ.amount is None:
@@ -1976,3 +2012,126 @@ def overdue_amount(book: Settlements, deal_uid: str, on: date) -> Decimal:
     """
     return sum((stream[2] for stream in overdue_amounts(book, deal_uid, on)),
                Decimal(0))
+
+
+# --- триггеры «не уплатил в срок» -------------------------------------------
+
+def _linked_paid(book: Settlements, deal: Deal, occ: Occurrence,
+                 by: date) -> Decimal:
+    """Сколько уплачено по вхождению к концу дня `by`: связанные движения."""
+    total = Decimal(0)
+    for m in book.movements:
+        if m.deal == deal.uid and m.occurrence == occ.planned and m.date <= by:
+            total += m.amount if _along(deal, m) else -m.amount
+    return total
+
+
+def _original_overdue(book: Settlements, deal: Deal, occ: Occurrence) -> Decimal:
+    """Исходная просроченная сумма вхождения (Q36): остаток на начало просрочки.
+
+    Остаток вхождения на день после срока, обрезанный по остатку долга на ту же
+    дату (долг без производных — `_sans_penalty`, там рвётся круг производной).
+    Одна база для доли штрафа и порога суммы.
+    """
+    original = max(occ.amount - _linked_paid(book, deal, occ, occ.due),
+                   Decimal(0))
+    debt = _sans_penalty(book, deal.uid, occ.due + timedelta(days=1))
+    return min(original, max(debt, Decimal(0)))
+
+
+def _fires(book: Settlements, deal: Deal, occ: Occurrence, rule: TriggerRule,
+           deal_uid: str) -> date | None:
+    """Дата срабатывания правила на вхождении — или None, если не сработало.
+
+    Случай — вхождение (R1-Q4: просроченным становится конкретный платёж);
+    дата срабатывания — когда условие стало истинным (R5-Q29): «срок прошёл» —
+    дата срока, порог по дням — дата срока плюс порог (включительно), порог по
+    сумме — первый день потока (день после срока). Условие оценивается строго
+    по фактам до даты срабатывания (07-Т4): платёж задним числом откатывает
+    случай, платёж после него — нет, сторно не нужно (R3-Q11). Гашения видны
+    все: связанные движения и FIFO несвязанных (их несёт `Occurrence.paid` при
+    пересчёте на фактах до даты), долг — обрезкой 05.
+    """
+    due = occ.due
+    if due is None:
+        return None
+    if rule.condition == TRIGGER_OVERDUE:
+        if _linked_paid(book, deal, occ, due) >= occ.amount:
+            return None               # в свой срок уплачено — случая нет
+        # «есть просроченная сумма»: долг на дату срока жив — поток родился
+        # не нулевым (обрезка 05 cap-ит его долгом).
+        if _sans_penalty(book, deal_uid, due) <= 0:
+            return None
+        return due
+    if rule.condition == TRIGGER_FULL_UNPAID:
+        if _linked_paid(book, deal, occ, due) > 0:
+            return None               # частичная уплата — не «полная неуплата»
+        return due
+    if rule.condition == TRIGGER_OVERDUE_DAYS:
+        firing = due + timedelta(days=rule.threshold_days)
+        # Состояние вхождения на дату порога — пересчёт на фактах до неё:
+        # погашено (связанно или FIFO) до порога — условия не было.
+        past = _facts_to(book, deal_uid, firing)
+        states = {o.planned: o for o in occurrences(
+            past, deal_uid, _plan_since(deal, firing), firing)}
+        state = states.get(occ.planned)
+        if state is None or (state.remaining or Decimal(0)) <= 0:
+            return None
+        if _sans_penalty(book, deal_uid, firing) <= 0:
+            return None               # долг съеден — потока нет (обрезка 05)
+        return firing
+    # TRIGGER_OVERDUE_SUM: остаток потока (Q36 — исходная просроченная сумма)
+    # достиг порога; остаток после срока не растёт, первый день истинности —
+    # день после срока.
+    if _original_overdue(book, deal, occ) < rule.threshold_amount:
+        return None
+    return due + timedelta(days=1)
+
+
+def trigger_charges(book: Settlements, deal_uid: str, since: date,
+                    until: date) -> tuple[TriggeredCharge, ...]:
+    """Случаи триггеров сделки за отрезок `[since, until]` — производные штрафы.
+
+    Правила зоны (`Deal.triggers`), применённые движком к фактам книги (R1-Q3,
+    R3-Q11): каждое вхождение оценивается каждым правилом, чья версия действует
+    на дату срабатывания (`rule_at`); идемпотентно по построению — повторный
+    прогон даёт те же случаи, хранимых начислений нет. Штраф — фиксированная
+    сумма (`charge_amount`) или доля исходной просроченной суммы (Q36;
+    `charge_percent`), округлённая `model.kopek` `HALF_UP`.
+
+    Запись-факт с тем же опознанием — уид правила и дата срабатывания
+    (`Charge.trigger`, Q35) — вытесняет случай: производное не считается.
+    Задвоение фактов с одним ключом падает валидацией книги; правка `basis`
+    правила связь не ломает — опознание несёт уид, а не текст. Случай опознаётся
+    парой «уид, дата», поэтому два вхождения одной даты срабатывания дают один
+    штраф (первого сработавшего), а не два.
+    """
+    deal = _deal(book, deal_uid)
+    if not deal.triggers or deal.amount is None or deal.direction == OWED_TO_ME:
+        return ()
+    recorded = {(c.trigger, c.date) for c in book.charges
+                if c.deal == deal_uid and c.trigger is not None}
+    cases: list[TriggeredCharge] = []
+    derived: set[tuple[str, date]] = set()
+    for occ in occurrences(book, deal_uid, _plan_since(deal, until), until):
+        if occ.amount is None or occ.status == SKIPPED:
+            continue                  # сумма не определена или платить не будут
+        for rule in deal.triggers:
+            firing = _fires(book, deal, occ, rule, deal_uid)
+            if firing is None or not since <= firing <= until:
+                continue
+            if rule_at(deal.triggers, firing) is not rule:
+                continue              # на эту дату действует другая версия
+            key = (rule.uid, firing)
+            if key in recorded or key in derived:
+                continue              # случай записан фактом или уже увиден
+            derived.add(key)
+            if rule.charge_amount is not None:
+                amount = kopek(rule.charge_amount)
+            else:
+                amount = kopek(rule.charge_percent
+                               * _original_overdue(book, deal, occ))
+            cases.append(TriggeredCharge(rule.uid, firing, amount, rule.part,
+                                         rule.basis))
+    cases.sort(key=lambda case: (case.date, case.trigger))
+    return tuple(cases)

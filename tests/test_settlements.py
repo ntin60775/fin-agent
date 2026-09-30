@@ -9,16 +9,19 @@ from finance_core import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
                           COSTS, CREDITOR, DEBTOR, EXPECTED, IN, INTEREST, LEGAL,
                           OWED_TO_ME, PAID, PAID_LATE, PARTS, PENALTY, PERSON, SKIPPED,
                           STARTER_GROUPS,
-                          TRIGGERS, TRIGGER_OVERDUE, TRIGGER_OVERDUE_DAYS,
+                          TRIGGERS, TRIGGER_FULL_UNPAID, TRIGGER_OVERDUE,
+                          TRIGGER_OVERDUE_DAYS,
                           TRIGGER_OVERDUE_SUM, Account, AllocationRule,
                           Assignment, Charge, Counterparty, Deal, Movement,
                           OccurrenceEdit, PartPayment, Payment, PenaltyCap,
                           PenaltyRule, PenaltyStep, Scenario, ScheduleRule,
-                          Settlements, TriggerRule, Wallet, accrued_interest,
-                          allocate_payment, beneficiary, counterparty_balance,
-                          counterparty_role, deal_amount_at, deal_balance,
-                          deal_holder_at, deal_parts, funding_wallet, liquidity, occurrences,
-                          payment_channel, roll_deals, rule_at, run, validate)
+                          Settlements, TriggerRule, TriggeredCharge, Wallet,
+                          accrued_interest, allocate_payment, beneficiary,
+                          counterparty_balance, counterparty_role,
+                          deal_amount_at, deal_balance, deal_holder_at,
+                          deal_parts, funding_wallet, liquidity, occurrences,
+                          payment_channel, roll_deals, rule_at, run,
+                          trigger_charges, validate)
 
 START = date(2026, 1, 1)
 
@@ -1657,3 +1660,277 @@ def test_an_assignment_inside_the_window_resegments_the_penalty():
     parts = deal_parts(book, "заём", date(2026, 1, 31))
     assert parts[PENALTY] == expected
     assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 1, 31))
+
+
+# --- триггер «не уплатил в срок» (07) -----------------------------------------
+
+def _triggered_book(triggers: tuple[TriggerRule, ...] | None = None,
+                    movements: list[Movement] | None = None,
+                    edits: list[OccurrenceEdit] | None = None,
+                    charges: list[Charge] | None = None,
+                    **deal) -> Settlements:
+    """Сделка с графиком и правилом триггера: «срок прошёл — штраф 500»."""
+    if triggers is None:
+        triggers = (TriggerRule(uid="штраф-1", condition=TRIGGER_OVERDUE,
+                                part=PENALTY, basis="не уплатил в срок",
+                                charge_amount=D("500")),)
+    base = dict(uid="заём", title="Заём", counterparty="банк", amount=D("3000"),
+                start=START, rate_per_year=D("0"),
+                schedule=_rule(days=(10, 20), payment=D("1000")),
+                triggers=triggers,
+                allocations=(AllocationRule((PENALTY, BODY, INTEREST, COSTS)),))
+    base.update(deal)
+    return Settlements(counterparties=[_counterparty()], deals=[_deal(**base)],
+                       movements=list(movements or []),
+                       edits=list(edits or []), charges=list(charges or []))
+
+
+def test_a_trigger_fires_on_the_due_date_and_grows_the_canon():
+    """«Срок прошёл, есть просроченная сумма»: срабатывание — дата срока (R5-Q29)."""
+    book = _triggered_book()
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 1, 15)) == (
+        TriggeredCharge("штраф-1", date(2026, 1, 10), D("500"), PENALTY,
+                        "не уплатил в срок"),)
+    # Канон и части выросли на штраф с даты срабатывания (07-Т5).
+    assert deal_parts(book, "заём", date(2026, 1, 9))[PENALTY] == D("0")
+    parts = deal_parts(book, "заём", date(2026, 1, 10))
+    assert parts[PENALTY] == D("500")
+    assert deal_balance(book, "заём", date(2026, 1, 10)) == D("3500")
+    assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 1, 10))
+
+
+def test_full_unpaid_needs_zero_paid_by_the_due():
+    """«Полная неуплата»: частичный платёж в срок случая не создаёт (07-Т3)."""
+    rule = TriggerRule(uid="полный", condition=TRIGGER_FULL_UNPAID, part=PENALTY,
+                       basis="не заплатил вовсе", charge_amount=D("500"),
+                       effective=START)
+    nothing = _triggered_book(triggers=(rule,))
+    validate(nothing)
+    charges = trigger_charges(nothing, "заём", START, date(2026, 1, 31))
+    assert [case.date for case in charges] == [date(2026, 1, 10), date(2026, 1, 20)]
+    partial = _triggered_book(
+        triggers=(rule,),
+        movements=[Movement(date(2026, 1, 10), D("400"), "заём",
+                            occurrence=date(2026, 1, 10))])
+    validate(partial)
+    charges = trigger_charges(partial, "заём", START, date(2026, 1, 31))
+    assert [case.date for case in charges] == [date(2026, 1, 20)]  # 10-е погашено
+
+
+def test_a_days_threshold_fires_on_the_threshold_day():
+    """Порог по дням: за день до порога молчит, в день порога сработал (R5-Q29)."""
+    rule = TriggerRule(uid="порог-5", condition=TRIGGER_OVERDUE_DAYS,
+                       part=PENALTY, basis="просрочка 5 дней", threshold_days=5,
+                       charge_amount=D("500"), effective=START)
+    book = _triggered_book(triggers=(rule,))
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 1, 14)) == ()
+    charges = trigger_charges(book, "заём", START, date(2026, 1, 16))
+    assert [case.date for case in charges] == [date(2026, 1, 15)]  # 10 + 5 включительно
+
+
+def test_a_sum_threshold_fires_the_day_the_stream_is_born():
+    """Порог по сумме — первый день, когда условие истинно: день после срока."""
+    rule = TriggerRule(uid="порог-800", condition=TRIGGER_OVERDUE_SUM,
+                       part=PENALTY, basis="просрочка 800",
+                       threshold_amount=D("800"), charge_amount=D("500"),
+                       effective=START)
+    book = _triggered_book(triggers=(rule,))
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 1, 10)) == ()
+    charges = trigger_charges(book, "заём", START, date(2026, 1, 12))
+    assert [case.date for case in charges] == [date(2026, 1, 11)]
+    # Частичное погашение в срок сняло порог: исходная 700 < 800 — случая нет,
+    # а вхождение 20-го (не погашалось) срабатывает со своим потоком.
+    paid = _triggered_book(
+        triggers=(rule,),
+        movements=[Movement(date(2026, 1, 10), D("300"), "заём",
+                            occurrence=date(2026, 1, 10))])
+    validate(paid)
+    charges = trigger_charges(paid, "заём", START, date(2026, 1, 31))
+    assert [case.date for case in charges] == [date(2026, 1, 21)]
+
+
+def test_the_derived_charge_is_idempotent():
+    """Повторный прогон по той же книге даёт то же число случаев (R3-Q11)."""
+    book = _triggered_book()
+    validate(book)
+    first = trigger_charges(book, "заём", START, date(2026, 1, 31))
+    assert first == trigger_charges(book, "заём", START, date(2026, 1, 31))
+    assert [(case.date, case.amount) for case in first] == [
+        (date(2026, 1, 10), D("500.00")), (date(2026, 1, 20), D("500.00"))]
+
+
+def test_a_recorded_fact_displaces_the_derived_case():
+    """Факт с тем же (уид правила, дата срабатывания) вытесняет производное (Q35)."""
+    book = _triggered_book(
+        charges=[Charge("факт-1", date(2026, 1, 10), D("700"), "заём", PENALTY,
+                        basis="решение", trigger="штраф-1")])
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 1, 15)) == ()
+    parts = deal_parts(book, "заём", date(2026, 1, 15))
+    assert parts[PENALTY] == D("700")      # факт один, задвоения нет
+    assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 1, 15))
+
+
+def test_rules_with_one_basis_do_not_merge():
+    """Ключ случая — уид правила, а не текст основания (Q35): записи не сливаются.
+
+    Две записи с одним основанием и разными уидами правил легальны в один день:
+    опознаёт уид, а не текст; валидация задавила бы их по ключу «основание».
+    """
+    rules = (TriggerRule(uid="а", condition=TRIGGER_OVERDUE, part=PENALTY,
+                         basis="одно и то же", charge_amount=D("500"),
+                         effective=START),
+             TriggerRule(uid="б", condition=TRIGGER_OVERDUE, part=COSTS,
+                         basis="одно и то же", charge_amount=D("300"),
+                         effective=date(2026, 1, 2)))
+    book = _triggered_book(
+        triggers=rules,
+        charges=[Charge("факт-а", date(2026, 1, 10), D("500"), "заём", PENALTY,
+                        basis="одно и то же", trigger="а"),
+                 Charge("факт-б", date(2026, 1, 10), D("300"), "заём", COSTS,
+                        basis="одно и то же", trigger="б")])
+    validate(book)
+    parts = deal_parts(book, "заём", date(2026, 1, 10))
+    assert parts[PENALTY] == D("500")        # обе записи легальны и обе в частях
+    assert parts[COSTS] == D("300")
+    assert deal_parts(book, "заём", date(2026, 1, 9))[PENALTY] == D("0")
+
+
+def test_editing_the_basis_keeps_the_fact_linked():
+    """Правка основания правила не ломает вытеснение: опознаёт уид (Q35)."""
+    book = _triggered_book(
+        charges=[Charge("факт-1", date(2026, 1, 10), D("700"), "заём", PENALTY,
+                        basis="решение", trigger="штраф-1")])
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 1, 15)) == ()
+    book.deals[0].triggers[0].basis = "иная формулировка"
+    assert trigger_charges(book, "заём", START, date(2026, 1, 15)) == ()
+
+
+def test_a_backdated_payment_rolls_the_case_back_and_a_late_one_does_not():
+    """Платёж задним числом откатывает случай; платёж после срока — нет (07-Т4)."""
+    on_time = _triggered_book(
+        movements=[Movement(date(2026, 1, 10), D("1000"), "заём",
+                            occurrence=date(2026, 1, 10))])
+    validate(on_time)
+    assert trigger_charges(on_time, "заём", START, date(2026, 1, 15)) == ()
+    late = _triggered_book(
+        movements=[Movement(date(2026, 1, 12), D("1000"), "заём",
+                            occurrence=date(2026, 1, 10))])
+    validate(late)
+    assert [case.date for case in
+            trigger_charges(late, "заём", START, date(2026, 1, 15))] == [
+        date(2026, 1, 10)]                 # условие было истинно в срок
+    part = _triggered_book(
+        movements=[Movement(date(2026, 1, 12), D("400"), "заём",
+                            occurrence=date(2026, 1, 10))])
+    validate(part)
+    assert [case.date for case in
+            trigger_charges(part, "заём", START, date(2026, 1, 15))] == [
+        date(2026, 1, 10)]                 # частичное гашение «срок прошёл» не снимает
+
+
+def test_a_percent_charge_counts_from_the_original_overdue():
+    """Доля — от исходной просроченной суммы (Q36), с обрезкой по долгу."""
+    rule = TriggerRule(uid="доля", condition=TRIGGER_OVERDUE, part=PENALTY,
+                       basis="не уплатил в срок", charge_percent=D("0.1"),
+                       effective=START)
+    book = _triggered_book(triggers=(rule,))
+    validate(book)
+    cases = trigger_charges(book, "заём", START, date(2026, 1, 15))
+    assert [case.amount for case in cases] == [D("100.00")]
+    # Долг съеден платёжём вне графика: исходная второго вхождения обрезана
+    # остатком долга (500) — доля от обрезанной суммы.
+    eaten = _triggered_book(
+        triggers=(rule,),
+        movements=[Movement(date(2026, 1, 15), D("2500"), "заём")])
+    validate(eaten)
+    cases = trigger_charges(eaten, "заём", START, date(2026, 1, 31))
+    assert [(case.date, case.amount) for case in cases] == [
+        (date(2026, 1, 10), D("100.00")), (date(2026, 1, 20), D("50.00"))]
+
+
+def test_a_moved_occurrence_fires_by_its_moved_date():
+    """Перенесённое вхождение срабатывает по перенесённому сроку (07-Т6)."""
+    book = _triggered_book(
+        edits=[OccurrenceEdit("заём", date(2026, 1, 10), postponed=True,
+                              moved_to=date(2026, 1, 15))])
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 1, 14)) == ()
+    assert [case.date for case in
+            trigger_charges(book, "заём", START, date(2026, 1, 19))] == [
+        date(2026, 1, 15)]
+
+
+def test_a_payment_one_day_late_does_not_roll_the_case_back():
+    """Случай стоит на фактах до срабатывания: платёж на следующий день не откатывает.
+
+    Ревью 07 (P1-1): условие «срок прошёл» стало истинным в дату срока —
+    просрочка на один день штрафом не обходится.
+    """
+    book = _triggered_book(
+        movements=[Movement(date(2026, 1, 11), D("1000"), "заём",
+                            occurrence=date(2026, 1, 10))])
+    validate(book)
+    charges = trigger_charges(book, "заём", START, date(2026, 1, 15))
+    assert [case.date for case in charges] == [date(2026, 1, 10)]
+
+
+def test_a_fifo_settlement_before_the_threshold_kills_the_days_case():
+    """Несвязанный платёж погасил вхождение FIFO до порога — потока нет, случая нет.
+
+    Ревью 07 (P1-2): порог дней смотрит состояние вхождения на дату порога,
+    а не только связанные движения.
+    """
+    rule = TriggerRule(uid="порог-5", condition=TRIGGER_OVERDUE_DAYS,
+                       part=PENALTY, basis="просрочка 5 дней", threshold_days=5,
+                       charge_amount=D("500"), effective=START)
+    book = _triggered_book(
+        triggers=(rule,),
+        movements=[Movement(date(2026, 1, 12), D("1000"), "заём")])
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 1, 16)) == ()
+
+
+def test_an_eaten_debt_gives_no_cases():
+    """Долг съеден платёжём вне графика: потоки обрезаны — случаев нет (обрезка 05)."""
+    rule = TriggerRule(uid="порог-5", condition=TRIGGER_OVERDUE_DAYS,
+                       part=PENALTY, basis="просрочка 5 дней", threshold_days=5,
+                       charge_amount=D("500"), effective=START)
+    book = _triggered_book(
+        triggers=(rule,),
+        movements=[Movement(date(2026, 1, 12), D("3000"), "заём")])
+    validate(book)
+    assert trigger_charges(book, "заём", START, date(2026, 2, 28)) == ()
+
+
+def test_two_occurrences_on_one_date_share_the_case_key():
+    """Два вхождения, сведённые на одну дату, дают один случай (ключ: уид и дата).
+
+    Заметка исполнения (ревью 07, P2-1): случай опознаётся парой «уид правила,
+    дата срабатывания», поэтому два вхождения одной даты — один штраф; факт с
+    этим ключом вытесняет его целиком, а второй факт с тем же ключом валится
+    валидацией книги.
+    """
+    book = _triggered_book(edits=[
+        OccurrenceEdit("заём", date(2026, 1, 10), postponed=True,
+                       moved_to=date(2026, 1, 15)),
+        OccurrenceEdit("заём", date(2026, 1, 20), postponed=True,
+                       moved_to=date(2026, 1, 15))])
+    validate(book)
+    charges = trigger_charges(book, "заём", START, date(2026, 1, 20))
+    assert [(case.trigger, case.date, case.amount) for case in charges] == [
+        ("штраф-1", date(2026, 1, 15), D("500.00"))]
+    recorded = _triggered_book(
+        edits=[OccurrenceEdit("заём", date(2026, 1, 10), postponed=True,
+                              moved_to=date(2026, 1, 15)),
+               OccurrenceEdit("заём", date(2026, 1, 20), postponed=True,
+                              moved_to=date(2026, 1, 15))],
+        charges=[Charge("факт-1", date(2026, 1, 15), D("700"), "заём", PENALTY,
+                        basis="решение", trigger="штраф-1")])
+    validate(recorded)
+    assert trigger_charges(recorded, "заём", START, date(2026, 1, 20)) == ()
+    assert deal_parts(recorded, "заём", date(2026, 1, 20))[PENALTY] == D("700")
