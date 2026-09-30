@@ -1427,3 +1427,121 @@ def test_claims_and_regular_expenses_have_no_parts():
     expense = _rule_book(_rate_deal(amount=None,
                                     allocations=(AllocationRule(PARTS),)))
     assert deal_parts(expense, "заём", date(2026, 3, 31)) is None
+
+
+# --- просроченная сумма как состояние (05) -----------------------------------
+
+from finance_core import overdue_amount, overdue_amounts
+
+
+def _overdue_book(movements: list[Movement] | None = None,
+                  edits: list[OccurrenceEdit] | None = None,
+                  **deal) -> Settlements:
+    base = dict(uid="заём", title="Заём", counterparty="банк", amount=D("3000"),
+                schedule=_rule(days=(10, 20, 30), payment=D("1000")))
+    base.update(deal)
+    return Settlements(counterparties=[_counterparty()], deals=[_deal(**base)],
+                       movements=list(movements or []),
+                       edits=list(edits or []))
+
+
+def test_an_overdue_stream_appears_the_day_after_the_due():
+    """Срок прошёл — поток живёт; в день срока и раньше — просрочки нет (Q13)."""
+    book = _overdue_book()
+    validate(book)
+    assert overdue_amounts(book, "заём", date(2026, 1, 5)) == ()
+    assert overdue_amounts(book, "заём", date(2026, 1, 10)) == ()
+    assert overdue_amounts(book, "заём", date(2026, 1, 11)) == (
+        (date(2026, 1, 10), D("1000"), D("1000")),)
+    assert overdue_amount(book, "заём", date(2026, 1, 21)) == D("2000")
+    assert overdue_amounts(book, "заём", date(2026, 1, 21)) == (
+        (date(2026, 1, 10), D("1000"), D("1000")),
+        (date(2026, 1, 20), D("1000"), D("1000")))
+
+
+def test_a_moved_occurrence_is_overdue_by_its_moved_date():
+    """У перенесённого срок — перенесённая дата; отложенное без даты не течёт."""
+    moved = _overdue_book(edits=[OccurrenceEdit("заём", date(2026, 1, 10),
+                                                postponed=True,
+                                                moved_to=date(2026, 1, 15))])
+    validate(moved)
+    assert overdue_amounts(moved, "заём", date(2026, 1, 15)) == ()
+    assert overdue_amounts(moved, "заём", date(2026, 1, 16)) == (
+        (date(2026, 1, 15), D("1000"), D("1000")),)
+    off = _overdue_book(edits=[OccurrenceEdit("заём", date(2026, 1, 10),
+                                              postponed=True)])
+    validate(off)
+    streams = overdue_amounts(off, "заём", date(2026, 2, 1))
+    # Отложенное без даты не течёт, остальные вхождения — текут своим сроком.
+    assert [stream[0] for stream in streams] == [date(2026, 1, 20),
+                                                 date(2026, 1, 30)]
+
+
+def test_skipped_and_paid_occurrences_are_not_overdue():
+    """Пропущенное — платить не будут; исполненное — остатка нет."""
+    skipped = _overdue_book(edits=[OccurrenceEdit("заём", date(2026, 1, 10),
+                                                  skipped=True)])
+    validate(skipped)
+    assert overdue_amounts(skipped, "заём", date(2026, 1, 21)) == (
+        (date(2026, 1, 20), D("1000"), D("1000")),)
+    paid = _overdue_book(movements=[Movement(date(2026, 1, 10), D("1000"), "заём",
+                                             occurrence=date(2026, 1, 10))])
+    validate(paid)
+    assert overdue_amounts(paid, "заём", date(2026, 1, 21)) == (
+        (date(2026, 1, 20), D("1000"), D("1000")),)
+
+
+def test_a_partial_payment_reduces_the_stream_on_its_date():
+    """Частичное погашение уменьшает поток с даты платежа; задним числом пересчёт."""
+    book = _overdue_book(movements=[Movement(date(2026, 1, 12), D("400"), "заём",
+                                             occurrence=date(2026, 1, 10))])
+    validate(book)
+    assert overdue_amounts(book, "заём", date(2026, 1, 11)) == (
+        (date(2026, 1, 10), D("1000"), D("1000")),)   # платёж ещё не случился
+    assert overdue_amounts(book, "заём", date(2026, 1, 12)) == (
+        (date(2026, 1, 10), D("1000"), D("600")),)
+    assert overdue_amount(book, "заём", date(2026, 1, 31)) == D("2600")
+
+
+def test_streams_never_exceed_the_canon_newest_are_cut():
+    """Платёж вне графика съел долг: обрезаются самые новые потоки (Q26)."""
+    book = _overdue_book(movements=[Movement(date(2026, 1, 15), D("2500"), "заём")])
+    validate(book)
+    # FIFO закрыл просрочку 10.01, излишек 1500 — платёж, а не закрытие графика:
+    # канон 500, а непогашенных вхождений 2000 — новейший поток обрезан.
+    streams = overdue_amounts(book, "заём", date(2026, 2, 1))
+    # Исходная сумма обрезана каноном на начало просрочки (там уже 500) — Q36.
+    assert streams == ((date(2026, 1, 20), D("500.00"), D("500.00")),)
+    assert overdue_amount(book, "заём", date(2026, 2, 1)) == D("500")
+    assert overdue_amount(book, "заём", date(2026, 2, 1)) == \
+        deal_balance(book, "заём", date(2026, 2, 1))
+
+
+def test_claims_expenses_and_empty_books_have_no_overdue():
+    """Краи 05-Т4: требованию, регулярному расходу и пустой книге — пусто и ноль."""
+    claim = _overdue_book(direction=OWED_TO_ME)
+    validate(claim)
+    assert overdue_amounts(claim, "заём", date(2026, 2, 1)) == ()
+    assert overdue_amount(claim, "заём", date(2026, 2, 1)) == D("0")
+    expense = _overdue_book(amount=None)
+    validate(expense)
+    assert overdue_amounts(expense, "заём", date(2026, 2, 1)) == ()
+    bare = _overdue_book(schedule=None)      # нет графика — нет вхождений
+    validate(bare)
+    assert overdue_amounts(bare, "заём", date(2026, 2, 1)) == ()
+    assert overdue_amount(bare, "заём", date(2026, 2, 1)) == D("0")
+
+
+def test_two_streams_may_share_one_due_date():
+    """Правки свели два вхождения на одну дату: оба потока живут (05-Т4)."""
+    book = _overdue_book(edits=[
+        OccurrenceEdit("заём", date(2026, 1, 20), postponed=True,
+                       moved_to=date(2026, 2, 10)),
+        OccurrenceEdit("заём", date(2026, 1, 30), postponed=True,
+                       moved_to=date(2026, 2, 10))])
+    validate(book)
+    streams = overdue_amounts(book, "заём", date(2026, 2, 11))
+    assert [stream[0] for stream in streams] == [date(2026, 1, 10),
+                                                 date(2026, 2, 10),
+                                                 date(2026, 2, 10)]
+    assert overdue_amount(book, "заём", date(2026, 2, 11)) == D("3000")

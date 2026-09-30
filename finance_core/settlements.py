@@ -1668,3 +1668,87 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
                              closings.get(planned))
                  for planned, amount in entries]
     return found
+
+
+# --- просроченная сумма -----------------------------------------------------
+
+def overdue_amounts(book: Settlements, deal_uid: str,
+                    on: date) -> tuple[tuple[date, Decimal, Decimal], ...]:
+    """Потоки просрочек сделки на дату: «дата срока — исходная сумма — остаток».
+
+    Просроченная сумма — состояние, а не хранимое: остатки неисполненных
+    вхождений, чей срок уже прошёл (`due` раньше `on` — в день срока платёж ещё
+    не просрочен), не больше остатка долга. Дата потока — дата срока (`due`):
+    возраст просрочки считает потребитель по правилу «первый день — день после
+    срока». Исходная сумма — остаток вхождения на момент начала просрочки,
+    обрезанный по остатку долга на ту же дату: одна база для доли штрафа и
+    потолка (Q36); текущий остаток — база дня начисления (Q13). Потоки идут
+    старыми первыми; две просрочки одной даты живут обе — суммирование корректно,
+    а начисление считает по потокам независимо.
+
+    Входят «ожидается» и «перенесён» (у перенесённого срок — перенесённая дата);
+    не входят исполненные (остатка нет), пропущенные (правка сняла обязательство)
+    и отложенные без даты (платить некуда). У регулярного расхода и требования
+    просрочек нет — части живут у долга «сколько я должен» (Q23); пустой ответ —
+    «просрочки нет», а не «не оценено».
+
+    Остатки считаются на фактах до `on` включительно: движение задним числом
+    пересчитывает состояние на любой дате, сторно не нужно. Сумма потоков
+    ограничена каноном: когда платёж вне графика съел долг, обрезаются самые
+    новые потоки — старые (с бо́льшим возрастом) сохраняются, как требует
+    хронология (Q13).
+    """
+    deal = _deal(book, deal_uid)
+    if deal.amount is None or deal.direction == OWED_TO_ME:
+        return ()
+    rule = deal.schedule
+    bounds = [d for d in (deal.start, rule.start if rule else None,
+                          rule.first.date if rule and rule.first else None) if d]
+    since = min(bounds) if bounds else date(on.year - 20, on.month, 1)
+    # Состояние на дату — пересчёт на фактах до `on`: производная не помнит
+    # прошлого, она считается заново (derived-balances).
+    past = Settlements(counterparties=book.counterparties, wallets=book.wallets,
+                       deals=book.deals,
+                       movements=[m for m in book.movements
+                                  if m.deal == deal_uid and m.date <= on],
+                       charges=book.charges, assignments=book.assignments,
+                       edits=book.edits, observed=book.observed)
+    streams: list[tuple[date, Decimal, Decimal]] = []
+    for occ in occurrences(past, deal_uid, since, on):
+        if occ.status not in (EXPECTED, POSTPONED) or occ.amount is None:
+            continue
+        due = occ.due
+        if due is None or due >= on:
+            continue
+        remaining = occ.remaining or Decimal(0)
+        if remaining <= 0:
+            continue
+        paid_by_due = Decimal(0)
+        for m in book.movements:
+            if m.deal == deal_uid and m.occurrence == occ.planned and m.date <= due:
+                paid_by_due += m.amount if _along(deal, m) else -m.amount
+        original = max(occ.amount - paid_by_due, Decimal(0))
+        canon = deal_balance(book, deal_uid, due + timedelta(days=1))
+        if canon is not None and original > canon:
+            original = max(canon, Decimal(0))
+        streams.append((due, original, remaining))
+    streams.sort(key=lambda stream: stream[0])
+    available = deal_balance(book, deal_uid, on) or Decimal(0)
+    kept: list[tuple[date, Decimal, Decimal]] = []
+    for due, original, remaining in streams:
+        if available <= 0:
+            break
+        take = remaining if remaining <= available else available
+        kept.append((due, original, take))
+        available -= take
+    return tuple(kept)
+
+
+def overdue_amount(book: Settlements, deal_uid: str, on: date) -> Decimal:
+    """Просроченная сумма сделки на дату: сумма потоков после ограничения.
+
+    Ровно `min(сумма просрочек, канон)`: потоки `overdue_amounts` уже обрезаны,
+    чтобы неустойка и триггеры считали по тем же числам, что и состояние.
+    """
+    return sum((stream[2] for stream in overdue_amounts(book, deal_uid, on)),
+               Decimal(0))

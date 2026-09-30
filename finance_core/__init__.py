@@ -49,8 +49,9 @@ from .settlements import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
                           counterparty_balance, counterparty_role,
                           deal_amount_at, deal_balance, deal_holder_at, deal_parts,
                           funding_wallet, liquidity, occurrences, payment_channel,
-                          allocate_payment, occurrences, payment_channel,
-                          planned_date, rule_at, validate)
+                          allocate_payment, occurrences, overdue_amount,
+                          overdue_amounts, payment_channel, planned_date,
+                          rule_at, validate)
 from .solver import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER,
                      UNSECURED_KINDS, Outcome, Result, Step, TransferHint,
                      Unsecured, compare, cover_cost, outcome, run)
@@ -68,6 +69,7 @@ __all__ = [
     "PenaltyRule", "PenaltyStep", "PenaltyCap", "AllocationRule", "TriggerRule",
     "rule_at",
     "accrued_interest", "validate", "deal_balance", "deal_parts", "deal_amount_at",
+    "overdue_amount", "overdue_amounts",
     "deal_holder_at", "counterparty_balance", "counterparty_role",
     "funding_wallet", "payment_channel", "beneficiary", "liquidity",
     "occurrences", "planned_date",

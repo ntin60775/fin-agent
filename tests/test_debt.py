@@ -8,7 +8,7 @@ from decimal import Decimal as D
 from finance_core import (BODY, LEGAL, PARTS, PENALTY, AllocationRule, Charge,
                           Counterparty, Deal, Movement, ScheduleRule,
                           Settlements, Wallet, compare_deal_strategies,
-                          roll_deals)
+                          overdue_amount, roll_deals)
 from finance_core.settlements import _principal_left
 
 START = date(2026, 1, 1)
@@ -211,3 +211,11 @@ def test_a_charge_into_body_counts_into_closure():
                       charges=[Charge("неустойка", date(2026, 1, 1), D("500"),
                                       "заём", PENALTY)])
     assert _principal_left(penalized, "заём", date(2026, 1, 31)) == D("0")
+
+
+def test_a_paid_off_debt_has_no_overdue_even_with_a_live_schedule():
+    """Погашенный долг просрочки не держит: график не закрыт, а сумма — ноль."""
+    book = _book(_deal("заём", amount=D("2000"),
+                       schedule=_rule(days=(10,), payment=D("500"))),
+                 movements=[Movement(date(2026, 1, 5), D("2000"), "заём")])
+    assert overdue_amount(book, "заём", date(2026, 1, 11)) == D("0")

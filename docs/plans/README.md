@@ -29,7 +29,7 @@ links:
 когда все его `depends_on` закрыты.
 
 - `penalties-and-charges` — грилл пройден (10 раундов, вопросы Q1–Q39 и правки
-  1–3), тикет 01 закрыт (архивирован), 02–17 ждут `/ship` (см.
+  1–3), тикеты 01–05 закрыты, 06–17 ждут `/ship` (см.
   `penalties-and-charges/README.md`);
 - `obligations`, `long-debts-single-values`, `zone-split`, `engine-wording`,
   `engine-messages` и `model-audit-fixes` — архивные, порядок не задают.
