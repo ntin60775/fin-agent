@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal as D
+from types import SimpleNamespace
 
 import pytest
 
-from finance_core import (BOTH, CREDITOR, DEBTOR, IN, LEGAL, OWED_TO_ME, PERSON,
-                          STARTER_GROUPS, Account, Assignment, Counterparty, Deal,
-                          Movement, Payment, Scenario, ScheduleRule, Settlements,
-                          Wallet, accrued_interest, beneficiary,
-                          counterparty_balance, counterparty_role,
+from finance_core import (BOTH, CREDITOR, DEBTOR, IN, LEGAL, OWED_TO_ME, PARTS,
+                          PENALTY, PERSON, STARTER_GROUPS, Account, Assignment,
+                          Charge, Counterparty, Deal, Movement, Payment, Scenario,
+                          ScheduleRule, Settlements, Wallet, accrued_interest,
+                          beneficiary, counterparty_balance, counterparty_role,
                           deal_amount_at, deal_balance, deal_holder_at,
                           funding_wallet, liquidity, payment_channel, roll_deals,
                           run, validate)
@@ -431,6 +432,155 @@ def test_annual_payments_of_a_month_cut_the_next_one():
     assert paid == D("3648.00")
     assert untouched == D("4848.00")
     assert paid < untouched
+
+
+# --- начисление от события -------------------------------------------------
+
+def _charge(uid: str = "суд", **kw) -> Charge:
+    """Начисление по умолчанию: решение суда на 1 500,00 по займу."""
+    base = dict(uid=uid, date=date(2026, 3, 10), amount=D("1500"), deal="заём",
+                part=PENALTY, basis="решение")
+    base.update(kw)
+    return Charge(**base)
+
+
+def _charge_book(*charges: Charge, **deal) -> Settlements:
+    """Заём на 10 000,00 без ставки и его начисления: канон = тело плюс начисления."""
+    return Settlements(counterparties=[_counterparty()], deals=[_deal(**deal)],
+                       charges=list(charges))
+
+
+def test_parts_are_the_declared_set_of_one_debt():
+    """Части долга — закрытый набор, и значения его — термины глоссария."""
+    assert PARTS == ("тело", "проценты", "неустойка", "издержки")
+
+
+def test_charge_grows_the_canon_from_its_own_date():
+    """Начисление растёт со своей даты: днём раньше канон ещё прежний."""
+    book = _charge_book(_charge(date=date(2026, 3, 10)))
+    validate(book)
+    assert deal_balance(book, "заём", date(2026, 3, 9)) == D("10000")
+    assert deal_balance(book, "заём", date(2026, 3, 10)) == D("11500")
+
+
+def test_a_backdated_charge_recomputes_from_the_event_date():
+    """Запись задним числом меняет расчёт с даты события, а не с даты записи."""
+    book = _charge_book(_charge(date=date(2026, 2, 5)))
+    validate(book)
+    assert deal_balance(book, "заём", date(2026, 2, 4)) == D("10000")
+    assert deal_balance(book, "заём", date(2026, 2, 5)) == D("11500")
+
+
+def test_charge_and_payment_meet_in_one_canon():
+    """Начисление и платёж — разные носители одного числа: канон видит оба."""
+    book = Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                       movements=[Movement(date(2026, 3, 5), D("4000"), "заём")],
+                       charges=[_charge(date=date(2026, 3, 10))])
+    validate(book)
+    assert deal_balance(book, "заём", date(2026, 3, 31)) == D("7500")
+
+
+def test_every_part_is_accepted_and_basis_does_not_touch_the_calculation():
+    """Часть обязательна и из набора; основание — свободная метка, не влияет."""
+    for part in PARTS:
+        book = _charge_book(_charge(uid=f"начисление-{part}", part=part))
+        validate(book)
+        assert deal_balance(book, "заём", date(2026, 3, 31)) == D("11500")
+    with_basis = _charge_book(_charge(basis="штраф по постановлению"))
+    without_basis = _charge_book(_charge(basis=None))
+    validate(with_basis)
+    validate(without_basis)
+    assert with_basis.charges[0].basis == "штраф по постановлению"
+    assert (deal_balance(with_basis, "заём", date(2026, 3, 31))
+            == deal_balance(without_basis, "заём", date(2026, 3, 31)) == D("11500"))
+
+
+def test_a_charge_on_the_month_border_changes_only_its_own_day():
+    """Первое и последнее число: канон меняется ровно в день записи."""
+    book = _charge_book(_charge(date=date(2026, 3, 1)),
+                        _charge(uid="суд-позже", date=date(2026, 3, 31)))
+    validate(book)
+    assert deal_balance(book, "заём", date(2026, 2, 28)) == D("10000")
+    assert deal_balance(book, "заём", date(2026, 3, 1)) == D("11500")
+    assert deal_balance(book, "заём", date(2026, 3, 30)) == D("11500")
+    assert deal_balance(book, "заём", date(2026, 3, 31)) == D("13000")
+
+
+def test_a_book_without_charges_counts_as_before():
+    """Пустой список начислений — канон прежний: новая запись ничего не меняет."""
+    book = _charge_book()
+    validate(book)
+    assert deal_balance(book, "заём", START) == D("10000")
+
+
+def test_charge_validation_names_the_reason():
+    """Уид события, сумма, часть и сделка — каждая со своим текстом."""
+    with pytest.raises(ValueError, match="начисление без уида события"):
+        validate(_charge_book(_charge(uid="")))
+    with pytest.raises(ValueError, match="сумма должна быть положительной"):
+        validate(_charge_book(_charge(amount=D("0"))))
+    with pytest.raises(ValueError, match="не входит в набор частей"):
+        validate(_charge_book(_charge(part="проценты по займу")))
+    with pytest.raises(ValueError, match="неизвестная сделка 'чужой'"):
+        validate(_charge_book(_charge(deal="чужой")))
+
+
+def test_charge_has_nothing_to_grow_at_a_regular_expense_and_a_claim():
+    """Части живут у долга «сколько я должен»: расходу и требованию — отказ."""
+    expense = Settlements(counterparties=[_counterparty()],
+                          deals=[_deal(uid="аренда", amount=None)],
+                          charges=[_charge(deal="аренда")])
+    with pytest.raises(ValueError, match="у регулярного расхода остатка нет"):
+        validate(expense)
+    with pytest.raises(ValueError, match="у требования начисления не поддерживаются"):
+        validate(_charge_book(_charge(), direction=OWED_TO_ME))
+
+
+def test_one_event_is_one_record():
+    """Уид события уникален: дубль падает, два уида — два начисления."""
+    duplicate = _charge_book(_charge(uid="суд"),
+                             _charge(uid="суд", date=date(2026, 4, 1)))
+    with pytest.raises(ValueError, match="уид события 'суд' уже записан"):
+        validate(duplicate)
+    # Второе решение по тому же делу — другой уид: обе записи считаются.
+    two = _charge_book(_charge(uid="суд"), _charge(uid="суд-2"))
+    validate(two)
+    assert deal_balance(two, "заём", date(2026, 3, 31)) == D("13000")
+
+
+def test_a_charge_reference_to_a_rule_must_be_declared():
+    """Ссылка на правило триггера сверяется с правилами сделки, а не выдумывается."""
+    rule = SimpleNamespace(uid="правило")        # правило — запись с уидом (02)
+    validate(_charge_book(_charge(trigger="правило"), triggers=(rule,)))
+    with pytest.raises(ValueError, match="правило триггера 'нет-такого' не объявлено"):
+        validate(_charge_book(_charge(trigger="нет-такого"), triggers=(rule,)))
+    # Зона передала уиды вместо правил: отказ текстом, а не падением.
+    with pytest.raises(ValueError, match="триггер-правило без уида"):
+        validate(_charge_book(_charge(trigger="правило"), triggers=("правило",)))
+
+
+def test_one_trigger_case_is_one_record():
+    """Случай правила — (сделка, уид правила, дата): второй факт — дубль."""
+    rule = SimpleNamespace(uid="правило")
+    twice = _charge_book(_charge(uid="суд", trigger="правило"),
+                         _charge(uid="суд-2", trigger="правило"), triggers=(rule,))
+    with pytest.raises(ValueError, match="случай правила 'правило' от 2026-03-10"):
+        validate(twice)
+    other_day = _charge_book(_charge(uid="суд", trigger="правило"),
+                             _charge(uid="суд-2", trigger="правило",
+                                     date=date(2026, 3, 11)), triggers=(rule,))
+    validate(other_day)
+    assert deal_balance(other_day, "заём", date(2026, 3, 31)) == D("13000")
+    # Уиды правил уникальны среди правил сделки, а не книги: одноимённое
+    # правило другой сделки — другой случай, и обе записи легальны.
+    two_deals = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(triggers=(rule,)),
+               _deal(uid="второй", amount=D("2000"), triggers=(rule,))],
+        charges=[_charge(uid="суд", trigger="правило"),
+                 _charge(uid="суд-2", deal="второй", trigger="правило")])
+    validate(two_deals)
+    assert deal_balance(two_deals, "второй", date(2026, 3, 31)) == D("3500")
 
 
 # --- сальдо и роль ---------------------------------------------------------

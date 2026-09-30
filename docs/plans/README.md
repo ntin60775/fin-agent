@@ -3,7 +3,7 @@ node_type: index
 title: Планы
 service: _platform
 status: active
-updated: 2026-09-28
+updated: 2026-09-30
 links:
   part_of: [../README.md]
 ---
@@ -32,7 +32,7 @@ links:
   `active` и ждёт архивации — решение об архивации отдельное (см.
   `obligations/README.md`);
 - `penalties-and-charges` — грилл пройден (10 раундов, вопросы Q1–Q39 и правки
-  1–3), тикеты 01–17 в статусе `draft` ждут `/ship` (см.
+  1–3), тикет 01 закрыт (архивирован), 02–17 ждут `/ship` (см.
   `penalties-and-charges/README.md`);
 - `long-debts-single-values`, `zone-split`, `engine-wording`, `engine-messages`
   и `model-audit-fixes` — архивные, порядок не задают.
