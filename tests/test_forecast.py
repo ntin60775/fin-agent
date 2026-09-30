@@ -8,10 +8,12 @@ from decimal import Decimal as D
 import pytest
 
 import finance_core.roll as roll_module
-from finance_core import (FAMILY, LEGAL, OWED_TO_ME, PERSON, Counterparty, Deal,
+from finance_core import (FAMILY, LEGAL, OWED_TO_ME, PARTS, PERSON,
+                          AllocationRule, Charge, Counterparty, COSTS, Deal,
                           ForecastInput, Income, Movement, ObservedBalance,
-                          Payment, ScheduleRule, Settlements, Wallet, deal_balance,
-                          forecast, forecast_shifts, validate, widest)
+                          PartPayment, Payment, ScheduleRule, Settlements,
+                          Wallet, deal_balance, deal_parts, forecast,
+                          forecast_shifts, validate, widest)
 from finance_core import (PAYOFF_CLOSED_BEFORE, WINDOW_INCOME_ENDS,
                           WINDOW_MONTH_CAP)
 from finance_core.forecast import _roll_of
@@ -463,6 +465,204 @@ def test_observation_on_a_regular_expense_is_an_error():
                  observed=[ObservedBalance("аренда", date(2026, 1, 31), D("0"))])
     with pytest.raises(ValueError, match="остатка нет"):
         validate(book)
+
+
+# --- сверка по частям и пробелы правил (12) -------------------------------------
+
+def _spread_book() -> Settlements:
+    """Заём с раскладкой и издержками: канон 10 500 по частям известен."""
+    deal = _deal(amount=D("10000"), allocations=(AllocationRule(PARTS),))
+    return replace(_book(deal),
+                   charges=[Charge("решение", date(2026, 1, 15), D("500"), "заём",
+                                   COSTS, basis="решение")])
+
+
+def test_an_observation_by_parts_names_the_diverging_part():
+    """Наблюдение по частям сверяется по частям: строка называет часть и причину.
+
+    Кредитор показывает неустойку 300, у расчёта её нет: расхождение одной части
+    даёт один вопрос с частью «неустойка» и подозрением «штраф, пошлина», а
+    сошедшиеся части вопросов не рождают.
+    """
+    book = _spread_book()
+    validate(book)
+    on = date(2026, 1, 31)
+    watched = replace(book, observed=[ObservedBalance(
+        "заём", on, D("10800"),
+        parts=(PartPayment("тело", D("10000")),
+               PartPayment("неустойка", D("300")),
+               PartPayment("издержки", D("500"))))])
+    f = forecast(_input(watched, incomes=_incomes(D("5000"), 1, 2),
+                        income_horizon=date(2026, 4, 5),
+                        living_floor=D("0"), max_months=2))
+    assert [(q.part, q.reason, q.observed, q.computed) for q in f.questions] == [
+        ("неустойка", "штраф, пошлина", D("300"), D("0"))]
+    assert f.questions[0].text == ("заём: неустойка — наблюдение 300 "
+                                   "против расчёта 0")
+    assert not f.complete
+
+
+def test_an_observation_by_parts_that_agrees_is_complete():
+    """Сошедшаяся сверка по частям вопросов не даёт и прогноз не портит."""
+    book = _spread_book()
+    validate(book)
+    on = date(2026, 1, 31)
+    watched = replace(book, observed=[ObservedBalance(
+        "заём", on, D("10500"),
+        parts=(PartPayment("тело", D("10000")),
+               PartPayment("проценты", D("0")),
+               PartPayment("неустойка", D("0")),
+               PartPayment("издержки", D("500"))))])
+    f = forecast(_input(watched, incomes=_incomes(D("5000"), 1, 2),
+                        income_horizon=date(2026, 4, 5),
+                        living_floor=D("0"), max_months=2))
+    assert f.questions == []
+    assert f.complete
+
+
+def test_an_observation_of_one_sum_carries_the_computed_parts():
+    """Наблюдение одной суммой сверяется с суммой частей и объясняется ими.
+
+    Разбивки у наблюдения нет — расхождение объясняется по частям расчёта:
+    строка несёт раскладку расчёта на дату (`computed_parts`).
+    """
+    deal = _deal(amount=D("10000"), rate_per_year=D("0.24"),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal)
+    validate(book)
+    on = date(2026, 1, 31)
+    assert deal_balance(book, "заём", on) == D("10200.00")
+    watched = replace(book, observed=[ObservedBalance("заём", on, D("10000"))])
+    f = forecast(_input(watched, incomes=_incomes(D("5000"), 1, 2),
+                        income_horizon=date(2026, 4, 5),
+                        living_floor=D("0"), max_months=2))
+    assert [(q.part, q.observed, q.computed) for q in f.questions] == [
+        (None, D("10000"), D("10200.00"))]
+    assert f.questions[0].computed_parts == deal_parts(book, "заём", on)
+
+
+def test_without_a_layout_the_reconciliation_goes_by_the_total():
+    """Неизвестная раскладка (Q34): сверка по итогу, пробел распределения, неполный.
+
+    Платёж без правила распределения раскладку рушит: наблюдение по частям
+    сверяется итогом, расхождение по частям не называется, а пробел «порядок
+    распределения не задан» делает прогноз неполным.
+    """
+    deal = _deal(amount=D("10000"))
+    book = replace(_book(deal),
+                   movements=[Movement(date(2026, 1, 15), D("2000"), "заём")],
+                   observed=[ObservedBalance(
+                       "заём", date(2026, 1, 31), D("9000"),
+                       parts=(PartPayment("тело", D("9000")),))])
+    validate(book)
+    assert deal_parts(book, "заём", date(2026, 1, 31)) is None
+    f = forecast(_input(book, incomes=_incomes(D("5000"), 1, 2),
+                        income_horizon=date(2026, 4, 5),
+                        living_floor=D("0"), max_months=2))
+    assert [(q.part, q.observed, q.computed, q.computed_parts)
+            for q in f.questions] == [(None, D("9000"), D("8000.00"), None)]
+    assert ("порядок распределения платежа не задан — платёж по частям "
+            "не распределён") in [g.reason for g in f.gaps]
+    assert not f.complete
+
+
+def test_parts_are_demanded_even_without_payments():
+    """Разбивка спрашивает части — раскладки нет и без платежей: пробел (Q34).
+
+    Начисление-факт без правила распределения тоже делает раскладку
+    неизвестной: наблюдение с разбивкой на такой сделке сверяется итогом,
+    сошлось — вопросов нет, но прогноз неполон: части не выдумываются.
+    """
+    deal = _deal(amount=D("10000"))
+    book = replace(_book(deal),
+                   charges=[Charge("решение", date(2026, 1, 15), D("500"),
+                                   "заём", COSTS, basis="решение")],
+                   observed=[ObservedBalance(
+                       "заём", date(2026, 1, 31), D("10500"),
+                       parts=(PartPayment("тело", D("10000")),
+                              PartPayment("издержки", D("500"))))])
+    validate(book)
+    assert deal_parts(book, "заём", date(2026, 1, 31)) is None
+    f = forecast(_input(book, incomes=_incomes(D("5000"), 1, 2),
+                        income_horizon=date(2026, 4, 5),
+                        living_floor=D("0"), max_months=2))
+    assert f.questions == []                        # итогом сверилось
+    assert ("порядок распределения платежа не задан — платёж по частям "
+            "не распределён") in [g.reason for g in f.gaps]
+    assert not f.complete
+
+
+def test_the_layout_gap_takes_the_worst_observation():
+    """Пробел раскладки — по худшему наблюдению: нет раскладки хоть на одну дату.
+
+    Движение без разбивки до вступления правила в силу рушит раскладку с той
+    даты: на раннюю дату она известна, на позднюю — нет. Первым в списке стоит
+    наблюдение с известной раскладкой — пробел всё равно ставится: «худшее»
+    наблюдение решает, а не то, что первым встретилось.
+    """
+    deal = _deal(amount=D("10000"),
+                 allocations=(AllocationRule(PARTS, effective=date(2026, 1, 25)),))
+    book = replace(_book(deal),
+                   movements=[Movement(date(2026, 1, 20), D("2000"), "заём")],
+                   observed=[ObservedBalance(
+                       "заём", date(2026, 1, 10), D("10000"),
+                       parts=(PartPayment("тело", D("10000")),)),
+                       ObservedBalance(
+                           "заём", date(2026, 1, 31), D("8000"),
+                           parts=(PartPayment("тело", D("8000")),))])
+    validate(book)
+    assert deal_parts(book, "заём", date(2026, 1, 10)) is not None
+    assert deal_parts(book, "заём", date(2026, 1, 31)) is None
+    f = forecast(_input(book, living_floor=D("0"), max_months=2))
+    assert ("порядок распределения платежа не задан — платёж по частям "
+            "не распределён") in [g.reason for g in f.gaps]
+    assert not f.complete
+
+
+def test_a_deal_without_a_penalty_scale_is_a_gap_not_zero():
+    """Нет шкалы неустойки при просрочке — пробел, а не молчаливый ноль.
+
+    Сделка с просрочкой на открытии окна и без правила неустойки платится в
+    прокате (долг гасится), но набежавшее не считается: пробел называет, чего
+    движок не знает, и делает прогноз неполным.
+    """
+    deal = _deal(amount=D("3000"),
+                 schedule=ScheduleRule(days=(20,), payment=D("1000"), count=4,
+                                       start=date(2025, 12, 1),
+                                       shift_weekend=False))
+    book = _book(deal)
+    validate(book)
+    f = forecast(_input(book, living_floor=D("0"), max_months=2))
+    assert ("шкала неустойки не задана — неустойка не считается"
+            in [g.reason for g in f.gaps])
+    assert not f.complete
+    assert f.first_priority.month is not None       # сделка платится в прокате
+
+
+def test_observed_parts_are_validated():
+    """Разбивка наблюдения: части объявлены, без повторов, сумма сходится с итогом.
+
+    Нулевые части легальны — кредитор показывает и нули; расхождение суммы
+    разбивки с итогом — ошибка данных, а не тихий выбор одного из двух.
+    """
+    def observed_with(*parts, amount: D = D("10500")) -> Settlements:
+        return replace(_spread_book(), observed=[
+            ObservedBalance("заём", date(2026, 1, 31), amount, parts=parts)])
+
+    validate(observed_with(PartPayment("тело", D("10000")),
+                           PartPayment("неустойка", D("0")),
+                           PartPayment("издержки", D("500"))))
+    with pytest.raises(ValueError, match="не входит в набор частей"):
+        validate(observed_with(PartPayment("комиссия", D("500")),
+                               PartPayment("тело", D("10000"))))
+    with pytest.raises(ValueError, match="встречается дважды"):
+        validate(observed_with(PartPayment("тело", D("10000")),
+                               PartPayment("тело", D("500"))))
+    with pytest.raises(ValueError, match="не может быть отрицательной"):
+        validate(observed_with(PartPayment("тело", D("10500")),
+                               PartPayment("издержки", D("-500"))))
+    with pytest.raises(ValueError, match="не равна сумме наблюдения"):
+        validate(observed_with(PartPayment("тело", D("10000"))))
 
 
 def test_report_window_bounds_the_lines_it_shows():

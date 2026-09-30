@@ -479,10 +479,18 @@ class ObservedBalance:
     ставка, база начисления, начало долга, комиссия), и это повод править
     условия сделки или записать факт, а не число
     (`docs/decisions/derived-balances.md`).
+
+    `parts` — разбивка наблюдения по частям (строки `PartPayment`, как у
+    разбивки движения), когда кредитор показывает долг по частям; пусто —
+    наблюдение одной суммой. Сумма строк равна `amount` — при расхождении это
+    ошибка данных, а не тихий выбор одного из двух. При неизвестной раскладке
+    расчёта сверка идёт по итогу: частей у расчёта нет, и расхождение по
+    частям не называется — части не выдумываются.
     """
     deal: str
     on: date
     amount: Decimal
+    parts: tuple[PartPayment, ...] = ()
 
 
 @dataclass
@@ -1031,7 +1039,7 @@ def _validate_edits(book: Settlements) -> None:
 
 
 def _validate_observed(book: Settlements) -> None:
-    """Наблюдения извне: ссылка на объявленную сделку, сумма не отрицательная.
+    """Наблюдения извне: ссылка на сделку, суммы и разбивка по частям.
 
     У регулярного расхода остатка нет — сверять нечего, и наблюдение по нему
     отклоняется: иначе оно молча выпало бы из сверки (`_questions` берёт только
@@ -1039,6 +1047,10 @@ def _validate_observed(book: Settlements) -> None:
     Расхождение же факта с расчётом ошибкой не объявляется: проверка падает на
     необъяснённом расхождении, а не на самом расхождении — его видно открытым
     вопросом прогноза (`docs/decisions/derived-balances.md`).
+
+    Разбивка по частям (`parts`): части объявлены, без повторов, суммы не
+    отрицательны, сумма строк равна итогу наблюдения — расхождение с `amount`
+    ошибка данных, а не тихий выбор одного из двух.
     """
     deals = {d.uid: d for d in book.deals}
     for o in book.observed:
@@ -1049,6 +1061,31 @@ def _validate_observed(book: Settlements) -> None:
         if o.deal in deals and deals[o.deal].amount is None:
             raise ValueError(f"фактический остаток по сделке {o.deal!r}: у "
                              f"регулярного расхода остатка нет — сверять нечего")
+        _validate_observed_parts(o)
+
+
+def _validate_observed_parts(o: ObservedBalance) -> None:
+    """Разбивка наблюдения: строки той же формы, что у разбивки движения."""
+    seen: set[str] = set()
+    total = Decimal(0)
+    for line in o.parts:
+        if line.amount < 0:
+            raise ValueError(f"фактический остаток по сделке {o.deal!r} на {o.on}: "
+                             f"строка части {line.part!r} — сумма не может быть "
+                             f"отрицательной")
+        if line.part not in PARTS:
+            raise ValueError(f"фактический остаток по сделке {o.deal!r}: часть "
+                             f"{line.part!r} не входит в набор частей: "
+                             f"{', '.join(PARTS)}")
+        if line.part in seen:
+            raise ValueError(f"фактический остаток по сделке {o.deal!r}: часть "
+                             f"{line.part!r} встречается дважды")
+        seen.add(line.part)
+        total += line.amount
+    if seen and total != o.amount:
+        raise ValueError(f"фактический остаток по сделке {o.deal!r} на {o.on}: "
+                         f"сумма разбивки {total} не равна сумме наблюдения "
+                         f"{o.amount}")
 
 
 # --- производные величины --------------------------------------------------

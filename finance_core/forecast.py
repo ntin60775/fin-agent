@@ -26,13 +26,30 @@ from typing import Any
 
 from .model import Income, Payment, Transfer
 from .roll import (AVALANCHE, PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, DealRoll,
-                   Expectation, Gap, MonthsRoll, Window, mandatory_gaps,
-                   roll_months)
-from .settlements import FAMILY, I_OWE, Settlements, Wallet, deal_balance
+                   Expectation, Gap, MonthsRoll, Window, _opening,
+                   mandatory_gaps, roll_months)
+from .settlements import (BODY, COSTS, FAMILY, I_OWE, INTEREST, PENALTY,
+                          Settlements, Wallet, deal_balance, deal_parts,
+                          overdue_amounts)
 from .solver import CashMonth
 
 
 # --- ступени и даты --------------------------------------------------------
+
+#: Пробелы правил (R3-Q12): нет правила — пробел и неполный прогноз, не ноль.
+#: Сделка при этом в прокат входит и платится — пробел называет, чего движок
+#: не знает, а не отказывается считать долг.
+SCALE_NOT_SET = "шкала неустойки не задана — неустойка не считается"
+ALLOCATION_NOT_SET = ("порядок распределения платежа не задан — "
+                      "платёж по частям не распределён")
+
+#: Подозрение, привязанное к части (12-Т2): где разошлись — о том и думать.
+_PART_CAUSES = {
+    BODY: "правило начисления",
+    INTEREST: "правило начисления",
+    PENALTY: "штраф, пошлина",
+    COSTS: "комиссия",
+}
 
 @dataclass
 class Milestone:
@@ -99,11 +116,20 @@ class Discrepancy:
     что правило начисления движка не совпало с правилом кредитора: иная ставка,
     база начисления, начало долга, комиссия. Закрывается она правкой условий
     сделки или записью факта, а не правкой числа.
+
+    Расхождение объясняется по частям (Q10): наблюдение с разбивкой сверяется
+    по частям, и строка называет часть и причину — подозрение, привязанное к
+    части (`_PART_CAUSES`); наблюдение одной суммой несёт раскладку расчёта
+    (`computed_parts`), когда она известна. При неизвестной раскладке (Q34)
+    сверка идёт по итогу: частей у расчёта нет, и выдумывать их нельзя.
     """
     deal: str
     on: date
     observed: Decimal
     computed: Decimal | None
+    part: str | None = None
+    reason: str | None = None
+    computed_parts: dict[str, Decimal] | None = None
 
     @property
     def difference(self) -> Decimal | None:
@@ -111,6 +137,15 @@ class Discrepancy:
         if self.computed is None:
             return None
         return self.observed - self.computed
+
+    @property
+    def text(self) -> str:
+        """Строка вопроса: часть называет, где разошлись, причина — о чём думать."""
+        if self.part is not None:
+            return (f"{self.deal}: {self.part} — наблюдение {self.observed} "
+                    f"против расчёта {self.computed}")
+        return (f"{self.deal}: наблюдение {self.observed} "
+                f"против расчёта {self.computed}")
 
 
 @dataclass
@@ -295,7 +330,7 @@ def forecast(inp: ForecastInput) -> Forecast:
         expectations=_within(roll.deal_roll.expectations, roll, until),
         family=_family(inp, roll, until),
         questions=_questions(inp.book),
-        gaps=roll.deal_roll.gaps,
+        gaps=[*roll.deal_roll.gaps, *_rule_gaps(inp.book, inp.start)],
         window=roll.window,
         living_floor=inp.living_floor,
         obligation_reserve=inp.obligation_reserve,
@@ -564,6 +599,12 @@ def _questions(book: Settlements) -> list[Discrepancy]:
     Расхождение говорит, что правило начисления движка не совпало с правилом
     кредитора (иная ставка, база начисления, начало долга, комиссия); закрывается
     оно правкой условий сделки или записью факта, а не правкой числа.
+
+    Расхождение объясняется по частям (Q10): наблюдение с разбивкой сверяется
+    по частям — строка называет часть и подозрение, привязанное к части;
+    наблюдение одной суммой несёт раскладку расчёта (`computed_parts`), когда
+    она известна. При неизвестной раскладке (Q34) сверка идёт по итогу: частей
+    у расчёта нет, и расхождение по частям не называется — части не выдумываются.
     Наблюдение, которое нечем сверить (у регулярного расхода остатка нет), молча
     выпадает из списка — `computed is None`, строка не добавляется. Громкий отказ
     даёт только `validate()` («остатка нет — сверять нечего»), поэтому валидация
@@ -572,11 +613,58 @@ def _questions(book: Settlements) -> list[Discrepancy]:
     """
     rows: list[Discrepancy] = []
     for fact in book.observed:
-        row = Discrepancy(fact.deal, fact.on, fact.amount,
-                          deal_balance(book, fact.deal, fact.on))
-        if row.computed is not None and row.difference != 0:
-            rows.append(row)
+        computed = deal_balance(book, fact.deal, fact.on)
+        if computed is None:
+            continue
+        parts = deal_parts(book, fact.deal, fact.on)
+        if fact.parts:
+            if parts is None:            # Q34: частей у расчёта нет — по итогу
+                if computed != fact.amount:
+                    rows.append(Discrepancy(fact.deal, fact.on, fact.amount,
+                                            computed))
+                continue
+            for line in fact.parts:
+                computed_part = parts.get(line.part, Decimal(0))
+                if computed_part != line.amount:
+                    rows.append(Discrepancy(
+                        fact.deal, fact.on, line.amount, computed_part,
+                        part=line.part, reason=_PART_CAUSES[line.part]))
+            continue
+        if computed != fact.amount:
+            rows.append(Discrepancy(
+                fact.deal, fact.on, fact.amount, computed,
+                computed_parts=dict(parts) if parts is not None else None))
     rows.sort(key=lambda d: (d.on, d.deal))
+    return rows
+
+
+def _rule_gaps(book: Settlements, start: date) -> list[Gap]:
+    """Пробелы правил (R3-Q12): нет правила — названный пробел, а не тихий ноль.
+
+    Шкала неустойки: у сделки с просрочкой на открытие окна и без правила
+    неустойки набежавшее не считается — движок не выдумывает ставку. Порядок
+    распределения: наблюдение, которое просит разбивку по частям, на сделке
+    с неизвестной раскладкой (Q34) по частям не отвечает — пробел ставится,
+    если раскладки нет хотя бы на одну дату наблюдения (худшее наблюдение).
+    Сделка при этом в прокат входит и платится: пробел называет, чего движок
+    не знает, и делает прогноз неполным, а расчёт — неполным, а не нулевым.
+    """
+    layout_known: dict[str, bool] = {}
+    parts_demanded: set[str] = set()
+    for o in book.observed:
+        known = deal_parts(book, o.deal, o.on) is not None
+        layout_known[o.deal] = layout_known.get(o.deal, True) and known
+        if o.parts:
+            parts_demanded.add(o.deal)
+    opening = _opening(start)
+    rows: list[Gap] = []
+    for deal in book.deals:
+        if deal.direction != I_OWE or deal.amount is None:
+            continue                     # части живут у долга «сколько я должен»
+        if not deal.penalties and overdue_amounts(book, deal.uid, opening):
+            rows.append(Gap(deal.uid, SCALE_NOT_SET))
+        if deal.uid in parts_demanded and layout_known[deal.uid] is False:
+            rows.append(Gap(deal.uid, ALLOCATION_NOT_SET))
     return rows
 
 
