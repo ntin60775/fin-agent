@@ -555,6 +555,41 @@ def test_one_event_is_one_record():
     assert deal_balance(two, "заём", date(2026, 3, 31)) == D("13000")
 
 
+def test_one_event_is_never_charged_and_paid():
+    """«Начислено и уплачено» одним фактом падает валидацией (11-Т1).
+
+    Один уид не встречается и в `Charge.uid`, и в `Movement.event`: рост долга
+    и деньги на один факт — двойной счёт. Движение с событием без начисления
+    легально (пошлина, уплаченная суду: деньги ушли, долг не рос); погашение
+    начисления позже — обычное движение, оно событие не занимает.
+    """
+    both = Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                       movements=[Movement(date(2026, 3, 20), D("1500"), "заём",
+                                           event="суд")],
+                       charges=[_charge()])
+    with pytest.raises(ValueError,
+                       match="начисление 'суд': событие уже записано движением"):
+        validate(both)
+    # Другое событие у движения: обе записи легальны.
+    other = Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                        movements=[Movement(date(2026, 3, 20), D("1500"), "заём",
+                                            event="пошлина")],
+                        charges=[_charge()])
+    validate(other)
+    assert deal_balance(other, "заём", date(2026, 3, 31)) == D("10000")
+    # Деньги события без записанного роста — тоже легально.
+    paid_only = Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                            movements=[Movement(date(2026, 3, 20), D("1500"),
+                                                "заём", event="пошлина")])
+    validate(paid_only)
+    # Погашение начисления позже — обычное движение без события.
+    repaid = Settlements(counterparties=[_counterparty()], deals=[_deal()],
+                         movements=[Movement(date(2026, 3, 20), D("1500"), "заём")],
+                         charges=[_charge()])
+    validate(repaid)
+    assert deal_balance(repaid, "заём", date(2026, 3, 31)) == D("10000")
+
+
 def _trigger_rule(uid: str = "правило", **kw) -> TriggerRule:
     """Триггер-правило по умолчанию: штраф 500,00 в неустойку, порогов нет."""
     base = dict(uid=uid, condition=TRIGGER_OVERDUE, part=PENALTY,

@@ -2,8 +2,8 @@
 node_type: ticket
 title: Касса: начислено не есть уплачено
 service: _platform
-status: draft
-updated: 2026-09-28
+status: archived
+updated: 2026-09-30
 links:
   documents: [../../../finance_core/settlements.py, ../../../finance_core/actions.py, ../../../tests/test_settlements.py, ../../../tests/test_cash.py]
   part_of: [README.md]
@@ -38,11 +38,11 @@ links:
 
 ## Приёмка
 
-- [ ] Синтетика: запись-начисления не меняет кассу (платёжей не появляется),
+- [x] Синтетика: запись-начисления не меняет кассу (платёжей не появляется),
   а расчётный остаток вырос — `tests/test_cash.py`.
-- [ ] Синтетика: платёж кошельком даёт пару `Movement` + `Payment` с одной
+- [x] Синтетика: платёж кошельком даёт пару `Movement` + `Payment` с одной
   суммой и одной датой — `tests/test_cash.py`.
-- [ ] Синтетика: попытка связать одно событие и с начислением, и с движением
+- [x] Синтетика: попытка связать одно событие и с начислением, и с движением
   падает валидацией с текстом — `tests/test_settlements.py`.
 
 ## Грилл тикета
