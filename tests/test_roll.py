@@ -8,7 +8,8 @@ import pytest
 
 from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
-                          SKIPPED, AVALANCHE, Assignment, CAP_NONE, CAP_SUM,
+                          SKIPPED, AVALANCHE, AllocationRule, Assignment,
+                          CAP_NONE, CAP_SUM,
                           Counterparty, Deal, FirstPayment, Movement,
                           OccurrenceEdit, PenaltyCap, PenaltyRule, PenaltyStep,
                           ScheduleRule, Settlements, Wallet, accrued_interest,
@@ -35,7 +36,7 @@ def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
 
 
 def _book(*deals, counterparties=(), wallets=None, movements=(), edits=(),
-          assignments=()) -> Settlements:
+          assignments=(), charges=()) -> Settlements:
     if wallets is None:
         wallets = [Wallet("карта", "Карта", "карта", D("0"))]
     return Settlements(
@@ -45,6 +46,7 @@ def _book(*deals, counterparties=(), wallets=None, movements=(), edits=(),
         movements=list(movements),
         edits=list(edits),
         assignments=list(assignments),
+        charges=list(charges),
     )
 
 
@@ -1859,3 +1861,90 @@ def test_streams_of_one_deal_never_touch_another():
     assert roll.months[0].balances["второй"] == D("99000.00")
     assert roll.months[0].balances["первый"] == D("100000.00") + \
         roll.months[0].interest
+
+
+# --- части, закрытость и раскладка начисленного (09) ---------------------------
+
+def test_roll_parts_equal_the_canon_by_parts():
+    """Остаток проката на конец месяца равен канону — итогом и по части (09-Т1).
+
+    Книга с начислением-фактом, цессией внутри окна и неустойкой на урезанных
+    обязательствах: раскладка проката — та же раскладка канона на ту же дату.
+    """
+    from finance_core import (BODY, COSTS, PARTS, AllocationRule, Charge,
+                              deal_parts)
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", counterparty="коллектор", amount=D("30000"),
+                 start=date(2025, 12, 1),
+                 schedule=_rule(days=(10,), payment=D("1000"),
+                                shift_weekend=False, start=date(2025, 12, 1)),
+                 allocations=(AllocationRule(PARTS),),
+                 penalties=(rule,))
+    book = _book(
+        deal,
+        counterparties=[_counterparty(uid="коллектор", name="Коллектор",
+                                      subtype="ПКО")],
+        charges=[Charge("издержки", date(2026, 1, 15), D("500"), "заём",
+                        COSTS, basis="решение")],
+        assignments=[Assignment(date(2026, 2, 1), "заём", from_holder="банк",
+                                to_holder="коллектор", amount=D("29500"),
+                                delta=D("500"))])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3,
+                      budgets={1: D("-1000"), 2: D("-1000"), 3: D("-1000")})
+    ends = (date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31))
+    for index, month in enumerate(roll.months):
+        for payment in month.payments:
+            book.movements.append(Movement(payment.date, payment.amount,
+                                           payment.deal,
+                                           occurrence=payment.planned))
+        on = ends[index]
+        assert month.balances["заём"] == deal_balance(book, "заём", on)
+        assert month.parts["заём"] == deal_parts(book, "заём", on)
+        assert sum(month.parts["заём"].values()) == month.balances["заём"]
+        assert sum(month.interest_parts.values()) == month.interest
+    # Издержки — в месяц события; цессия — в тело месяца передачи, части
+    # накопленное не сбрасывают (R3-Q18).
+    assert roll.months[0].interest_parts[COSTS] == D("500.00")
+    assert roll.months[1].parts["заём"][BODY] > roll.months[0].parts["заём"][BODY]
+
+
+def test_a_hanging_penalty_keeps_the_deal_open():
+    """Тело выплачено, неустойка жива: сделка открыта, пока части не погашены.
+
+    Начисление-факт в неустойку держит остаток при выплаченном теле: сделка не
+    закрыта (09-Т2), её обязательства платятся ещё месяц — и после погашения
+    сделка закрывается.
+    """
+    from finance_core import PENALTY, Charge
+    deal = _deal("заём", amount=D("1000"),
+                 schedule=_rule(days=(10, 20), payment=D("500"),
+                                shift_weekend=False))
+    book = _book(deal,
+                 charges=[Charge("пени", date(2025, 12, 15), D("300"), "заём",
+                                 PENALTY, basis="решение")])
+    roll = roll_deals(book, START, D(0), max_months=2)
+    assert roll.months[0].balances["заём"] == D("300.00")
+    assert roll.months[1].balances["заём"] == D("0.00")
+    assert roll.freedom == date(2026, 2, 1)
+    assert not roll.stalled
+
+
+def test_a_body_charge_keeps_the_deal_in_the_roll():
+    """Начисление в тело растит тело: сделка с растущим телом остаётся (правка 3)."""
+    from finance_core import BODY, PARTS, Charge
+    deal = _deal("заём", amount=D("1000"), start=date(2025, 12, 1),
+                 schedule=_rule(days=(10,), payment=D("1000"),
+                                start=date(2025, 12, 1), count=1,
+                                shift_weekend=False),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal,
+                 movements=[Movement(date(2025, 12, 20), D("1000"), "заём")],
+                 charges=[Charge("дозаем", date(2025, 12, 25), D("500"), "заём",
+                                 BODY, basis="решение")])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=1)
+    # Тело погашено движением, но начисление в тело вернуло долг: прокат входит.
+    assert roll.start_total == D("500.00")
+    assert roll.months[0].balances["заём"] == D("500.00")
+    assert roll.months[0].parts["заём"][BODY] == D("500.00")

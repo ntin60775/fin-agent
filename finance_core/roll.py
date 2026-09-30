@@ -48,12 +48,14 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from .model import Account, Income, Payment, Scenario, Transfer, kopek
-from .settlements import (I_OWE, OWED_TO_ME, Deal, Occurrence, Settlements,
-                          Wallet, _along, _overdue_map, _penalty_of,
-                          _principal_left,
+from .settlements import (BODY, COSTS, INTEREST, I_OWE, OWED_TO_ME,
+                          PARTS, PENALTY, Deal, Movement, Occurrence,
+                          Settlements, Wallet,
+                          _along, _overdue_map, _penalty_of, _principal_left,
                           _signed, accrued_interest, accrued_penalty,
-                          deal_amount_at, deal_balance, deal_holder_at,
-                          funding_wallet, occurrences, planned_date, rule_at)
+                          allocate_payment, deal_amount_at, deal_balance,
+                          deal_holder_at, deal_parts, funding_wallet,
+                          occurrences, planned_date, rule_at, trigger_charges)
 from .solver import _CashMonth, _CashRoll
 
 DAYS_IN_YEAR = Decimal(365)
@@ -137,7 +139,10 @@ class DealMonth:
     денег месяца**, которым не нашлось места: свободные деньги месяца минус
     ушедшие досрочки — столько предлагается направить во второй приоритет.
     `payments` — расписание месяца: дата, сумма, кошелёк и контрагент каждого
-    платежа.
+    платежа. `interest_parts` — раскладка начисленного месяца по видам
+    (проценты, неустойка, начисления-факты в свою часть); сумма равна
+    `interest`. `parts` — раскладка остатков сделок по частям на конец месяца
+    для сделок с известной раскладкой (канон = сумма частей, Q10).
     """
     index: int
     month: date
@@ -150,6 +155,8 @@ class DealMonth:
     short: Decimal
     offer: Decimal
     payments: list[ScheduledPayment]
+    interest_parts: dict[str, Decimal] = field(default_factory=dict)
+    parts: dict[str, dict[str, Decimal]] = field(default_factory=dict)
 
 
 @dataclass
@@ -228,6 +235,7 @@ class _Open:
     second: bool = False
     streams: list = field(default_factory=list)
     penalty: Decimal = Decimal(0)
+    parts: dict[str, Decimal] | None = None
 
     def pay(self, amount: Decimal) -> None:
         self.balance -= amount
@@ -680,6 +688,9 @@ class _DealsEntry:
     pots: dict[str, Decimal]
     targets: dict[str, Decimal]
     total_interest: Decimal
+    streams: dict[str, list]
+    penalties: dict[str, Decimal]
+    parts: dict[str, dict[str, Decimal] | None]
 
 
 @dataclass
@@ -702,6 +713,8 @@ class _MonthLoad:
     interest: Decimal
     payments: list[ScheduledPayment]
     stream_events: list[tuple] = field(default_factory=list)
+    penalty: Decimal = Decimal(0)
+    charged_parts: dict[str, Decimal] = field(default_factory=dict)
 
 
 class _DealsRoll:
@@ -784,7 +797,8 @@ class _DealsRoll:
         # и урезанное продолжает капать в проекции со своего срока (Q26); возраст
         # входных потоков продолжается — просрочка не молодеет от начала окна.
         # Наброшенное до окна тоже считается: потолок правила капает по
-        # накопленному сделки (06-Т2), а не с начала проката.
+        # накопленному сделки (06-Т2), а не с начала проката. Части — та же
+        # раскладка канона на открытие окна (09-Т1): balance := Σ parts.
         opening = _opening(start)
         for uid, opened in self.open_deals.items():
             opened.streams = [[due, original, remaining, planned]
@@ -792,6 +806,11 @@ class _DealsRoll:
                               in _overdue_map(book, uid, opening).items()]
             if opened.streams:
                 opened.penalty = _penalty_of(book, uid, opening)(opening)
+            opened.parts = deal_parts(book, uid, opening)
+
+        # Записанные платежи окна: производные штрафы месяца считает
+        # trigger_charges по книге с ними — те же факты, что видит канон.
+        self.recorded: list = []
 
         for unit in self.open_units.values():
             unit.pot = min(unit.pot, unit.target)
@@ -802,6 +821,9 @@ class _DealsRoll:
                 for member in unit.members:
                     self.open_deals[member].balance = Decimal(0)
                     self.open_deals[member].streams = []
+                    if self.open_deals[member].parts is not None:
+                        self.open_deals[member].parts = {
+                            part: Decimal(0) for part in PARTS}
 
         until = self.window.until
 
@@ -862,7 +884,12 @@ class _DealsRoll:
             {uid: o.balance for uid, o in self.open_deals.items()},
             {uid: u.pot for uid, u in self.open_units.items()},
             {uid: u.target for uid, u in self.open_units.items()},
-            self.total_interest)
+            self.total_interest,
+            {uid: [stream[:] for stream in o.streams]
+             for uid, o in self.open_deals.items()},
+            {uid: o.penalty for uid, o in self.open_deals.items()},
+            {uid: dict(o.parts) if o.parts is not None else None
+             for uid, o in self.open_deals.items()})
 
     def restore(self, snap: _DealsEntry) -> None:
         """Вернуть состояние к снимку: внутренний круг месяца начинается заново."""
@@ -873,6 +900,12 @@ class _DealsRoll:
         for uid, target in snap.targets.items():
             self.open_units[uid].target = target
         self.total_interest = snap.total_interest
+        for uid, streams in snap.streams.items():
+            self.open_deals[uid].streams = [stream[:] for stream in streams]
+        for uid, penalty in snap.penalties.items():
+            self.open_deals[uid].penalty = penalty
+        for uid, parts in snap.parts.items():
+            self.open_deals[uid].parts = dict(parts) if parts is not None else None
 
     def begin(self, index: int, extra: Decimal) -> _MonthLoad:
         """Шаг месяца: проценты по базе начисления и обязательные вхождения.
@@ -889,8 +922,13 @@ class _DealsRoll:
         payments: list[ScheduledPayment] = []
         events: list[tuple] = []      # события потоков просрочки месяца
 
-        def pay_row(when: date, uid: str, occ: Occurrence, basis: Decimal) -> None:
-            """Одно обязательное вхождение: `want` от базы `basis`, урезание, платёж."""
+        def pay_row(when: date, uid: str, occ: Occurrence,
+                    basis: Decimal) -> dict | None:
+            """Одно обязательное вхождение: `want` от базы `basis`, урезание, платёж.
+
+            Возвращает раскладку платежа по частям — сделкам с раскладкой она
+            нужна в шаге начисления (доля платежа в базу процентов).
+            """
             nonlocal pool, paid, short
             opened = self.open_deals[uid]
             unit = (self.open_units[opened.unit]
@@ -915,27 +953,40 @@ class _DealsRoll:
             if not done:
                 shortfall = want - max(amount, Decimal(0))
                 short += shortfall
+                # События потока нужны прогону без раскладки — их применит
+                # finish; раскладочная сделка проводит их сама, в свой день
+                # прогулки частей.
+                track = opened.parts is None
                 if amount > 0:
                     # Плановый платёж гасит ровно своё вхождение (08-Т2).
-                    events.append(("reduce", uid, when, occ.planned, amount))
+                    if track:
+                        events.append(("reduce", uid, when, occ.planned, amount))
+                    elif opened.deal.amount is not None:
+                        _reduce_stream(opened, occ.planned, amount)
                 # Урезанное остаётся остатком просроченного вхождения со своим
                 # сроком (Q26); при съеденном долге поток рождается обрезанным
                 # (логика 05), у регулярного расхода растить нечего.
                 born = min(shortfall, max(room, Decimal(0)))
                 if shortfall > 0 and born > 0 and opened.deal.amount is not None:
-                    events.append(("birth", uid, when, occ.due, born, born,
-                                   occ.planned))
+                    if track:
+                        events.append(("birth", uid, when, occ.due, born, born,
+                                       occ.planned))
+                    elif all(stream[3] != occ.planned
+                             for stream in opened.streams):
+                        opened.streams.append([occ.due, born, born,
+                                               occ.planned])
             if amount <= 0:
-                return
+                return None
             pool -= amount
             paid += amount
+            shares = None
             if unit is not None:
                 # В котёл и в остаток участника одним платежом: копятся деньги
                 # и падает его остаток — как у любой сделки.
                 unit.pay(amount)
-                opened.pay(amount)
+                shares = _pay_opened(opened, amount, when)
             elif opened.deal.amount is not None:
-                opened.pay(amount)
+                shares = _pay_opened(opened, amount, when)
             payments.append(ScheduledPayment(
                 date=when, amount=amount, deal=uid,
                 counterparty=deal_holder_at(self.book, uid, when),
@@ -943,6 +994,7 @@ class _DealsRoll:
                 unit=opened.unit,
                 # Сделка с остатком — долг, регулярный расход — жизнь.
                 debt=opened.deal.amount is not None))
+            return shares
 
         # 1. Вхождения раньше начала долга — до процентов месяца. Дата такого
         # вхождения лежит вне отрезка начисления `[since, month_end]`: день-цикл
@@ -963,13 +1015,19 @@ class _DealsRoll:
         early_ids = {id(row) for row in early}
         rows = [row for row in rows if id(row) not in early_ids]
 
-        # 2. Проценты: до платежей месяца, по базе начисления каждой сделки.
-        # Их считает settlements (`accrued_interest`): слагаемые округлены
-        # там, второй раз проценты здесь не округляются. Начало долга позже
-        # начала окна — не ошибка: до него начисления нет, и отрезок месяца
-        # берётся с него.
+        # 2. Начисление месяца по сделкам: у сделок с раскладкой — прогулка
+        # по дням событий (проценты отрезками, платежи распределением, части и
+        # баланс двигаются синхронно, Q38); без раскладки — прежний путь
+        # месяц-целиком. Начисление считает settlements (`accrued_interest`,
+        # неустойка — `accrued_penalty`): слагаемые округлены там, второй раз
+        # здесь не округляются. Начало долга позже начала окна — не ошибка:
+        # до него начисления нет, и отрезок месяца берётся с него.
         interest = Decimal(0)
+        month_penalty = Decimal(0)
+        charged_parts: dict[str, Decimal] = {part: Decimal(0) for part in PARTS}
         month_end = _month_end(month)
+        # Базы обязательного процента: остатки на начало месяца, до процентов.
+        bases = {uid: o.balance for uid, o in self.open_deals.items()}
         # Движения месяца по сделкам — один проход, а не поиск на каждую сделку.
         moves_by_deal: dict[str, list[tuple[date, Decimal]]] = {}
         for m in self.book.movements:
@@ -980,12 +1038,15 @@ class _DealsRoll:
                 (m.date, _signed(opened.deal, m)))
             # Факт книги внутри окна гасит поток просрочки так же, как в книге:
             # связанный — своё вхождение, несвязанный — старые первыми (08-Т2).
-            if m.occurrence is not None:
-                if _along(opened.deal, m):
-                    events.append(("reduce", m.deal, m.date, m.occurrence,
-                                   m.amount))
-            elif _along(opened.deal, m):
-                events.append(("reduce", m.deal, m.date, None, m.amount))
+            # События нужны только прогону без раскладки — раскладочная сделка
+            # проводит свои события в прогулке.
+            if opened.parts is None:
+                if m.occurrence is not None:
+                    if _along(opened.deal, m):
+                        events.append(("reduce", m.deal, m.date, m.occurrence,
+                                       m.amount))
+                elif _along(opened.deal, m):
+                    events.append(("reduce", m.deal, m.date, None, m.amount))
         # Смены версии тела (передача долга) — своим месяцем, как движения:
         # долг вырос, и проценты обязаны идти на новое тело.
         shifts_by_deal: dict[str, list[tuple[date, Decimal]]] = {}
@@ -994,9 +1055,16 @@ class _DealsRoll:
             if opened is None or not month <= a.date <= month_end:
                 continue
             shifts_by_deal.setdefault(a.deal, []).append((a.date, a.delta))
+        charges_by_deal: dict[str, list] = {}
+        for c in self.book.charges:
+            if c.deal in self.open_deals and month <= c.date <= month_end:
+                charges_by_deal.setdefault(c.deal, []).append(c)
+
+        walked: set[str] = set()
         for uid, opened in self.open_deals.items():
             moves = moves_by_deal.get(uid, ())
             shifts = shifts_by_deal.get(uid, ())
+            charges = charges_by_deal.get(uid, ())
             unit = (self.open_units[opened.unit]
                     if opened.unit is not None else None)
             if unit is not None:
@@ -1005,6 +1073,14 @@ class _DealsRoll:
                 # участника — канон, он падает и движением, и платежами.
                 for _, signed in moves:
                     unit.pay(signed)
+            if opened.parts is not None:
+                walked.add(uid)
+                seg_interest, seg_penalty = self._walk_parts(
+                    opened, month, rows, moves, shifts, charges, events,
+                    bases[uid], pay_row, charged_parts, unit)
+                interest += seg_interest
+                month_penalty += seg_penalty
+                continue
             if opened.balance > 0:
                 # Платежи месяца — с суммой вхождения на начало месяца: на них
                 # считается дневная база, а платится по шагу 2 сколько выйдет.
@@ -1051,12 +1127,122 @@ class _DealsRoll:
         # этот остаток; остальные платежи дня на него не влияют.
         month_start = {uid: o.balance for uid, o in self.open_deals.items()}
 
-        # 3. Остальные обязательные вхождения месяца — по датам, из общего бюджета.
+        # 3. Остальные обязательные вхождения месяца — по датам, из общего
+        # бюджета; у сделок с раскладкой они уже оплачены в прогулке.
         for when, uid, occ in rows:
+            if uid in walked:
+                continue
             pay_row(when, uid, occ, month_start[uid])
         self.load = _MonthLoad(index, month, pool, paid, short, interest,
-                               payments, events)
+                               payments, events, month_penalty, charged_parts)
         return self.load
+
+    def _walk_parts(self, opened: _Open, month: date,
+                    rows: list[tuple[date, str, Occurrence]],
+                    moves: Sequence[tuple[date, Decimal]],
+                    shifts: Sequence[tuple[date, Decimal]],
+                    charges: Sequence, stream_events: Sequence[tuple],
+                    basis: Decimal, pay_row, charged_parts: dict,
+                    unit) -> tuple[Decimal, Decimal]:
+        """Месяц сделки с раскладкой: части и баланс двигаются синхронно (Q38).
+
+        Дни событий делят месяц на отрезки: проценты капает `accrued_interest`
+        на базе тело + проценты (правка 2) с платежами отрезка — их долей в
+        тело и проценты; неустойка капает по дням на потоках просрочки (08).
+        В день события: платёж распределяется правилом зоны по остаткам частей
+        на день перед платежом (03-Т3), смена тела и начисления-факты входят в
+        свою дату. Производные штрафы проводит `finish` по книге с записанными
+        платежами. Доли движений книги — по правилу зоны; движение против
+        сделки наполняет тело без разбивки (03-Т5).
+        """
+        deal = opened.deal
+        parts = opened.parts
+        month_end = _month_end(month)
+        base = parts[BODY] + parts[INTEREST]
+        cur = _accrual_since(deal, month)
+        share_payments: list[tuple[date, Decimal]] = []
+        my_events: dict[date, list[tuple]] = {}
+        for event in stream_events:
+            if event[1] == deal.uid:
+                my_events.setdefault(event[2], []).append(event)
+        row_by_day: dict[date, list[Occurrence]] = {}
+        for when, row_uid, occ in rows:
+            if row_uid == deal.uid:
+                row_by_day.setdefault(when, []).append(occ)
+        move_by_day: dict[date, Decimal] = {}
+        for when, signed in moves:
+            move_by_day[when] = move_by_day.get(when, Decimal(0)) + signed
+        shift_by_day: dict[date, Decimal] = {}
+        for when, delta in shifts:
+            shift_by_day[when] = shift_by_day.get(when, Decimal(0)) + delta
+        charge_by_day: dict[date, list] = {}
+        for c in charges:
+            charge_by_day.setdefault(c.date, []).append(c)
+        days = sorted(set(my_events) | set(row_by_day) | set(move_by_day)
+                      | set(shift_by_day) | set(charge_by_day))
+        interest = Decimal(0)
+        penalty = Decimal(0)
+
+        def advance(day_end: date) -> None:
+            """Начислить отрезок [cursor, day_end]: проценты и дни неустойки."""
+            nonlocal base, cur, interest, penalty
+            if day_end < cur:
+                return
+            in_range = [(when, share) for when, share in share_payments
+                        if cur <= when <= day_end]
+            seg = accrued_interest(deal, base, cur, day_end, in_range, ())
+            interest += seg
+            parts[INTEREST] += seg
+            day = cur
+            while day <= day_end:
+                day_penalty = _stream_day(opened, my_events.get(day, ()), day,
+                                          opened.penalty + penalty)
+                penalty += day_penalty
+                parts[PENALTY] += day_penalty
+                day += timedelta(days=1)
+            base += seg
+            for when, share in in_range:
+                base -= share
+            cur = day_end + timedelta(days=1)
+
+        for day in days:
+            if opened.parts is None:
+                break                     # раскладка рухнула — живём балансом
+            advance(day - timedelta(days=1))
+            _stream_day(opened, my_events.get(day, ()), day,
+                        opened.penalty + penalty)
+            for c in charge_by_day.get(day, ()):
+                parts[c.part] += c.amount
+                charged_parts[c.part] += c.amount
+                if c.part == BODY:
+                    base += c.amount       # начисление в тело — в базе с даты
+            delta = shift_by_day.get(day)
+            if delta:
+                parts[BODY] += delta
+                base += delta
+                if unit is not None:
+                    unit.target += delta
+            signed = move_by_day.get(day)
+            if signed:
+                if signed > 0:
+                    shares = _pay_opened(opened, signed, day)
+                    if shares:
+                        share_payments.append(
+                            (day, shares.get(BODY, Decimal(0))
+                             + shares.get(INTEREST, Decimal(0))))
+                else:
+                    parts[BODY] += -signed    # возврат без разбивки — в тело
+            for occ in row_by_day.get(day, ()):
+                shares = pay_row(day, deal.uid, occ, basis)
+                if shares:
+                    share_payments.append(
+                        (day, shares.get(BODY, Decimal(0))
+                         + shares.get(INTEREST, Decimal(0))))
+        if opened.parts is not None:
+            advance(month_end)
+            # Инвариант баланса: balance := Σ parts после шага месяца (Q38).
+            opened.balance = sum(parts.values(), Decimal(0))
+        return interest, penalty
 
     def finish(self, load: _MonthLoad, free: Decimal) -> list[ScheduledPayment]:
         """Шаг месяца: досрочки по стратегии, второй приоритет и итог месяца.
@@ -1077,7 +1263,8 @@ class _DealsRoll:
         consent = self.consent_to_second
 
         # 3. Свободные деньги — по стратегии, сначала обязательный график.
-        for target in _order(_targets(open_deals, open_units, False),
+        for target in _order(_targets(open_deals, open_units, False,
+                                      _month_end(month)),
                              self.strategy):
             if target.remaining <= 0:
                 continue
@@ -1104,7 +1291,8 @@ class _DealsRoll:
         # бюджета досрочек.
         second_open = _second_open(open_deals, open_units)
         if consent:
-            for target in _order(_targets(open_deals, open_units, True),
+            for target in _order(_targets(open_deals, open_units, True,
+                                          _month_end(month)),
                                  self.strategy):
                 if target.remaining <= 0:
                     continue
@@ -1122,24 +1310,29 @@ class _DealsRoll:
                 load.payments.append(payment)
                 prepayments.append(payment)
 
-        # 4. Неустойка месяца: потоки просрочки капают по правилу зоны (08-Т3),
-        # события месяца применяются по дням. Набранное входит в остаток сделки
-        # и в начисленное месяца (и в итог проката — одна величина с месяцами);
+        # 4. Неустойка месяца: потоки просрочки капают по правилу зоны (08-Т3).
+        # У сделок с раскладкой она натекла в прогулке begin — здесь добирают
+        # только сделки без раскладки. Набранное входит в остаток сделки и в
+        # начисленное месяца (и в итог проката — одна величина с месяцами);
         # нагрузка от него не растёт (R2-Q8).
-        penalty = Decimal(0)
+        penalty = load.penalty
         for opened in open_deals.values():
+            if opened.parts is not None:
+                continue                  # её неустойка — в прогулке begin
             accrued = _month_penalty(opened, load.stream_events, month)
             opened.balance += accrued
             opened.penalty += accrued
             penalty += accrued
-        load.interest += penalty
-        self.total_interest += penalty
+        self.total_interest += penalty - load.penalty
 
         for unit in open_units.values():
             if unit.closed:
                 for member in unit.members:
                     open_deals[member].balance = Decimal(0)
                     open_deals[member].streams = []
+                    if open_deals[member].parts is not None:
+                        open_deals[member].parts = {
+                            part: Decimal(0) for part in PARTS}
 
         # Поток при погашенном долге обрезается (Q26): сумма остатков потоков
         # не больше остатка сделки, новейшие режутся первыми (логика 05).
@@ -1154,6 +1347,45 @@ class _DealsRoll:
                 available -= take
             opened.streams = kept
 
+        # 5. Производные штрафы месяца: правила триггеров, применённые к книге
+        # с записанными платежами окна — те же факты, что видит канон (07-Т5).
+        # Запись проводится в месяц даты срабатывания (09-Т3), в часть правила.
+        month_end = _month_end(month)
+        augmented = Settlements(
+            counterparties=self.book.counterparties,
+            wallets=self.book.wallets, deals=self.book.deals,
+            movements=self.book.movements + self.recorded
+                      + [Movement(p.date, p.amount, p.deal,
+                                  occurrence=p.planned)
+                         for p in load.payments],
+            charges=self.book.charges, assignments=self.book.assignments,
+            edits=self.book.edits, observed=self.book.observed)
+        trigger_parts: dict[str, Decimal] = {part: Decimal(0) for part in PARTS}
+        for uid, opened in open_deals.items():
+            for case in trigger_charges(augmented, uid, month, month_end):
+                if opened.parts is not None:
+                    opened.parts[case.part] += case.amount
+                opened.balance += case.amount
+                trigger_parts[case.part] += case.amount
+
+        # Записанные платежи месяца: следующие месяцы считают штрафы по книге
+        # с ними — как канон после записи (конвенция равенства с каноном).
+        self.recorded += [Movement(p.date, p.amount, p.deal,
+                                   occurrence=p.planned)
+                          for p in load.payments]
+
+        # Раскладка начисленного месяца по видам (09-Т3): проценты, неустойка
+        # и начисления в свою часть; сумма равна `interest`.
+        interest_parts = {
+            INTEREST: load.interest + trigger_parts[INTEREST],
+            PENALTY: penalty + trigger_parts[PENALTY],
+            BODY: load.charged_parts[BODY] + trigger_parts[BODY],
+            COSTS: load.charged_parts[COSTS] + trigger_parts[COSTS],
+        }
+        month_interest = load.interest + penalty \
+            + sum(load.charged_parts.values(), Decimal(0)) \
+            + sum(trigger_parts.values(), Decimal(0))
+
         offer = (max(free - prepaid, Decimal(0))
                  if second_open and not consent else Decimal(0))
 
@@ -1163,9 +1395,12 @@ class _DealsRoll:
             units={uid: UnitMonth(u.target, u.pot) for uid, u in open_units.items()},
             total=sum((o.balance for o in open_deals.values() if not o.second),
                       Decimal(0)),
-            interest=load.interest, paid=paid, prepaid=prepaid,
+            interest=month_interest, paid=paid, prepaid=prepaid,
             short=load.short, offer=offer,
             payments=load.payments,
+            interest_parts=interest_parts,
+            parts={uid: dict(o.parts) for uid, o in open_deals.items()
+                   if o.parts is not None},
         ))
 
         first_done = _all_closed(open_deals, open_units)
@@ -1216,6 +1451,74 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
         if deals.done:
             break
     return deals.result(payoff_by_graph, payoff_by_graph_reason)
+
+
+def _pay_opened(opened: _Open, amount: Decimal, when: date) -> dict | None:
+    """Платёж в сделку: распределение по правилу зоны при известной раскладке.
+
+    Части гасятся по порядку зоны в пределах их остатков на день платежа
+    (`allocate_payment`), избыток несёт тело (Q33); баланс — сумма частей,
+    он падает тем же платежом (Q38). Раскладки нет — платёж идёт в баланс
+    целиком; правило на дату не задано — раскладка рушится в пробел (04-Т5),
+    дальше сделка живёт балансом. Возвращает раскладку «часть — сумма».
+    """
+    if opened.parts is None:
+        opened.balance -= amount
+        return None
+    rule = rule_at(opened.deal.allocations, when)
+    if rule is None:
+        opened.parts = None
+        opened.balance -= amount
+        return None
+    balances = {part: max(opened.parts.get(part, Decimal(0)), Decimal(0))
+                for part in PARTS}
+    shares = allocate_payment(amount, rule.order, balances)
+    for part, share in shares.items():
+        opened.parts[part] -= share
+    opened.balance -= amount            # = Σ parts после распределения
+    return shares
+
+
+def _reduce_stream(opened: _Open, planned: date, amount: Decimal) -> None:
+    """Плановый платёж гасит ровно свой поток, на чужие не переливается (08-Т2)."""
+    for stream in opened.streams:
+        if stream[3] == planned:
+            stream[2] = max(stream[2] - amount, Decimal(0))
+            return
+
+
+def _stream_day(opened: _Open, events: Sequence[tuple], day: date,
+                already: Decimal) -> Decimal:
+    """Один день потока: события дня применяются до начисления этого дня.
+
+    «reduce» гасит поток — плановый платёж ровно своё вхождение (08-Т2),
+    досрочка и несвязанный факт — старые по сроку первыми (FIFO, Q13); «birth»
+    рождает поток урезанного обязательства в его срок (Q26), если потока у
+    вхождения ещё нет. Начисление дня — та же формула канона под потолком,
+    накопленным по сделке (06-Т2).
+    """
+    for event in events:
+        if event[0] == "birth":
+            _, _, _, due, original, remaining, planned = event
+            if all(stream[3] != planned for stream in opened.streams):
+                opened.streams.append([due, original, remaining, planned])
+            continue
+        _, _, _, planned, amount = event
+        if planned is not None:
+            _reduce_stream(opened, planned, amount)
+        else:
+            left = amount
+            for stream in sorted(opened.streams, key=lambda s: s[0]):
+                if left <= 0:
+                    break
+                take = min(left, max(stream[2], Decimal(0)))
+                stream[2] -= take
+                left -= take
+    rule = rule_at(opened.deal.penalties, day)
+    if rule is None or not opened.streams:
+        return Decimal(0)
+    return accrued_penalty(rule, [tuple(s[:3]) for s in opened.streams],
+                           day, day, already=already)
 
 
 def _month_penalty(opened: _Open, events: Sequence[tuple],
@@ -1295,7 +1598,7 @@ def _prepayment(book: Settlements, open_deals: dict[str, _Open],
 
 
 def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
-             second: bool) -> list[_Target]:
+             second: bool, when: date) -> list[_Target]:
     """Куда могут пойти свободные деньги: сделки и копилки одного приоритета.
 
     Сделка с `prepay=False` в список не попадает: досрочка ей запрещена, и
@@ -1313,7 +1616,9 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
             continue                       # регулярный расход не досрочится
         if not opened.deal.prepay:
             continue                       # досрочка этой сделки запрещена
-        rows.append(_Target(uid, _rate(opened.deal), opened.balance, opened.pay))
+        rows.append(_Target(uid, _rate(opened.deal), opened.balance,
+                            lambda amount, opened=opened:
+                            _pay_opened(opened, amount, when)))
     for uid, unit in open_units.items():
         if unit.second != second:
             continue
@@ -1328,7 +1633,7 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
             # платёжом: у копилки платёж числится за первым участником
             # (`_prepayment`), и его остаток падает, как движение по нему.
             unit.pay(amount)
-            open_deals[unit.members[0]].pay(amount)
+            _pay_opened(open_deals[unit.members[0]], amount, when)
 
         rows.append(_Target(uid, rate, unit.remaining, pay))
     return rows

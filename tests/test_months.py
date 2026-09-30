@@ -36,7 +36,8 @@ def _deal(uid: str = "заём", amount: D | None = D("1000"), **kw) -> Deal:
     return Deal(**base)
 
 
-def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Settlements:
+def _book(*deals, counterparties=(), wallets=None, movements=(), edits=(),
+          charges=()) -> Settlements:
     from finance_core import LEGAL
     if wallets is None:
         wallets = [_wallet()]
@@ -48,6 +49,7 @@ def _book(*deals, counterparties=(), wallets=None, movements=(), edits=()) -> Se
         deals=list(deals),
         movements=list(movements),
         edits=list(edits),
+        charges=list(charges),
     )
 
 
@@ -873,3 +875,52 @@ def test_roll_months_cash_covers_the_window_not_the_month_cap():
     assert result.window.months == 24
     assert result.window.reason == WINDOW_DEBTS_CLOSED
     assert len(result.cash_months) == 24
+
+
+# --- раскладка начисленного месяца (09) ---------------------------------------
+
+def test_interest_parts_split_accruals_by_kind_and_month():
+    """Начисленное месяца раскладывается по видам; запись — в месяц события.
+
+    Неустойка капает на урезанных обязательствах (пул нулевой), штраф-триггер
+    срабатывает 10-го каждого месяца, начисление-факт в тело — 5 февраля:
+    каждая часть месяца получает своё, а сумма частей равна `interest`.
+    """
+    from finance_core import (BODY, PARTS, PENALTY, AllocationRule, Charge,
+                              PenaltyCap, PenaltyRule, PenaltyStep,
+                              TriggerRule, TRIGGER_OVERDUE, accrued_penalty,
+                              deal_balance, deal_parts)
+    rule = PenaltyRule(steps=(PenaltyStep(0, D("0.001")),),
+                       cap=PenaltyCap("без потолка"))
+    deal = _deal("заём", amount=D("30000"),
+                 schedule=_rule(days=(10,), payment=D("1000"),
+                                shift_weekend=False),
+                 allocations=(AllocationRule(PARTS),),
+                 penalties=(rule,),
+                 triggers=(TriggerRule(uid="штраф", condition=TRIGGER_OVERDUE,
+                                       part=PENALTY, basis="не уплатил в срок",
+                                       charge_amount=D("200")),))
+    book = _book(deal,
+                 charges=[Charge("дозаем", date(2026, 2, 5), D("100"), "заём",
+                                 BODY, basis="решение")])
+    roll = roll_deals(book, START, D(0), max_months=2,
+                      budgets={1: D("-1000"), 2: D("-1000")})
+    jan_streams = [(date(2026, 1, 10), D("1000"), D("1000"))]
+    feb_streams = jan_streams + [(date(2026, 2, 10), D("1000"), D("1000"))]
+    first, second = roll.months
+    # Январь: неустойка потока (11–31 января) плюс штраф 200; тела нет.
+    assert first.interest_parts[PENALTY] == accrued_penalty(
+        rule, jan_streams, date(2026, 1, 1), date(2026, 1, 31)) + D("200.00")
+    assert first.interest_parts[BODY] == D("0")
+    # Февраль: свой поток и штраф, начисление-факт — в тело месяца события.
+    assert second.interest_parts[BODY] == D("100.00")
+    assert second.interest_parts[PENALTY] == accrued_penalty(
+        rule, feb_streams, date(2026, 2, 1), date(2026, 2, 28)) + D("200.00")
+    for month in (first, second):
+        assert sum(month.interest_parts.values()) == month.interest
+        assert month.interest_parts["проценты"] == D("0")
+    # Равенство с каноном держится и на этой книге.
+    for index, month in enumerate((first, second)):
+        on = (date(2026, 1, 31), date(2026, 2, 28))[index]
+        assert month.balances["заём"] == deal_balance(book, "заём", on)
+        assert month.parts["заём"] == deal_parts(book, "заём", on)
