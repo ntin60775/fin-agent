@@ -1,7 +1,7 @@
 """Тесты взаиморасчётов — синтетические фикстуры, без личных данных."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal as D
 import pytest
 
@@ -17,7 +17,7 @@ from finance_core import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
                           Settlements, TriggerRule, Wallet, accrued_interest,
                           allocate_payment, beneficiary, counterparty_balance,
                           counterparty_role, deal_amount_at, deal_balance,
-                          deal_holder_at, funding_wallet, liquidity, occurrences,
+                          deal_holder_at, deal_parts, funding_wallet, liquidity, occurrences,
                           payment_channel, roll_deals, rule_at, run, validate)
 
 START = date(2026, 1, 1)
@@ -1545,3 +1545,115 @@ def test_two_streams_may_share_one_due_date():
                                                  date(2026, 2, 10),
                                                  date(2026, 2, 10)]
     assert overdue_amount(book, "заём", date(2026, 2, 11)) == D("3000")
+
+
+# --- неустойка в каноне (06) --------------------------------------------------
+
+def _penalized_book(movements: list[Movement] | None = None,
+                    **deal) -> Settlements:
+    """Сделка с графиком, шкалой неустойки и порядком распределения: раскладка известна."""
+    base = dict(uid="заём", title="Заём", counterparty="банк", amount=D("3000"),
+                start=START, rate_per_year=D("0"),
+                schedule=_rule(days=(10,), payment=D("1000")),
+                penalties=(PenaltyRule(steps=(PenaltyStep(0, D("0.001")),),
+                                       cap=PenaltyCap(CAP_NONE)),),
+                allocations=(AllocationRule((PENALTY, BODY, INTEREST, COSTS)),))
+    base.update(deal)
+    return Settlements(counterparties=[_counterparty()], deals=[_deal(**base)],
+                       movements=list(movements or []))
+
+
+def test_penalty_accrues_into_its_part_and_the_canon():
+    """Неустойка — часть долга: канон и сумма частей выросли на одно число (06-Т3)."""
+    book = _penalized_book()
+    validate(book)
+    parts = deal_parts(book, "заём", date(2026, 1, 15))
+    assert parts[PENALTY] == D("5.00")       # 11–15 января: пять дней по 1,00
+    assert parts[BODY] == D("3000")
+    assert deal_balance(book, "заём", date(2026, 1, 15)) == D("3005.00")
+    assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 1, 15))
+    # В день срока и раньше просрочки нет — неустойки тоже нет.
+    assert deal_parts(book, "заём", date(2026, 1, 10))[PENALTY] == D("0")
+
+
+def test_penalty_day_of_payment_moves_part_stream_and_canon_together():
+    """Частичное погашение меняет ход неустойки с той же даты; раскладка сходится."""
+    book = _penalized_book(movements=[Movement(date(2026, 1, 13), D("400"), "заём",
+                                               occurrence=date(2026, 1, 10))])
+    validate(book)
+    parts = deal_parts(book, "заём", date(2026, 1, 15))
+    assert parts[PENALTY] == D("1.80")       # 3,80 начислено минус 2,00 в неустойку
+    assert parts[BODY] == D("2602.00")       # 3000 минус 398 после неустойки
+    assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 1, 15))
+
+
+def test_backdated_on_time_payment_removes_the_penalty_whole():
+    """Платёж в срок задним числом: просрочки нет — неустойка откатилась сама (Q13)."""
+    book = _penalized_book(movements=[Movement(date(2026, 1, 10), D("1000"), "заём",
+                                               occurrence=date(2026, 1, 10))])
+    validate(book)
+    parts = deal_parts(book, "заём", date(2026, 1, 20))
+    assert parts[PENALTY] == D("0")
+    assert parts[BODY] == D("2000")
+    assert deal_balance(book, "заём", date(2026, 1, 20)) == D("2000")
+
+
+def test_penalty_cap_cuts_its_part():
+    """Потолок-сумма обрезает часть «неустойка»; канон — сумма частей (06-Т2)."""
+    rule = PenaltyRule(steps=(PenaltyStep(0, D("0.001")),),
+                       cap=PenaltyCap(CAP_SUM, D("2.50")))
+    book = _penalized_book(penalties=(rule,))
+    validate(book)
+    assert deal_parts(book, "заём", date(2026, 1, 20))[PENALTY] == D("2.50")
+    assert deal_balance(book, "заём", date(2026, 1, 20)) == D("3002.50")
+
+
+def test_penalty_does_not_enter_the_interest_base():
+    """Неустойка капает сама и в базу процентов не входит (Q7, правка 2)."""
+    plain = _penalized_book(rate_per_year=D("0.12"), penalties=())
+    grown = _penalized_book(rate_per_year=D("0.12"))
+    validate(plain)
+    validate(grown)
+    parts_plain = deal_parts(plain, "заём", date(2026, 1, 15))
+    parts_grown = deal_parts(grown, "заём", date(2026, 1, 15))
+    assert parts_grown[INTEREST] == parts_plain[INTEREST]
+    assert parts_grown[PENALTY] == D("5.00")
+    assert parts_plain[PENALTY] == D("0")
+
+
+def test_an_assignment_inside_the_window_resegments_the_penalty():
+    """Цессия меняет долг и обрезку — дата передачи делит начисление (ревью 06).
+
+    Платёж вне графика съедает долг: обрезка активна; передача с дельтой вниз
+    режет глубже с её даты. Ожидание — два отрезка, каждый по потокам своей
+    даты: сегментация обязана увидеть дату передачи.
+    """
+    from finance_core import Assignment, accrued_penalty, overdue_amounts
+    deal = _deal("заём", counterparty="коллектор", amount=D("8000"),
+                 start=START, rate_per_year=D("0.12"),
+                 schedule=_rule(days=(10, 20), payment=D("1000")),
+                 penalties=(PenaltyRule(steps=(PenaltyStep(0, D("0.001")),),
+                                        cap=PenaltyCap(CAP_NONE)),),
+                 allocations=(AllocationRule((PENALTY, BODY, INTEREST, COSTS)),))
+    book = Settlements(
+        counterparties=[_counterparty(), _counterparty(uid="коллектор",
+                                                       subtype="ПКО")],
+        deals=[deal],
+        movements=[Movement(date(2026, 1, 15), D("7500"), "заём")],
+        assignments=[Assignment(date(2026, 1, 25), "заём", from_holder="банк",
+                                to_holder="коллектор", amount=D("10000"),
+                                delta=D("-2000"))])
+    validate(book)
+    rule = deal.penalties[0]
+    # Эталон — подневный пересчёт: на каждый день свежие потоки и один день
+    # формулы. Сегментация движка (формула на постоянных отрезках, по дням там,
+    # где обрезка меняется) обязана дать то же число.
+    expected = D("0")
+    day = date(2026, 1, 21)
+    while day <= date(2026, 1, 31):
+        expected += accrued_penalty(rule, overdue_amounts(book, "заём", day),
+                                    day, day, already=expected)
+        day += timedelta(days=1)
+    parts = deal_parts(book, "заём", date(2026, 1, 31))
+    assert parts[PENALTY] == expected
+    assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 1, 31))

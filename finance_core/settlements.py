@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import calendar
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -1142,6 +1142,9 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
     плюс проценты (правка 2): платежи входят в неё своей долей в тело/проценты,
     начисления в тело — тем же списком приростов, что и дельты передачи
     (04-Т3). Начисление считает та же `accrued_interest`, окно от начала долга.
+    Неустойка — своя производная: капает по правилу зоны на потоках просрочки
+    (`_penalty_of`), входит в свою часть начисленным и не входит в базу
+    процентов; день платежа видит её начисленной до прошлого дня (06-Т3).
     """
     deal = _deal(book, deal_uid)
     if deal.amount is None or deal.direction == OWED_TO_ME:
@@ -1152,6 +1155,7 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
     if not deal.allocations and not any(m.allocation for m in movements):
         return None                # раскладка не определена — пробел (Q34)
     since = deal.start
+    penalty = _penalty_of(book, deal_uid, on)
     charged = {part: Decimal(0) for part in PARTS}
     paid = {part: Decimal(0) for part in PARTS}
     into_base: list[tuple[date, Decimal]] = []   # доли платежей в тело+проценты
@@ -1194,7 +1198,8 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
                 BODY: max(deal_amount_at(book, deal_uid, movement.date)
                           + charged[BODY] - paid[BODY], Decimal(0)),
                 INTEREST: max(interest(day_before) - paid[INTEREST], Decimal(0)),
-                PENALTY: max(charged[PENALTY] - paid[PENALTY], Decimal(0)),
+                PENALTY: max(charged[PENALTY] + penalty(day_before)
+                             - paid[PENALTY], Decimal(0)),
                 COSTS: max(charged[COSTS] - paid[COSTS], Decimal(0)),
             }
             shares = allocate_payment(movement.amount, rule.order, balances)
@@ -1206,7 +1211,7 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
 
     return {BODY: deal_amount_at(book, deal_uid, on) + charged[BODY] - paid[BODY],
             INTEREST: interest(on) - paid[INTEREST],
-            PENALTY: charged[PENALTY] - paid[PENALTY],
+            PENALTY: charged[PENALTY] + penalty(on) - paid[PENALTY],
             COSTS: charged[COSTS] - paid[COSTS]}
 
 
@@ -1390,6 +1395,226 @@ def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
         left = month_start + accrued - paid + moved
         total += accrued
     return total
+
+
+def _step_rate(steps: Sequence[PenaltyStep], age: int) -> Decimal | None:
+    """Ставка ступени, действующей на возраст просрочки; None — ступени нет.
+
+    Ступени идут по возрастанию порогов (валидация), действует последняя
+    с порогом не больше возраста: возраст ровно N — ступень «от N»
+    (включительно). Возраст меньше первой ступени не покрывает ни одна —
+    за такой день неустойки нет.
+    """
+    acting: Decimal | None = None
+    for step in steps:
+        if age < step.days:
+            break
+        acting = step.rate
+    return acting
+
+
+def accrued_penalty(rule: PenaltyRule, overdues: Sequence[tuple[date, Decimal, Decimal]],
+                    since: date, until: date,
+                    payments: Sequence[tuple[date, Decimal]] = (),
+                    already: Decimal = Decimal(0)) -> Decimal:
+    """Начисленная неустойка за отрезок `[since, until]` включительно.
+
+    Одна формула на оба носителя: канон (`_parts_at`) и прокат считают ею же,
+    поэтому «долг на дату» и «сколько набежало» сходятся с проекцией по
+    построению. Формула — по дням просрочки (Q13): за каждый день база дня —
+    остаток потока после платежей этого дня — умножается на ставку ступени,
+    действующей на возраст этого потока; возраст дня — число дней со дня после
+    срока (первый день неустойки — день после срока, день срока и раньше не
+    начисляют). Каждое слагаемое округляется `model.kopek` `HALF_UP` — второго
+    пути округления нет.
+
+    `rule` — форма из тикета 02: шкала ступеней и потолок одним носителем.
+    `overdues` — потоки просрочек тройками «дата срока — исходная просроченная
+    сумма — текущий остаток» (даёт `overdue_amounts`): исходная — база потолка
+    «доля просроченной суммы» (Q36), текущий остаток — база дня. Потолок статичен
+    и монотонен (Q7, правка 1): «без потолка» не режет, «сумма» и «доля» лишь
+    обрезают прирост (день даёт `min(дневное, потолок − накопленное)`) — уже
+    набранное погашением просрочки не списывается. Потолок округлён тем же
+    `model.kopek` — отдельной функции округления нет.
+
+    `payments` — погашения просрочек отрезка парами «дата — сумма»: гасят
+    потоки старыми первыми (Q13), день платежа уменьшает базу до начисления за
+    этот день. `already` — набранное до отрезка: потолок считается по
+    накопленному сделки, отрезок — его продолжение (прокат зовёт по месяцам).
+    Каждое потокодневное слагаемое (остаток потока × ставка дня) округляется
+    своей копейкой. Начисление задним числом пересчитывается само: производная
+    не хранится и сторно не пишет (R3-Q11).
+    """
+    if rule is None or until < since or not overdues:
+        return Decimal(0)
+    streams = sorted(([due, original, remaining]
+                      for due, original, remaining in overdues),
+                     key=lambda stream: stream[0])
+    by_day: dict[date, Decimal] = {}
+    for when, amount in payments:
+        by_day[when] = by_day.get(when, Decimal(0)) + amount
+    if rule.cap.kind == CAP_NONE:
+        cap: Decimal | None = None
+    elif rule.cap.kind == CAP_SUM:
+        cap = kopek(rule.cap.value)
+    elif rule.cap.kind == CAP_SHARE:   # доля исходных просроченных сумм (Q36)
+        cap = kopek(rule.cap.value * sum((stream[1] for stream in streams),
+                                         Decimal(0)))
+    else:
+        raise ValueError(f"правило неустойки: потолок {rule.cap.kind!r} не входит "
+                         f"в набор форм: {'; '.join(CAPS)}")
+    total = Decimal(0)
+    day = since
+    while day <= until:
+        left = by_day.get(day, Decimal(0))
+        for stream in streams:                     # старые первыми (Q13)
+            if left <= 0:
+                break
+            take = min(left, max(stream[2], Decimal(0)))
+            stream[2] -= take
+            left -= take
+        accrued = Decimal(0)
+        for due, _original, remaining in streams:
+            if remaining <= 0 or day <= due:
+                continue
+            rate = _step_rate(rule.steps, (day - due).days)
+            if rate:
+                accrued += kopek(remaining * rate)
+        if cap is not None:
+            accrued = min(accrued, max(cap - already - total, Decimal(0)))
+        total += accrued
+        day += timedelta(days=1)
+    return total
+
+
+def _sans_penalty(book: Settlements, deal_uid: str, on: date) -> Decimal:
+    """Остаток долга без производной неустойки — прямой путь канона.
+
+    Обрезка потоков просрочки считается по нему: неустойка растит долг, долг
+    обрезает потоки, потоки кормят неустойку — круг производной, который рвётся
+    самым внешним слагаемым (обрезка cap-ит поток долгом без самой неустойки).
+    Платежи входят в базу процентов целиком (04-Т5): раскладка тут не
+    используется, число обрезки не зависит от распределения, — поэтому на
+    книгах со ставкой и начислениями в тело оно может отличаться от канона-
+    суммы-частей на проценты от начисленного в тело.
+    """
+    amount = deal_amount_at(book, deal_uid, on)
+    if amount is None:
+        return Decimal(0)
+    deal = _deal(book, deal_uid)
+    movements = [m for m in book.movements if m.deal == deal_uid and m.date <= on]
+    return kopek(amount - _paid(deal, movements)
+                 + _accrued(book, deal, movements, on)
+                 + _charged(book, deal_uid, on))
+
+
+def _plan_since(deal: Deal, on: date) -> date:
+    """С какого времени искать вхождения сделки: начала долга и ряда, иначе прошлость."""
+    rule = deal.schedule
+    marks = [d for d in (deal.start, rule.start if rule else None,
+                         rule.first.date if rule and rule.first else None) if d]
+    return min(marks) if marks else date(on.year - 20, on.month, 1)
+
+
+def _penalty_bounds(book: Settlements, deal: Deal, until: date) -> list[date]:
+    """Дни, на которых меняются потоки просрочки: рождения, платежи, правки, версии.
+
+    Между соседними днями потоки постоянны, и отрезок считает одна формула.
+    Рождение потока — день после срока (там поток появляется); платежи и правки
+    меняют остатки и сроки; версии правил — ставку; передачи долга — долг, а с
+    ним и обрезку потоков (единственный немонотонный меняетель долга без
+    движения). Сюда входит и сам `until`.
+    """
+    days = {until}
+    for occ in occurrences(book, deal.uid, _plan_since(deal, until), until):
+        if occ.due is not None and occ.due < until:
+            days.add(occ.due + timedelta(days=1))
+    for m in book.movements:
+        if m.deal == deal.uid and m.date <= until:
+            days.add(m.date)
+    for a in book.assignments:
+        if a.deal == deal.uid and a.date <= until:
+            days.add(a.date)
+    for edit in book.edits:
+        if edit.deal != deal.uid:
+            continue
+        if edit.planned <= until:
+            days.add(edit.planned)
+        if edit.moved_to is not None and edit.moved_to <= until:
+            days.add(edit.moved_to)
+    for version in deal.penalties:
+        if version.effective is not None and version.effective <= until:
+            days.add(version.effective)
+    return sorted(days)
+
+
+def _penalty_of(book: Settlements, deal_uid: str,
+                until: date) -> Callable[[date], Decimal]:
+    """Считальщик неустойки: отвечает, сколько начислено к концу дня `day ≤ until`.
+
+    Сегменты между сменами потоков считает `accrued_penalty` (одна формула);
+    сегмент, внутри которого обрезка меняет потоки (долг растёт процентами и
+    отрезает меньше), проходится по дням. Контрольные суммы сегментов
+    запоминаются, поэтому вопрос «сколько на дату» не пересчитывает историю
+    целиком заново. Закрытая функция канона: прокат ведёт свою жизнь по тем же
+    формулам, но со своим состоянием.
+    """
+    deal = _deal(book, deal_uid)
+    if (not deal.penalties or deal.amount is None
+            or deal.direction == OWED_TO_ME):
+        return lambda day: Decimal(0)
+
+    bounds = _penalty_bounds(book, deal, until)
+    # (начало, конец, правило, потоки на начало, накопленное по дням | None,
+    #  накопленное к концу сегмента)
+    runs: list[tuple[date, date, PenaltyRule, tuple, dict[date, Decimal] | None,
+                     Decimal]] = []
+    total = Decimal(0)
+    # Последняя граница — сам `until`: за ним виртуальный день, чтобы его день
+    # тоже попал в сегмент (последний день неустойки — дата расчёта включительно).
+    following = bounds[1:] + [until + timedelta(days=1)]
+    for a, nxt in zip(bounds, following):
+        b = min(nxt - timedelta(days=1), until)
+        rule = rule_at(deal.penalties, a)
+        if rule is None:
+            continue
+        streams = overdue_amounts(book, deal_uid, a)
+        if not streams:
+            continue
+        streams_end = overdue_amounts(book, deal_uid, b)
+        if streams == streams_end:             # потоки постоянны — одна формула
+            total += accrued_penalty(rule, streams, a, b, already=total)
+            runs.append((a, b, rule, streams, None, total))
+        else:                                  # обрезка режет внутри — по дням
+            daily: dict[date, Decimal] = {}
+            day = a
+            while day <= b:
+                total += accrued_penalty(rule,
+                                         overdue_amounts(book, deal_uid, day),
+                                         day, day, already=total)
+                daily[day] = total
+                day += timedelta(days=1)
+            runs.append((a, b, rule, streams, daily, total))
+
+    def accrued_to(day: date) -> Decimal:
+        if day >= until:
+            return total
+        answer = Decimal(0)
+        for a, b, rule, streams, daily, end_cum in runs:
+            if day < a:
+                break
+            if day >= b:
+                answer = end_cum
+                continue
+            if daily is not None:              # накопленное по дням посчитано
+                answer = daily[day]
+            else:
+                answer = answer + accrued_penalty(rule, streams, a, day,
+                                                  already=answer)
+            break
+        return answer
+
+    return accrued_to
 
 
 def _sides(book: Settlements, counterparty: str, on: date) -> tuple[Decimal, Decimal]:
@@ -1694,17 +1919,16 @@ def overdue_amounts(book: Settlements, deal_uid: str,
 
     Остатки считаются на фактах до `on` включительно: движение задним числом
     пересчитывает состояние на любой дате, сторно не нужно. Сумма потоков
-    ограничена каноном: когда платёж вне графика съел долг, обрезаются самые
-    новые потоки — старые (с бо́льшим возрастом) сохраняются, как требует
-    хронология (Q13).
+    ограничена долгом **без производной неустойки** (`_sans_penalty`):
+    неустойка растит долг, долг обрезает потоки, потоки кормят неустойку —
+    круг производной, и обрезка считается по долгу без неё самой. Когда платёж
+    вне графика съел долг, обрезаются самые новые потоки — старые (с бо́льшим
+    возрастом) сохраняются, как требует хронология (Q13).
     """
     deal = _deal(book, deal_uid)
     if deal.amount is None or deal.direction == OWED_TO_ME:
         return ()
-    rule = deal.schedule
-    bounds = [d for d in (deal.start, rule.start if rule else None,
-                          rule.first.date if rule and rule.first else None) if d]
-    since = min(bounds) if bounds else date(on.year - 20, on.month, 1)
+    since = _plan_since(deal, on)
     # Состояние на дату — пересчёт на фактах до `on`: производная не помнит
     # прошлого, она считается заново (derived-balances).
     past = Settlements(counterparties=book.counterparties, wallets=book.wallets,
@@ -1728,12 +1952,12 @@ def overdue_amounts(book: Settlements, deal_uid: str,
             if m.deal == deal_uid and m.occurrence == occ.planned and m.date <= due:
                 paid_by_due += m.amount if _along(deal, m) else -m.amount
         original = max(occ.amount - paid_by_due, Decimal(0))
-        canon = deal_balance(book, deal_uid, due + timedelta(days=1))
-        if canon is not None and original > canon:
-            original = max(canon, Decimal(0))
+        debt = _sans_penalty(book, deal_uid, due + timedelta(days=1))
+        if original > debt:
+            original = max(debt, Decimal(0))
         streams.append((due, original, remaining))
     streams.sort(key=lambda stream: stream[0])
-    available = deal_balance(book, deal_uid, on) or Decimal(0)
+    available = _sans_penalty(book, deal_uid, on)
     kept: list[tuple[date, Decimal, Decimal]] = []
     for due, original, remaining in streams:
         if available <= 0:

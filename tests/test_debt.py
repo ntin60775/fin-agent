@@ -1,13 +1,15 @@
 """Тесты долговой стороны — синтетические фикстуры, без личных данных."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_CEILING
 from decimal import Decimal as D
 
-from finance_core import (BODY, LEGAL, PARTS, PENALTY, AllocationRule, Charge,
-                          Counterparty, Deal, Movement, ScheduleRule,
-                          Settlements, Wallet, compare_deal_strategies,
+from finance_core import (BODY, CAP_NONE, CAP_SHARE, CAP_SUM, LEGAL, PARTS,
+                          PENALTY, AllocationRule, Charge, Counterparty, Deal,
+                          Movement, PenaltyCap, PenaltyRule, PenaltyStep,
+                          ScheduleRule, Settlements, Wallet,
+                          accrued_penalty, compare_deal_strategies,
                           overdue_amount, roll_deals)
 from finance_core.settlements import _principal_left
 
@@ -219,3 +221,94 @@ def test_a_paid_off_debt_has_no_overdue_even_with_a_live_schedule():
                        schedule=_rule(days=(10,), payment=D("500"))),
                  movements=[Movement(date(2026, 1, 5), D("2000"), "заём")])
     assert overdue_amount(book, "заём", date(2026, 1, 11)) == D("0")
+
+
+# --- формула неустойки (06) --------------------------------------------------
+
+def _penalty_rule(*steps, cap=None) -> PenaltyRule:
+    """Правило неустойки: ступени и потолок; без явного потолка — «без потолка»."""
+    return PenaltyRule(steps=tuple(steps),
+                       cap=cap if cap is not None else PenaltyCap(CAP_NONE))
+
+
+DUE = date(2026, 1, 10)
+STREAM = [(DUE, D("1000"), D("1000"))]
+
+
+def test_penalty_accrues_by_days_from_the_day_after_the_due():
+    """Замер: ставка ступени × база дня; первый день — после срока, последний —
+    дата расчёта включительно; пустой отрезок и пустые потоки — ноль."""
+    rule = _penalty_rule(PenaltyStep(0, D("0.001")))
+    assert accrued_penalty(rule, STREAM, DUE, DUE) == D("0")
+    first = DUE + timedelta(days=1)
+    assert accrued_penalty(rule, STREAM, first, first) == D("1.00")
+    assert accrued_penalty(rule, STREAM, first, date(2026, 1, 15)) == D("5.00")
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 20), DUE) == D("0")
+    assert accrued_penalty(rule, (), first, date(2026, 1, 15)) == D("0")
+
+
+def test_penalty_step_applies_from_its_own_day_inclusively():
+    """Возраст ровно N — ступень «от N»: до порога одна ставка, с порога другая."""
+    rule = _penalty_rule(PenaltyStep(0, D("0.001")), PenaltyStep(3, D("0.002")))
+    # 11–12 января — возраст 1–2, по 1,00; 13–15 — возраст 3–5, по 2,00.
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 11),
+                           date(2026, 1, 15)) == D("8.00")
+
+
+def test_penalty_day_of_payment_reduces_base_before_that_days_accrual():
+    """День платежа уменьшает базу до начисления за этот день — перенос стоит денег."""
+    rule = _penalty_rule(PenaltyStep(0, D("0.001")))
+    # 11–12 января по 1,00; 13-го погашено 400 — база 600, далее три дня по 0,60.
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 11), date(2026, 1, 15),
+                           payments=[(date(2026, 1, 13), D("400"))]) == D("3.80")
+
+
+def test_penalty_payments_settle_the_oldest_stream_first():
+    """Платёж гасит самые старые просрочки первыми (Q13)."""
+    rule = _penalty_rule(PenaltyStep(0, D("0.001")))
+    streams = [(date(2026, 1, 1), D("500"), D("500")),
+               (DUE, D("500"), D("500"))]
+    # 11–14 января по 1,00; 15-го гасится старый поток целиком, у нового 400 → 0,40.
+    assert accrued_penalty(rule, streams, date(2026, 1, 11), date(2026, 1, 15),
+                           payments=[(date(2026, 1, 15), D("600"))]) == D("4.40")
+
+
+def test_penalty_cap_sum_cuts_growth_and_keeps_it_monotone():
+    """Потолок-сумма обрезает прирост: набранное не растёт и не списывается."""
+    rule = _penalty_rule(PenaltyStep(0, D("0.001")),
+                         cap=PenaltyCap(CAP_SUM, D("3")))
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 11),
+                           date(2026, 1, 15)) == D("3.00")
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 11),
+                           date(2026, 2, 28)) == D("3.00")
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 11), date(2026, 1, 20),
+                           payments=[(date(2026, 1, 16), D("900"))]) == D("3.00")
+
+
+def test_penalty_cap_share_takes_original_overdue_amounts():
+    """Доля считается от исходных просроченных сумм (Q36), не от остатков."""
+    rule = _penalty_rule(PenaltyStep(0, D("0.001")),
+                         cap=PenaltyCap(CAP_SHARE, D("0.001")))
+    streams = [(date(2026, 1, 1), D("500"), D("500")), (DUE, D("1000"), D("300"))]
+    # Потолок 0,001 × 1500 = 1,50; два дня по 0,80 дают 1,60 — обрезано до 1,50.
+    assert accrued_penalty(rule, streams, date(2026, 1, 11),
+                           date(2026, 1, 20)) == D("1.50")
+
+
+def test_penalty_cap_is_rounded_like_every_accrual():
+    """Потолок округлён тем же kopek HALF_UP: 3,005 → 3,01 — второго пути нет."""
+    rule = _penalty_rule(PenaltyStep(0, D("0.001")),
+                         cap=PenaltyCap(CAP_SUM, D("3.005")))
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 11),
+                           date(2026, 1, 20)) == D("3.01")
+
+
+def test_penalty_zero_rate_accrues_nothing_and_already_keeps_the_cap():
+    """Нулевая ставка не начисляет; набранное до отрезка входит в потолок."""
+    rule = _penalty_rule(PenaltyStep(0, D("0")))
+    assert accrued_penalty(rule, STREAM, date(2026, 1, 11),
+                           date(2026, 1, 15)) == D("0")
+    capped = _penalty_rule(PenaltyStep(0, D("0.001")),
+                           cap=PenaltyCap(CAP_SUM, D("3")))
+    assert accrued_penalty(capped, STREAM, date(2026, 1, 11), date(2026, 1, 15),
+                           already=D("2.50")) == D("0.50")
