@@ -3,18 +3,19 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal as D
-from types import SimpleNamespace
-
 import pytest
 
-from finance_core import (BOTH, CREDITOR, DEBTOR, IN, LEGAL, OWED_TO_ME, PARTS,
-                          PENALTY, PERSON, STARTER_GROUPS, Account, Assignment,
-                          Charge, Counterparty, Deal, Movement, Payment, Scenario,
-                          ScheduleRule, Settlements, Wallet, accrued_interest,
-                          beneficiary, counterparty_balance, counterparty_role,
-                          deal_amount_at, deal_balance, deal_holder_at,
-                          funding_wallet, liquidity, payment_channel, roll_deals,
-                          run, validate)
+from finance_core import (BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM, CREDITOR,
+                          DEBTOR, IN, LEGAL, OWED_TO_ME, PARTS, PENALTY, PERSON,
+                          STARTER_GROUPS, TRIGGERS, TRIGGER_OVERDUE,
+                          TRIGGER_OVERDUE_DAYS, TRIGGER_OVERDUE_SUM, Account,
+                          AllocationRule, Assignment, Charge, Counterparty, Deal,
+                          Movement, Payment, PenaltyCap, PenaltyRule, PenaltyStep,
+                          Scenario, ScheduleRule, Settlements, TriggerRule, Wallet,
+                          accrued_interest, beneficiary, counterparty_balance,
+                          counterparty_role, deal_amount_at, deal_balance,
+                          deal_holder_at, funding_wallet, liquidity,
+                          payment_channel, roll_deals, rule_at, run, validate)
 
 START = date(2026, 1, 1)
 
@@ -548,9 +549,17 @@ def test_one_event_is_one_record():
     assert deal_balance(two, "заём", date(2026, 3, 31)) == D("13000")
 
 
+def _trigger_rule(uid: str = "правило", **kw) -> TriggerRule:
+    """Триггер-правило по умолчанию: штраф 500,00 в неустойку, порогов нет."""
+    base = dict(uid=uid, condition=TRIGGER_OVERDUE, part=PENALTY,
+                basis="штраф", charge_amount=D("500"))
+    base.update(kw)
+    return TriggerRule(**base)
+
+
 def test_a_charge_reference_to_a_rule_must_be_declared():
     """Ссылка на правило триггера сверяется с правилами сделки, а не выдумывается."""
-    rule = SimpleNamespace(uid="правило")        # правило — запись с уидом (02)
+    rule = _trigger_rule()
     validate(_charge_book(_charge(trigger="правило"), triggers=(rule,)))
     with pytest.raises(ValueError, match="правило триггера 'нет-такого' не объявлено"):
         validate(_charge_book(_charge(trigger="нет-такого"), triggers=(rule,)))
@@ -561,7 +570,7 @@ def test_a_charge_reference_to_a_rule_must_be_declared():
 
 def test_one_trigger_case_is_one_record():
     """Случай правила — (сделка, уид правила, дата): второй факт — дубль."""
-    rule = SimpleNamespace(uid="правило")
+    rule = _trigger_rule()
     twice = _charge_book(_charge(uid="суд", trigger="правило"),
                          _charge(uid="суд-2", trigger="правило"), triggers=(rule,))
     with pytest.raises(ValueError, match="случай правила 'правило' от 2026-03-10"):
@@ -941,3 +950,172 @@ def test_the_model_holds_together():
     # уже день начисления — 50 000 × 0,2 / 12 / 31.
     assert counterparty_balance(book, "банк", START) == D("50026.88")
     assert deal_balance(book, "аренда", START) is None
+
+
+# --- правила зоны: формы, версии, валидация (02) -----------------------------
+
+def _penalty(*steps, cap=..., effective=None) -> PenaltyRule:
+    """Правило неустойки: ступени и потолок; без потолка форма не живёт."""
+    if cap is ...:
+        cap = PenaltyCap(CAP_NONE)
+    return PenaltyRule(steps=tuple(steps), cap=cap, effective=effective)
+
+
+def _penalty_book(*rules, **deal) -> Settlements:
+    return Settlements(counterparties=[_counterparty()],
+                       deals=[_deal(penalties=rules, **deal)])
+
+
+def test_penalty_scale_forms_pass_validation():
+    """Шкала с порогом 0 и без, потолок всех трёх форм — всё легально."""
+    zero_first = _penalty(PenaltyStep(0, D("0.01")), PenaltyStep(30, D("0.001")))
+    later_start = _penalty(PenaltyStep(15, D("0.005")),
+                           cap=PenaltyCap(CAP_SUM, D("5000")))
+    share = _penalty(PenaltyStep(1, D("0.01")),
+                     cap=PenaltyCap(CAP_SHARE, D("0.5")))
+    for rule in (zero_first, later_start, share):
+        validate(_penalty_book(rule))
+
+
+def test_penalty_scale_validation_names_the_reason():
+    """Убывающие ступени, отрицательная ставка, чужой потолок — каждый со своим."""
+    with pytest.raises(ValueError, match="ступени должны возрастать"):
+        validate(_penalty_book(_penalty(PenaltyStep(30, D("0.01")),
+                                        PenaltyStep(10, D("0.001")))))
+    with pytest.raises(ValueError, match="порог ступени не может быть отрицательным"):
+        validate(_penalty_book(_penalty(PenaltyStep(-1, D("0.01")))))
+    with pytest.raises(ValueError, match="ставка ступени не может быть отрицательной"):
+        validate(_penalty_book(_penalty(PenaltyStep(0, D("-0.01")))))
+    with pytest.raises(ValueError, match="потолок обязателен"):
+        validate(_penalty_book(_penalty(PenaltyStep(0, D("0.01")), cap=None)))
+    with pytest.raises(ValueError, match="не входит в набор форм"):
+        validate(_penalty_book(_penalty(PenaltyStep(0, D("0.01")),
+                                        cap=PenaltyCap("половина"))))
+    with pytest.raises(ValueError, match="„без потолка“ не бывает значения"):
+        validate(_penalty_book(_penalty(PenaltyStep(0, D("0.01")),
+                                        cap=PenaltyCap(CAP_NONE, D("100")))))
+    with pytest.raises(ValueError, match="значение должно быть положительным"):
+        validate(_penalty_book(_penalty(PenaltyStep(0, D("0.01")),
+                                        cap=PenaltyCap(CAP_SUM, D("0")))))
+    with pytest.raises(ValueError, match="ступени обязательны"):
+        validate(_penalty_book(_penalty()))
+
+
+def test_allocation_order_is_a_full_permutation():
+    """Порядок распределения — все четыре части без повторов, иначе текст."""
+    order = AllocationRule(("издержки", "неустойка", "проценты", "тело"))
+    validate(Settlements(counterparties=[_counterparty()],
+                         deals=[_deal(allocations=(order,))]))
+    doubled = AllocationRule(("тело", "тело", "проценты", "неустойка"))
+    with pytest.raises(ValueError, match="перестановка четырёх частей без повторов"):
+        validate(Settlements(counterparties=[_counterparty()],
+                             deals=[_deal(allocations=(doubled,))]))
+    short = AllocationRule(("тело", "проценты", "неустойка"))
+    with pytest.raises(ValueError, match="перестановка четырёх частей без повторов"):
+        validate(Settlements(counterparties=[_counterparty()],
+                             deals=[_deal(allocations=(short,))]))
+
+
+def _trigger_book(*rules, **deal) -> Settlements:
+    return Settlements(counterparties=[_counterparty()],
+                       deals=[_deal(triggers=rules, **deal)])
+
+
+def test_trigger_forms_pass_validation():
+    """Триггер со штрафом-суммой и со штрафом-долей, пороговые условия — легальны."""
+    by_sum = _trigger_rule(condition=TRIGGER_OVERDUE, charge_amount=D("500"))
+    by_share = _trigger_rule(uid="доля", condition=TRIGGER_OVERDUE,
+                             charge_amount=None, charge_percent=D("0.1"))
+    by_days = _trigger_rule(uid="порог-дней", condition=TRIGGER_OVERDUE_DAYS,
+                            threshold_days=30)
+    by_amount = _trigger_rule(uid="порог-суммы", condition=TRIGGER_OVERDUE_SUM,
+                              threshold_amount=D("1000"))
+    dated = [dict(effective=date(2026, 1, 1)), dict(effective=date(2026, 2, 1)),
+             dict(effective=date(2026, 3, 1)), dict(effective=date(2026, 4, 1))]
+    book_rules = tuple(
+        _trigger_rule(uid=r.uid, condition=r.condition, part=r.part, basis=r.basis,
+                      threshold_days=r.threshold_days,
+                      threshold_amount=r.threshold_amount,
+                      charge_amount=r.charge_amount,
+                      charge_percent=r.charge_percent, **kw)
+        for r, kw in zip((by_sum, by_share, by_days, by_amount), dated))
+    validate(_trigger_book(*book_rules))
+
+
+def test_trigger_validation_names_the_reason():
+    """Условие, штраф, порог, уид и основание — каждый отказ называет."""
+    with pytest.raises(ValueError, match="не входит в набор условий"):
+        validate(_trigger_book(_trigger_rule(condition="звонок коллектора")))
+    with pytest.raises(ValueError, match="не входит в набор частей"):
+        validate(_trigger_book(_trigger_rule(part="пени")))
+    with pytest.raises(ValueError, match="основание обязательно"):
+        validate(_trigger_book(_trigger_rule(basis="")))
+    with pytest.raises(ValueError, match="штраф задаётся ровно одним из"):
+        validate(_trigger_book(_trigger_rule(charge_amount=D("500"),
+                                             charge_percent=D("0.1"))))
+    with pytest.raises(ValueError, match="штраф задаётся ровно одним из"):
+        validate(_trigger_book(_trigger_rule(charge_amount=None)))
+    with pytest.raises(ValueError, match="порог должен быть задан и быть "
+                                         "положительным"):
+        validate(_trigger_book(_trigger_rule(condition=TRIGGER_OVERDUE_DAYS)))
+    with pytest.raises(ValueError, match="порог должен быть задан и быть "
+                                         "положительным"):
+        validate(_trigger_book(_trigger_rule(condition=TRIGGER_OVERDUE_SUM,
+                                             threshold_amount=D("-1"))))
+    with pytest.raises(ValueError, match="уид 'правило' уже занят"):
+        validate(_trigger_book(_trigger_rule(), _trigger_rule()))
+    with pytest.raises(ValueError, match="триггер-правило без уида"):
+        validate(_trigger_book(_trigger_rule(uid="")))
+
+
+def test_rule_versions_are_dated_and_ordered():
+    """Датированные версии идут по возрастанию; версия без даты — только одна."""
+    first = _penalty(PenaltyStep(0, D("0.01")), effective=date(2026, 1, 1))
+    second = _penalty(PenaltyStep(0, D("0.005")), effective=date(2026, 3, 1))
+    validate(_penalty_book(first, second))
+    with pytest.raises(ValueError, match="версия без даты действия"):
+        validate(_penalty_book(_penalty(PenaltyStep(0, D("0.01"))), second))
+    with pytest.raises(ValueError, match="даты действий должны возрастать"):
+        validate(_penalty_book(first, first))
+
+
+def test_rule_at_picks_the_version_of_its_own_dates():
+    """Правило обслуживает свои даты: до — прежнее, с даты — новое, после — новое."""
+    old = _penalty(PenaltyStep(0, D("0.01")), effective=date(2026, 1, 1))
+    new = _penalty(PenaltyStep(0, D("0.005")), effective=date(2026, 3, 1))
+    rules = (old, new)
+    assert rule_at(rules, date(2025, 12, 31)) is None
+    assert rule_at(rules, date(2026, 1, 1)) is old
+    assert rule_at(rules, date(2026, 2, 28)) is old
+    assert rule_at(rules, date(2026, 3, 1)) is new
+    assert rule_at(rules, date(2027, 1, 1)) is new
+    # Правило из будущего легально: до своей даты оно не действует.
+    future = _penalty(PenaltyStep(0, D("0.02")), effective=date(2027, 1, 1))
+    assert rule_at((future,), date(2026, 6, 1)) is None
+    assert rule_at((future,), date(2027, 1, 1)) is future
+
+
+def test_a_rule_without_a_date_acts_over_the_whole_line():
+    """Одиночная версия без даты действует весь период; пустой список — None."""
+    timeless = _penalty(PenaltyStep(0, D("0.01")))
+    assert rule_at((timeless,), START) is timeless
+    assert rule_at((timeless,), date(2030, 1, 1)) is timeless
+    assert rule_at((), START) is None
+    with pytest.raises(ValueError, match="версия без даты действия"):
+        rule_at((timeless, _penalty(PenaltyStep(0, D("0.02")),
+                                    effective=date(2026, 1, 1))), START)
+
+
+def test_no_rule_is_not_the_same_as_no_cap():
+    """«Правила нет» и «без потолка» — разные вещи: None против известной формы."""
+    assert rule_at((), START) is None                     # правила нет — пробел
+    none_cap = _penalty(PenaltyStep(0, D("0.01")))
+    validate(_penalty_book(none_cap))                     # «без потолка» — форма
+    assert none_cap.cap.kind == CAP_NONE
+    assert CAP_NONE in CAPS and len(CAPS) == 3
+
+
+def test_trigger_thresholds_are_declared_forms():
+    """Набор условий — закрытый, и все четыре условия проходят форму."""
+    assert len(TRIGGERS) == 4
+    assert TRIGGER_OVERDUE in TRIGGERS and TRIGGER_OVERDUE_SUM in TRIGGERS

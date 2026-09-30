@@ -80,6 +80,22 @@ PENALTY = "неустойка"
 COSTS = "издержки"
 PARTS = (BODY, INTEREST, PENALTY, COSTS)
 
+#: Потолок неустойки — закрытый набор форм. «Без потолка» — явная форма, а не
+#: отсутствие данных: у маркера один смысл, и его не путать с «правила нет».
+CAP_NONE = "без потолка"
+CAP_SUM = "сумма"
+CAP_SHARE = "доля просроченной суммы"
+CAPS = (CAP_NONE, CAP_SUM, CAP_SHARE)
+
+#: Условия триггер-правил — закрытый набор: движок понимает то, что объявлено,
+#: и отклоняет чужое текстом, а не молчаливым нулём.
+TRIGGER_OVERDUE = "срок прошёл, есть просроченная сумма"
+TRIGGER_FULL_UNPAID = "полная неуплата"
+TRIGGER_OVERDUE_DAYS = "просрочка не меньше порога"
+TRIGGER_OVERDUE_SUM = "сумма просрочки не меньше порога"
+TRIGGERS = (TRIGGER_OVERDUE, TRIGGER_FULL_UNPAID, TRIGGER_OVERDUE_DAYS,
+            TRIGGER_OVERDUE_SUM)
+
 
 # --- сущности --------------------------------------------------------------
 
@@ -201,6 +217,83 @@ class ScheduleRule:
 
 
 @dataclass
+class PenaltyStep:
+    """Ступень шкалы неустойки: «от `days` дней просрочки — дневная ставка `rate`».
+
+    Ступень действует включительно: возраст просрочки ровно `days` — берётся эта
+    ступень. Возраст дня — число дней со дня после срока (первый день просрочки —
+    возраст 1). Порог — целое число дней; ставка — дневная: у неустойки всё по
+    дням, второй базы начисления нет.
+    """
+    days: int
+    rate: Decimal
+
+
+@dataclass
+class PenaltyCap:
+    """Потолок неустойки — форма с дискриминантом.
+
+    «Без потолка» (`CAP_NONE`) — известное «не ограничено», и значения у него не
+    бывает; «сумма» (`CAP_SUM`) и «доля просроченной суммы» (`CAP_SHARE`) несут
+    положительное значение. Потолок обязателен у правила неустойки — включая
+    «без потолка»: отсутствие данных и отсутствие ограничения — разные вещи.
+    """
+    kind: str
+    value: Decimal | None = None
+
+
+@dataclass
+class PenaltyRule:
+    """Правило неустойки: шкала ступеней и потолок — один носитель.
+
+    Правило неустойки целиком: у него одно содержимое, и делить шкалу с потолком
+    по разным сущностям значило бы хранить половины врозь. Версии правила
+    различаются датой действия (`effective`): правило без даты действует весь
+    период и допустимо, только если версия одна.
+    """
+    steps: tuple[PenaltyStep, ...]
+    cap: PenaltyCap
+    effective: date | None = None
+
+
+@dataclass
+class AllocationRule:
+    """Правило распределения платежа: порядок частей.
+
+    `order` — перестановка `PARTS`: все четыре части, без повторов. Частичный
+    порядок не определяет, куда идёт избыток, — поэтому перестановка целиком.
+    Версии — по дате действия, как у остальных правил зоны.
+    """
+    order: tuple[str, ...]
+    effective: date | None = None
+
+
+@dataclass
+class TriggerRule:
+    """Правило триггера: условие, порог и параметры штрафа, который он породит.
+
+    `condition` — из закрытого набора (`TRIGGERS`); порог (`threshold_days` или
+    `threshold_amount`) обязателен для пороговых условий и положителен. Штраф
+    задаётся ровно одним из: `charge_amount` (сумма) или `charge_percent` (доля
+    исходной просроченной суммы). `part` — часть, в которую идёт штраф, — без
+    умолчания: часть штрафа обязана приходить из данных. `basis` — что случилось,
+    свободная метка основания производного начисления. `uid` — опознание правила:
+    по нему факт-начисление ссылается на правило, и случай опознаётся парой
+    «уид правила, дата срабатывания». Исполнение правила (срабатывание, дата,
+    идемпотентность) — механика триггеров, форма живёт здесь.
+    """
+    uid: str
+    condition: str
+    part: str
+    basis: str
+    threshold_days: int | None = None
+    threshold_amount: Decimal | None = None
+    charge_amount: Decimal | None = None
+    charge_percent: Decimal | None = None
+    effective: date | None = None
+
+
+@dataclass
 class Deal:
     """Договорённость с контрагентом, порождающая взаиморасчёты.
 
@@ -232,9 +325,12 @@ class Deal:
     минимальным платежом и снова тратится. Признак — про конкретную сделку, а не
     про стратегию: стратегия говорит, чью ставку гасить первой.
 
-    `triggers` — правила триггеров сделки: записи, опознаваемые уидом правила.
-    По ним проверяется ссылка на правило у факта-начисления (`Charge.trigger`):
-    правило — данные зоны, движок его не выдумывает.
+    `triggers`, `penalties` и `allocations` — правила зоны на сделку, данные,
+    а не код движка: триггеры (`TriggerRule`) опознаются уидом — по ним
+    проверяется ссылка на правило у факта-начисления (`Charge.trigger`);
+    неустойка (`PenaltyRule`) и порядок распределения платежа
+    (`AllocationRule`) — формы с валидацией. Движок форм не выдумывает и
+    умолчаний не подставляет: правила нет — `None` («не задано»).
     """
     uid: str
     title: str
@@ -245,7 +341,9 @@ class Deal:
     rate_per_year: Decimal | None = None
     rate_per_day: Decimal | None = None
     schedule: ScheduleRule | None = None
-    triggers: tuple = ()                # правила триггеров сделки — по уиду правила
+    penalties: tuple[PenaltyRule, ...] = ()     # шкалы неустойки, версии по дате
+    allocations: tuple[AllocationRule, ...] = ()  # порядки распределения, версии
+    triggers: tuple[TriggerRule, ...] = ()      # правила триггеров — по уиду правила
     second_priority: bool = False
     wallet: str | None = None
     channel: str | None = None
@@ -446,6 +544,11 @@ class Settlements:
 
 # --- проверка ссылок -------------------------------------------------------
 
+def _positive(value: Decimal | None) -> bool:
+    """Значение задано и положительно: ноль и None — «не задано»."""
+    return value is not None and value > 0
+
+
 def _unique(uids: Iterable[str], what: str) -> None:
     seen: set[str] = set()
     for uid in uids:
@@ -541,6 +644,7 @@ def _validate_deals(book: Settlements) -> None:
                 f"её не спрашивают — начислять нечего")
         if d.schedule is not None:
             _validate_rule(d.uid, d.schedule)
+        _validate_deal_rules(d)
         if d.closure_unit is not None and d.amount is None:
             raise ValueError(f"сделка {d.uid!r}: у регулярного расхода нет единицы "
                              f"закрытия — закрывать нечего")
@@ -588,6 +692,107 @@ def _validate_rule(uid: str, rule: ScheduleRule) -> None:
                          f"процентом от остатка — не тем и другим сразу")
     if rule.first is not None and rule.first.amount <= 0:
         raise ValueError(f"сделка {uid!r}: первый платёж должен быть положительным")
+
+
+def _validate_deal_rules(deal: Deal) -> None:
+    """Правила зоны на сделку: форма каждой и версии по дате действия.
+
+    Правила приходят снаружи, и движок обязан их понимать: закрытый набор форм,
+    каждая — целиком, текст ошибки называет правило и что исправить. Умолчаний
+    нет: правила нет — «не задано», а не ноль.
+    """
+    for rule in deal.penalties:
+        if not rule.steps:
+            raise ValueError(f"правило неустойки сделки {deal.uid!r}: ступени "
+                             f"обязательны — шкалы без ступеней не бывает")
+        previous: int | None = None
+        for step in rule.steps:
+            if step.days < 0:
+                raise ValueError(f"правило неустойки сделки {deal.uid!r}: порог "
+                                 f"ступени не может быть отрицательным")
+            if step.rate < 0:
+                raise ValueError(f"правило неустойки сделки {deal.uid!r}: ставка "
+                                 f"ступени не может быть отрицательной")
+            if previous is not None and step.days <= previous:
+                raise ValueError(f"правило неустойки сделки {deal.uid!r}: ступени "
+                                 f"должны возрастать, пороги — не отрицательные")
+            previous = step.days
+        if rule.cap is None:
+            raise ValueError(f"правило неустойки сделки {deal.uid!r}: потолок "
+                             f"обязателен — включая „без потолка“")
+        if rule.cap.kind not in CAPS:
+            raise ValueError(f"правило неустойки сделки {deal.uid!r}: потолок "
+                             f"{rule.cap.kind!r} не входит в набор форм: "
+                             f"{'; '.join(CAPS)}")
+        if rule.cap.kind == CAP_NONE:
+            if rule.cap.value is not None:
+                raise ValueError(f"правило неустойки сделки {deal.uid!r}: у потолка "
+                                 f"„без потолка“ не бывает значения")
+        elif rule.cap.value is None or rule.cap.value <= 0:
+            raise ValueError(f"правило неустойки сделки {deal.uid!r}: у потолка "
+                             f"„{rule.cap.kind}“ значение должно быть положительным")
+    for rule in deal.allocations:
+        if len(rule.order) != len(PARTS) or sorted(rule.order) != sorted(PARTS):
+            raise ValueError(f"правило распределения сделки {deal.uid!r}: порядок — "
+                             f"перестановка четырёх частей без повторов: "
+                             f"{', '.join(PARTS)}")
+    seen: set[str] = set()
+    for rule in deal.triggers:
+        uid = getattr(rule, "uid", None)
+        if not uid:
+            raise ValueError(f"сделка {deal.uid!r}: триггер-правило без уида — "
+                             f"сверять нечем")
+        if uid in seen:
+            raise ValueError(f"правило триггера сделки {deal.uid!r}: уид {uid!r} "
+                             f"уже занят другим правилом триггера")
+        seen.add(uid)
+        condition = getattr(rule, "condition", None)
+        if condition not in TRIGGERS:
+            raise ValueError(f"правило триггера сделки {deal.uid!r}: условие "
+                             f"{condition!r} не входит в набор условий: "
+                             f"{'; '.join(TRIGGERS)}")
+        if getattr(rule, "part", None) not in PARTS:
+            raise ValueError(f"правило триггера {uid!r}: часть "
+                             f"{getattr(rule, 'part', None)!r} не входит в набор "
+                             f"частей: {', '.join(PARTS)}")
+        if not getattr(rule, "basis", None):
+            raise ValueError(f"правило триггера {uid!r}: основание обязательно — "
+                             f"по нему записывается, что случилось")
+        amount = getattr(rule, "charge_amount", None)
+        percent = getattr(rule, "charge_percent", None)
+        if _positive(amount) == _positive(percent):
+            raise ValueError(f"правило триггера сделки {deal.uid!r}: штраф задаётся "
+                             f"ровно одним из — сумма или доля просроченной суммы")
+        days = getattr(rule, "threshold_days", None)
+        total = getattr(rule, "threshold_amount", None)
+        if condition == TRIGGER_OVERDUE_DAYS and not _positive(days):
+            raise ValueError(f"правило триггера сделки {deal.uid!r}: у условия "
+                             f"„{condition}“ порог должен быть задан и быть "
+                             f"положительным")
+        if condition == TRIGGER_OVERDUE_SUM and not _positive(total):
+            raise ValueError(f"правило триггера сделки {deal.uid!r}: у условия "
+                             f"„{condition}“ порог должен быть задан и быть "
+                             f"положительным")
+    _rule_versions(deal.uid, "неустойки", deal.penalties)
+    _rule_versions(deal.uid, "распределения", deal.allocations)
+    _rule_versions(deal.uid, "триггера", deal.triggers)
+
+
+def _rule_versions(deal_uid: str, name: str, rules: Sequence) -> None:
+    """Версии правила: датированные идут по возрастанию дат, без даты — одиночная.
+
+    Версия без даты действия действует весь период — она допустима, только
+    когда одна: рядом со второй не понять, какая действует, и это ошибка данных,
+    а не выбор движка.
+    """
+    if len(rules) > 1 and any(r.effective is None for r in rules):
+        raise ValueError(f"правило {name} сделки {deal_uid!r}: версия без даты "
+                         f"действия допустима, только если она одна")
+    dated = [r.effective for r in rules if r.effective is not None]
+    for left, right in zip(dated, dated[1:]):
+        if left >= right:
+            raise ValueError(f"правило {name} сделки {deal_uid!r}: даты действий "
+                             f"должны возрастать: {left} не раньше {right}")
 
 
 def _validate_movements(book: Settlements) -> None:
@@ -762,6 +967,25 @@ def _validate_observed(book: Settlements) -> None:
 
 
 # --- производные величины --------------------------------------------------
+
+def rule_at(rules: Sequence, on: date):
+    """Действующая версия правила на дату — последняя с датой действия ≤ `on`.
+
+    Дата действия входит включительно: правило меняется в тот же день, что и
+    держатель долга. Версия без даты действует весь период и допустима, только
+    когда одна (иначе — ошибка данных, и здесь она тоже текст); правил нет или
+    все версии ещё в будущем — `None`: «не задано», а не ноль.
+    """
+    if not rules:
+        return None
+    if len(rules) > 1 and any(r.effective is None for r in rules):
+        raise ValueError("правило: версия без даты действия допустима, "
+                         "только если она одна")
+    acting = [r for r in rules if r.effective is not None and r.effective <= on]
+    if not acting:
+        return rules[0] if rules[0].effective is None else None
+    return acting[-1]
+
 
 def _deal(book: Settlements, uid: str) -> Deal:
     for d in book.deals:

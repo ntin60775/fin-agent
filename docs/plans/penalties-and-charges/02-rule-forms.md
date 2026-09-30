@@ -2,8 +2,8 @@
 node_type: ticket
 title: Формы правил зоны, их версии и валидация
 service: _platform
-status: draft
-updated: 2026-09-28
+status: archived
+updated: 2026-09-30
 links:
   documents: [../../../finance_core/settlements.py, ../../../tests/test_settlements.py]
   part_of: [README.md]
@@ -41,17 +41,50 @@ links:
 
 ## Приёмка
 
-- [ ] Синтетика: корректные формы правил проходят валидацию; каждое нарушение
+- [x] Синтетика: корректные формы правил проходят валидацию; каждое нарушение
   (убывающие ступени, отрицательная ставка или потолок, порядок с повторами или
   без части) падает с текстом, называющим правило и что исправить —
-  `tests/test_settlements.py`.
-- [ ] Синтетика: правило с датой действия обслуживает только свои даты — прошлое
+  `tests/test_settlements.py`
+  (`test_penalty_scale_forms_pass_validation`,
+  `test_penalty_scale_validation_names_the_reason`,
+  `test_allocation_order_is_a_full_permutation`,
+  `test_trigger_forms_pass_validation`,
+  `test_trigger_validation_names_the_reason`,
+  `test_rule_versions_are_dated_and_ordered`).
+- [x] Синтетика: правило с датой действия обслуживает только свои даты — прошлое
   считается правилом своей эпохи; правило без даты действует весь период —
-  `tests/test_settlements.py`.
-- [ ] Синтетика: отсутствие правила не подставляется нулём — признак «правило не
-  задано» (`None`) отличим от «без потолка» — `tests/test_settlements.py`.
-- [ ] Факт: умолчаний правил в коде движка нет (`finance_core/README.md`,
-  инварианты).
+  `tests/test_settlements.py`
+  (`test_rule_at_picks_the_version_of_its_own_dates`,
+  `test_a_rule_without_a_date_acts_over_the_whole_line`).
+- [x] Синтетика: отсутствие правила не подставляется нулём — признак «правило не
+  задано» (`None`) отличим от «без потолка» — `tests/test_settlements.py`
+  (`test_no_rule_is_not_the_same_as_no_cap`,
+  `test_a_rule_without_a_date_acts_over_the_whole_line`).
+- [x] Факт: умолчаний правил в коде движка нет (`finance_core/README.md`,
+  инварианты): поля `Deal.penalties`/`allocations`/`triggers` — пустые кортежи
+  («не задано»), `rule_at` возвращает `None`, ни одной подстановки значения в
+  движке нет.
+
+**Заметки рана (2026-09-30).**
+
+- **Аннотация `Deal.triggers` сужена до `TriggerRule`**, как и обещано в заметках
+  рана 01; рядом заведены `Deal.penalties` и `Deal.allocations`. Тесты 01,
+  передававшие `SimpleNamespace(uid=...)` как правило, переведены на настоящую
+  форму (`_trigger_rule`) — место под форму было отведено 01 сознательно.
+- **Валидация триггеров читает поля через `getattr`** — унаследовано от 01:
+  падать `AttributeError` на данных зоны `validate` не имеет права; чужая форма
+  отклоняется текстом «не входит в набор» по каждому полю.
+- **Пустой уид = «без уида»**: `TriggerRule.uid` обязателен по устройству, поэтому
+  случай «правило без уида» — это пустая строка, и текст тот же, что в 01
+  («триггер-правило без уида — сверять нечем»).
+- **Лишние пороги у непороговых условий не отклоняются** — форма не запрещает:
+  условие определяет, какой порог *обязан* быть задан, а не какой запрещён.
+  Нулевой порог равен «не задано» (`_positive`), и «задан и положителен» падает
+  текстом.
+- **`rule_at` дублирует запрет mixes-версий** (без даты среди многих) своим
+  текстом: функция публичная, без валидации книги её пустить нельзя молча.
+- **Прогон:** `python3 -m pytest tests/` — 349 зелёных (327 на `main` до 01,
+  339 после 01, здесь +10 новых); линт KB `gitmark.py lint --strict` — чисто.
 
 ## Грилл тикета
 
