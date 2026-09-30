@@ -1938,6 +1938,51 @@ def _facts_to(book: Settlements, deal_uid: str, on: date) -> Settlements:
                        edits=book.edits, observed=book.observed)
 
 
+def _overdue_map(book: Settlements, deal_uid: str,
+                 on: date) -> dict[date, list]:
+    """Потоки просрочки с опознанием вхождения: плановая дата → [срок, исходная, остаток].
+
+    Рабочая форма `overdue_amounts` с теми же числами и тем же порядком
+    обрезки (новейшие режутся первыми, по долгой хронологии Q13). Опознание
+    нужно тем, кто гасит потоки адресно: плановый платёж гасит своё вхождение,
+    а не старые потоки (08-Т2).
+    """
+    deal = _deal(book, deal_uid)
+    if deal.amount is None or deal.direction == OWED_TO_ME:
+        return {}
+    since = _plan_since(deal, on)
+    past = _facts_to(book, deal_uid, on)
+    rows: list[tuple[date, Decimal, Decimal, date]] = []
+    for occ in occurrences(past, deal_uid, since, on):
+        if occ.status not in (EXPECTED, POSTPONED) or occ.amount is None:
+            continue
+        due = occ.due
+        if due is None or due >= on:
+            continue
+        remaining = occ.remaining or Decimal(0)
+        if remaining <= 0:
+            continue
+        paid_by_due = Decimal(0)
+        for m in book.movements:
+            if m.deal == deal_uid and m.occurrence == occ.planned and m.date <= due:
+                paid_by_due += m.amount if _along(deal, m) else -m.amount
+        original = max(occ.amount - paid_by_due, Decimal(0))
+        debt = _sans_penalty(book, deal_uid, due + timedelta(days=1))
+        if original > debt:
+            original = max(debt, Decimal(0))
+        rows.append((due, original, remaining, occ.planned))
+    rows.sort(key=lambda row: row[0])
+    available = _sans_penalty(book, deal_uid, on)
+    streams: dict[date, list] = {}
+    for due, original, remaining, planned in rows:
+        if available <= 0:
+            break
+        take = remaining if remaining <= available else available
+        streams[planned] = [due, original, take]
+        available -= take
+    return streams
+
+
 def overdue_amounts(book: Settlements, deal_uid: str,
                     on: date) -> tuple[tuple[date, Decimal, Decimal], ...]:
     """Потоки просрочек сделки на дату: «дата срока — исходная сумма — остаток».
@@ -1960,48 +2005,15 @@ def overdue_amounts(book: Settlements, deal_uid: str,
 
     Остатки считаются на фактах до `on` включительно: движение задним числом
     пересчитывает состояние на любой дате, сторно не нужно. Сумма потоков
-    ограничена долгом **без производной неустойки** (`_sans_penalty`):
+    ограничена долгом **без производных** (`_sans_penalty`):
     неустойка растит долг, долг обрезает потоки, потоки кормят неустойку —
     круг производной, и обрезка считается по долгу без неё самой. Когда платёж
     вне графика съел долг, обрезаются самые новые потоки — старые (с бо́льшим
     возрастом) сохраняются, как требует хронология (Q13).
     """
-    deal = _deal(book, deal_uid)
-    if deal.amount is None or deal.direction == OWED_TO_ME:
-        return ()
-    since = _plan_since(deal, on)
-    # Состояние на дату — пересчёт на фактах до `on`: производная не помнит
-    # прошлого, она считается заново (derived-balances).
-    past = _facts_to(book, deal_uid, on)
-    streams: list[tuple[date, Decimal, Decimal]] = []
-    for occ in occurrences(past, deal_uid, since, on):
-        if occ.status not in (EXPECTED, POSTPONED) or occ.amount is None:
-            continue
-        due = occ.due
-        if due is None or due >= on:
-            continue
-        remaining = occ.remaining or Decimal(0)
-        if remaining <= 0:
-            continue
-        paid_by_due = Decimal(0)
-        for m in book.movements:
-            if m.deal == deal_uid and m.occurrence == occ.planned and m.date <= due:
-                paid_by_due += m.amount if _along(deal, m) else -m.amount
-        original = max(occ.amount - paid_by_due, Decimal(0))
-        debt = _sans_penalty(book, deal_uid, due + timedelta(days=1))
-        if original > debt:
-            original = max(debt, Decimal(0))
-        streams.append((due, original, remaining))
-    streams.sort(key=lambda stream: stream[0])
-    available = _sans_penalty(book, deal_uid, on)
-    kept: list[tuple[date, Decimal, Decimal]] = []
-    for due, original, remaining in streams:
-        if available <= 0:
-            break
-        take = remaining if remaining <= available else available
-        kept.append((due, original, take))
-        available -= take
-    return tuple(kept)
+    rows = sorted(_overdue_map(book, deal_uid, on).values(),
+                  key=lambda stream: stream[0])
+    return tuple((due, original, remaining) for due, original, remaining in rows)
 
 
 def overdue_amount(book: Settlements, deal_uid: str, on: date) -> Decimal:

@@ -49,9 +49,11 @@ from decimal import Decimal
 
 from .model import Account, Income, Payment, Scenario, Transfer, kopek
 from .settlements import (I_OWE, OWED_TO_ME, Deal, Occurrence, Settlements,
-                          Wallet, _principal_left, _signed, accrued_interest,
+                          Wallet, _along, _overdue_map, _penalty_of,
+                          _principal_left,
+                          _signed, accrued_interest, accrued_penalty,
                           deal_amount_at, deal_balance, deal_holder_at,
-                          funding_wallet, occurrences, planned_date)
+                          funding_wallet, occurrences, planned_date, rule_at)
 from .solver import _CashMonth, _CashRoll
 
 DAYS_IN_YEAR = Decimal(365)
@@ -126,10 +128,12 @@ class DealMonth:
     закрыта (котёл ≥ цель), остатки её участников обнуляются разом. Сама
     копилка — цель и котёл — видна в `units`.
     `total` — итог по сделкам первого приоритета, `interest` — начислено за
-    месяц, `paid` — ушло за месяц, из него `prepaid` — досрочки, `short` —
+    месяц (проценты плюс неустойка), `paid` — ушло за месяц, из него
+    `prepaid` — досрочки, `short` —
     урезано: сколько из обязательного `want` не заплачено (сумма `want − amount`
     по обязательным вхождениям месяца, урезанным пулом, остатком или котлом;
-    аррерис в следующий месяц не переносится). `offer` — **срез свободных
+    в нагрузку не переносится — недоплата живёт просроченной суммой и капает,
+    Q26). `offer` — **срез свободных
     денег месяца**, которым не нашлось места: свободные деньги месяца минус
     ушедшие досрочки — столько предлагается направить во второй приоритет.
     `payments` — расписание месяца: дата, сумма, кошелёк и контрагент каждого
@@ -211,11 +215,19 @@ class DealRoll:
 
 @dataclass
 class _Open:
-    """Сделка в прокате: остаток и её место в книге."""
+    """Сделка в прокате: остаток, потоки просрочки и её место в книге.
+
+    `streams` — потоки просрочки (четвёрки «срок, исходная, остаток, вхождение»,
+    форма 05 с опознанием вхождения): недоплаченное и урезанное продолжает
+    капать неустойкой в проекции (Q26). `penalty` — наброшенная в прокате
+    неустойка: потолок правила считается по накопленному сделки (06-Т2).
+    """
     deal: Deal
     balance: Decimal
     unit: str | None = None
     second: bool = False
+    streams: list = field(default_factory=list)
+    penalty: Decimal = Decimal(0)
 
     def pay(self, amount: Decimal) -> None:
         self.balance -= amount
@@ -677,7 +689,10 @@ class _MonthLoad:
     `pool` — зафиксированная нагрузка месяца плюс бюджет: из него платятся
     обязательные вхождения, остаток уходит в досрочки (`finish`). `paid` —
     уплачено на этом шаге, `short` — урезано из обязательного, `interest` —
-    начислено процентов, `payments` — расписание месяца на этом шаге.
+    начислено (проценты плюс неустойка месяца), `payments` — расписание месяца
+    на этом шаге. `stream_events` — события для потоков просрочки: гашения
+    («reduce»: плановое — по своему вхождению, досрочка — старые первыми) и
+    рождения урезанных обязательств («birth»); применяет их `finish` по дням.
     """
     index: int
     month: date
@@ -686,6 +701,7 @@ class _MonthLoad:
     short: Decimal
     interest: Decimal
     payments: list[ScheduledPayment]
+    stream_events: list[tuple] = field(default_factory=list)
 
 
 class _DealsRoll:
@@ -764,6 +780,19 @@ class _DealsRoll:
                           or Decimal(0)),
                 Decimal(0))
 
+        # Потоки просрочки на входе окна — состояние книги (05): недоплаченное
+        # и урезанное продолжает капать в проекции со своего срока (Q26); возраст
+        # входных потоков продолжается — просрочка не молодеет от начала окна.
+        # Наброшенное до окна тоже считается: потолок правила капает по
+        # накопленному сделки (06-Т2), а не с начала проката.
+        opening = _opening(start)
+        for uid, opened in self.open_deals.items():
+            opened.streams = [[due, original, remaining, planned]
+                              for planned, (due, original, remaining)
+                              in _overdue_map(book, uid, opening).items()]
+            if opened.streams:
+                opened.penalty = _penalty_of(book, uid, opening)(opening)
+
         for unit in self.open_units.values():
             unit.pot = min(unit.pot, unit.target)
             if unit.closed:
@@ -772,6 +801,7 @@ class _DealsRoll:
                 # остаток участника — остаток сделки, падающий платежами.
                 for member in unit.members:
                     self.open_deals[member].balance = Decimal(0)
+                    self.open_deals[member].streams = []
 
         until = self.window.until
 
@@ -857,6 +887,7 @@ class _DealsRoll:
         paid = Decimal(0)
         short = Decimal(0)
         payments: list[ScheduledPayment] = []
+        events: list[tuple] = []      # события потоков просрочки месяца
 
         def pay_row(when: date, uid: str, occ: Occurrence, basis: Decimal) -> None:
             """Одно обязательное вхождение: `want` от базы `basis`, урезание, платёж."""
@@ -879,9 +910,21 @@ class _DealsRoll:
             amount = min(want, room, pool)
             # Урезание видно всегда, даже когда не прошло ничего: недоплата
             # месяца — сумма want − max(amount, 0) (в отрицательном пуле не
-            # заплачено ровно want), аррерисом она не станет.
+            # заплачено ровно want); в нагрузку она не переносится — живёт
+            # просроченной суммой (Q26).
             if not done:
-                short += want - max(amount, Decimal(0))
+                shortfall = want - max(amount, Decimal(0))
+                short += shortfall
+                if amount > 0:
+                    # Плановый платёж гасит ровно своё вхождение (08-Т2).
+                    events.append(("reduce", uid, when, occ.planned, amount))
+                # Урезанное остаётся остатком просроченного вхождения со своим
+                # сроком (Q26); при съеденном долге поток рождается обрезанным
+                # (логика 05), у регулярного расхода растить нечего.
+                born = min(shortfall, max(room, Decimal(0)))
+                if shortfall > 0 and born > 0 and opened.deal.amount is not None:
+                    events.append(("birth", uid, when, occ.due, born, born,
+                                   occ.planned))
             if amount <= 0:
                 return
             pool -= amount
@@ -935,6 +978,14 @@ class _DealsRoll:
                 continue
             moves_by_deal.setdefault(m.deal, []).append(
                 (m.date, _signed(opened.deal, m)))
+            # Факт книги внутри окна гасит поток просрочки так же, как в книге:
+            # связанный — своё вхождение, несвязанный — старые первыми (08-Т2).
+            if m.occurrence is not None:
+                if _along(opened.deal, m):
+                    events.append(("reduce", m.deal, m.date, m.occurrence,
+                                   m.amount))
+            elif _along(opened.deal, m):
+                events.append(("reduce", m.deal, m.date, None, m.amount))
         # Смены версии тела (передача долга) — своим месяцем, как движения:
         # долг вырос, и проценты обязаны идти на новое тело.
         shifts_by_deal: dict[str, list[tuple[date, Decimal]]] = {}
@@ -1004,7 +1055,7 @@ class _DealsRoll:
         for when, uid, occ in rows:
             pay_row(when, uid, occ, month_start[uid])
         self.load = _MonthLoad(index, month, pool, paid, short, interest,
-                               payments)
+                               payments, events)
         return self.load
 
     def finish(self, load: _MonthLoad, free: Decimal) -> list[ScheduledPayment]:
@@ -1039,6 +1090,10 @@ class _DealsRoll:
             prepaid += amount
             payment = _prepayment(self.book, open_deals, open_units, target,
                                   amount, month)
+            # Досрочка — платёж без вхождения: гасит старые потоки первыми,
+            # у копилки числится за первым участником (08-Т2) — как в payment.
+            load.stream_events.append(
+                ("reduce", payment.deal, _month_end(month), None, amount))
             load.payments.append(payment)
             prepayments.append(payment)
 
@@ -1062,13 +1117,42 @@ class _DealsRoll:
                 prepaid += amount
                 payment = _prepayment(self.book, open_deals, open_units, target,
                                       amount, month)
+                load.stream_events.append(
+                    ("reduce", payment.deal, _month_end(month), None, amount))
                 load.payments.append(payment)
                 prepayments.append(payment)
+
+        # 4. Неустойка месяца: потоки просрочки капают по правилу зоны (08-Т3),
+        # события месяца применяются по дням. Набранное входит в остаток сделки
+        # и в начисленное месяца (и в итог проката — одна величина с месяцами);
+        # нагрузка от него не растёт (R2-Q8).
+        penalty = Decimal(0)
+        for opened in open_deals.values():
+            accrued = _month_penalty(opened, load.stream_events, month)
+            opened.balance += accrued
+            opened.penalty += accrued
+            penalty += accrued
+        load.interest += penalty
+        self.total_interest += penalty
 
         for unit in open_units.values():
             if unit.closed:
                 for member in unit.members:
                     open_deals[member].balance = Decimal(0)
+                    open_deals[member].streams = []
+
+        # Поток при погашенном долге обрезается (Q26): сумма остатков потоков
+        # не больше остатка сделки, новейшие режутся первыми (логика 05).
+        for opened in open_deals.values():
+            available = max(opened.balance, Decimal(0))
+            kept: list[list] = []
+            for stream in sorted(opened.streams, key=lambda s: s[0]):
+                if available <= 0:
+                    break
+                take = min(stream[2], available)
+                kept.append([stream[0], stream[1], take, stream[3]])
+                available -= take
+            opened.streams = kept
 
         offer = (max(free - prepaid, Decimal(0))
                  if second_open and not consent else Decimal(0))
@@ -1132,6 +1216,62 @@ def _roll_pass(book: Settlements, start: date, monthly_extra: Decimal,
         if deals.done:
             break
     return deals.result(payoff_by_graph, payoff_by_graph_reason)
+
+
+def _month_penalty(opened: _Open, events: Sequence[tuple],
+                   month: date) -> Decimal:
+    """Неустойка сделки за месяц: потоки просрочки капают по правилу зоны.
+
+    Считает та же формула, что и канон (`accrued_penalty`), по состоянию
+    проката: поток капает с дня после своего срока — возраст входных потоков
+    продолжается (08-Т4); день платежа уменьшает базу до начисления за этот
+    день; версии правил применяются по дате; набранное монотонно под потолком,
+    накопленным по сделке (06-Т2). События месяца применяются по дням:
+    «reduce» гасит поток — плановый платёж ровно своё вхождение (08-Т2),
+    досрочка и несвязанный факт — старые первыми (FIFO по сроку, Q13); «birth»
+    рождает поток урезанного обязательства в его срок (Q26), если потока у
+    вхождения ещё нет. Событие несёт свою сделку вторым полем: чужие события
+    этой сделке не достаются. События одного дня применяются до начисления
+    этого дня.
+    """
+    deal = opened.deal
+    if not deal.penalties:
+        return Decimal(0)
+    by_day: dict[date, list[tuple]] = {}
+    for event in events:
+        if event[1] != deal.uid:
+            continue                  # чужая сделка: у неё свои потоки
+        by_day.setdefault(event[2], []).append(event)
+    total = Decimal(0)
+    month_end = _month_end(month)
+    day = month
+    while day <= month_end:
+        for event in by_day.get(day, ()):
+            if event[0] == "birth":
+                _, _, _, due, original, remaining, planned = event
+                if all(stream[3] != planned for stream in opened.streams):
+                    opened.streams.append([due, original, remaining, planned])
+                continue
+            _, _, _, planned, amount = event
+            if planned is not None:
+                for stream in opened.streams:
+                    if stream[3] == planned:
+                        stream[2] = max(stream[2] - amount, Decimal(0))
+                        break            # плановый платёж — ровно своё вхождение
+            else:
+                left = amount
+                for stream in sorted(opened.streams, key=lambda s: s[0]):
+                    if left <= 0:
+                        break
+                    take = min(left, max(stream[2], Decimal(0)))
+                    stream[2] -= take
+                    left -= take
+        rule = rule_at(deal.penalties, day)
+        if rule is not None and opened.streams:
+            total += accrued_penalty(rule, [tuple(s[:3]) for s in opened.streams],
+                                     day, day, already=opened.penalty + total)
+        day += timedelta(days=1)
+    return total
 
 
 def _prepayment(book: Settlements, open_deals: dict[str, _Open],

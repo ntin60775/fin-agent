@@ -8,11 +8,12 @@ import pytest
 
 from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
-                          SKIPPED, AVALANCHE, Assignment, Counterparty, Deal,
-                          FirstPayment, Movement, OccurrenceEdit, ScheduleRule,
-                          Settlements, Wallet, accrued_interest,
-                          compare_deal_strategies, deal_balance, occurrences,
-                          roll_deals, validate)
+                          SKIPPED, AVALANCHE, Assignment, CAP_NONE, CAP_SUM,
+                          Counterparty, Deal, FirstPayment, Movement,
+                          OccurrenceEdit, PenaltyCap, PenaltyRule, PenaltyStep,
+                          ScheduleRule, Settlements, Wallet, accrued_interest,
+                          accrued_penalty, compare_deal_strategies,
+                          deal_balance, occurrences, roll_deals, validate)
 from finance_core import (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
                           WINDOW_MONTH_CAP, roll_window)
 from finance_core.roll import _DealsRoll
@@ -1655,3 +1656,206 @@ def test_the_payoff_with_prepayments_is_never_later_than_the_graph():
         assert roll.freedom <= roll.payoff_by_graph, name
     helped = roll_deals(_book(plain), START, D("2000"))
     assert helped.freedom < helped.payoff_by_graph   # досрочки приближают срок
+
+
+# --- неустойка в проекции (08) -------------------------------------------------
+
+def _penalty(*steps, cap=None) -> PenaltyRule:
+    """Правило неустойки для проката: без явного потолка — «без потолка»."""
+    return PenaltyRule(steps=tuple(steps),
+                       cap=cap if cap is not None else PenaltyCap(CAP_NONE))
+
+
+def test_a_shortfall_becomes_a_stream_and_accrues():
+    """Урезанное обязательство живёт просроченной суммой и капает со срока (Q26).
+
+    Бюджет месяца меньше нагрузки: урезания рождает пул; дальше потоки капает
+    та же формула, что и канон (06), — замер через неё.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", amount=D("100000"),
+                 schedule=_rule(days=(10, 20, 30), payment=D("1000"), shift_weekend=False),
+                 penalties=(rule,))
+    roll = roll_deals(_book(deal), START, D(0), max_months=2,
+                      budgets={1: D("-2500")})
+    # Январь: пул 500 — вхождение 10-го урезано на 500, 20-е и 30-е на 1000;
+    # потоки капают с дня после своего срока.
+    assert roll.months[0].short == D("2500")
+    jan = [(date(2026, 1, 10), D("500"), D("500")),
+           (date(2026, 1, 20), D("1000"), D("1000")),
+           (date(2026, 1, 30), D("1000"), D("1000"))]
+    assert roll.months[0].interest == accrued_penalty(
+        rule, jan, date(2026, 1, 1), date(2026, 1, 31))
+    # Февраль: урезанного больше нет (пул покрыл нагрузку), январские потоки
+    # продолжают капать со своего возраста.
+    assert roll.months[1].interest == accrued_penalty(
+        rule, jan, date(2026, 2, 1), date(2026, 2, 28))
+    assert roll.months[1].balances["заём"] == (roll.months[0].balances["заём"]
+                                               + roll.months[1].interest
+                                               - roll.months[1].paid)
+
+
+def test_book_streams_keep_their_age_into_the_window():
+    """Входные потоки книги капают с первого дня окна с прежним возрастом (08-Т4)."""
+    rule = _penalty(PenaltyStep(0, D("0.001")), PenaltyStep(30, D("0.005")))
+    deal = _deal("заём", amount=D("1000"), start=date(2025, 12, 1),
+                 schedule=_rule(days=(20,), payment=D("1000"),
+                                start=date(2025, 12, 1), count=1,
+                                shift_weekend=False),
+                 penalties=(rule,))
+    roll = roll_deals(_book(deal), date(2026, 1, 1), D(0), max_months=1,
+                      budgets={1: D("-1000")})
+    # Просрочка с 21.12.2025: 1 января её возраст 12, ступень «от 30» вступает
+    # 19 января. Сброс возраста дал бы ступень по месячному, а не по сроку.
+    stream = [(date(2025, 12, 20), D("1000"), D("1000"))]
+    assert roll.months[0].interest == accrued_penalty(
+        rule, stream, date(2026, 1, 1), date(2026, 1, 31))
+    # Платёж месяца закрывает вхождение в свою дату — база до начисления дня:
+    # капание идёт только до платежа.
+    paid = roll_deals(_book(deal), date(2026, 1, 1), D(0), max_months=1)
+    assert paid.months[0].interest == accrued_penalty(
+        rule, stream, date(2026, 1, 1), date(2026, 1, 31),
+        payments=[(date(2026, 1, 20), D("1000"))])
+
+
+def test_a_scheduled_payment_touches_only_its_own_stream_and_prepay_is_fifo():
+    """Плановый платёж гасит своё вхождение; досрочка — старые потоки (08-Т2)."""
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", amount=D("30000"),
+                 schedule=_rule(days=(10, 20), payment=D("2000"), shift_weekend=False),
+                 penalties=(rule,))
+    roll = roll_deals(_book(deal), START, D(0), max_months=3,
+                      budgets={1: D("-4000"), 2: D("-100"), 3: D("4100")})
+    jan = [(date(2026, 1, 10), D("2000"), D("2000")),
+           (date(2026, 1, 20), D("2000"), D("2000"))]
+    # Февраль: пул 3900 — вхождение 20-го урезано на 100 (поток рождён);
+    # плановые платежи старых потоков не трогают — замер без платежей сходится.
+    assert roll.months[1].short == D("100")
+    feb = jan + [(date(2026, 2, 20), D("100"), D("100"))]
+    assert roll.months[1].interest == accrued_penalty(
+        rule, feb, date(2026, 2, 1), date(2026, 2, 28))
+    # Март: досрочка 4100 ушла в конец месяца FIFO — все потоки погашены,
+    # начисление на погашенные доли прекратилось ещё в день досрочки.
+    assert roll.months[2].prepaid == D("4100")
+    assert roll.months[2].interest == accrued_penalty(
+        rule, feb, date(2026, 3, 1), date(2026, 3, 31),
+        payments=[(date(2026, 3, 31), D("4100"))])
+
+
+def test_mandatory_load_does_not_grow_from_accruals():
+    """Нагрузка заморожена: неустойка не порождает обязательных платежей (R2-Q8).
+
+    Дефицитный бюджет режет обязательное до нуля: платёж месяца один и тот же
+    с неустойкой и без, а набежавшее видит только книга с правилом.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    schedule = dict(days=(10, 20), payment=D("2000"), shift_weekend=False)
+    with_penalty = roll_deals(
+        _book(_deal("заём", amount=D("100000"), schedule=_rule(**schedule),
+                    penalties=(rule,))), START, D(0), max_months=2,
+        budgets={1: D("-6000"), 2: D("-6000")})
+    without = roll_deals(
+        _book(_deal("заём", amount=D("100000"), schedule=_rule(**schedule))),
+        START, D(0), max_months=2, budgets={1: D("-6000"), 2: D("-6000")})
+    assert ([m.paid for m in with_penalty.months]
+            == [m.paid for m in without.months] == [D("0"), D("0")])
+    assert ([m.short for m in with_penalty.months]
+            == [m.short for m in without.months] == [D("4000"), D("4000")])
+    streams = [(date(2026, 1, 10), D("2000"), D("2000")),
+               (date(2026, 1, 20), D("2000"), D("2000")),
+               (date(2026, 2, 10), D("2000"), D("2000")),
+               (date(2026, 2, 20), D("2000"), D("2000"))]
+    assert with_penalty.months[0].interest == accrued_penalty(
+        rule, streams[:2], date(2026, 1, 1), date(2026, 1, 31))
+    assert with_penalty.months[1].interest == accrued_penalty(
+        rule, streams, date(2026, 2, 1), date(2026, 2, 28))
+    assert without.months[0].interest == D("0")
+
+
+def test_a_closed_unit_gives_no_streams_and_no_shortfall():
+    """Закрытая единица: обнуление разом стирает и потоки (08-Т4, R3-Q17).
+
+    Котёл добрался до цели в середине января: урезание до закрытия родило поток
+    участника, он капал до закрытия, а разом-обнуление стёрло его — в следующем
+    месяце ни short, ни капания у единицы нет.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    first = _deal("первый", amount=D("1000"), start=START,
+                  closure_unit="копилка",
+                  schedule=_rule(days=(10,), payment=D("1000"),
+                                 shift_weekend=False))
+    second = _deal("второй", amount=D("1000"), start=START,
+                   closure_unit="копилка",
+                   schedule=_rule(days=(15,), payment=D("1500"),
+                                  shift_weekend=False),
+                   penalties=(rule,))
+    roll = roll_deals(_book(first, second), START, D(0), max_months=2,
+                      budgets={1: D("2200")})
+    month = roll.months[0]
+    assert month.units["копилка"].closed
+    assert month.short == D("500")            # урезание до закрытия видно
+    assert month.interest == D("8.00")        # 16 дней по 0,50 до обнуления
+    assert month.balances == {"первый": D("0"), "второй": D("0")}
+    # Потоки стёрты обнулением разом; закрывшейся единице прокатывать нечего —
+    # месяц закрытия и есть последний.
+    assert len(roll.months) == 1
+    assert roll.freedom == date(2026, 1, 1)
+
+
+def test_a_cap_cuts_the_accrual_in_the_roll_and_stops_the_growth():
+    """Потолок обрезает накопленное в проекции; рост прекращается (06-Т2)."""
+    rule = _penalty(PenaltyStep(0, D("0.001")), cap=PenaltyCap(CAP_SUM, D("10")))
+    deal = _deal("заём", amount=D("100000"),
+                 schedule=_rule(days=(10, 20, 30), payment=D("1000"), shift_weekend=False),
+                 penalties=(rule,))
+    roll = roll_deals(_book(deal), START, D(0), max_months=2,
+                      budgets={1: D("-2500")})
+    assert roll.months[0].interest == D("10.00")   # без потолка было бы 23,50
+    assert roll.months[1].interest == D("0.00")    # набранное держится на потолке
+
+
+def test_a_stream_is_trimmed_when_the_debt_is_gone():
+    """Погашенный долг: рождённые урезанием потоки обрезаны его остатком (Q26)."""
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", amount=D("3000"),
+                 schedule=_rule(days=(10, 20, 30), payment=D("1000"), shift_weekend=False),
+                 penalties=(rule,))
+    book = _book(deal, movements=[Movement(date(2025, 12, 20), D("2500"), "заём")])
+    roll = roll_deals(book, date(2026, 1, 1), D(0), max_months=1,
+                      budgets={1: D("-3000")})
+    # Долг съеден до окна (платёж вне графика не тронул будущих вхождений):
+    # остаток сделки 500 — урезания рождаются обрезанными по 500, а не по 1000.
+    streams = [(date(2026, 1, 10), D("500"), D("500")),
+               (date(2026, 1, 20), D("500"), D("500")),
+               (date(2026, 1, 30), D("500"), D("500"))]
+    assert roll.months[0].interest == accrued_penalty(
+        rule, streams, date(2026, 1, 1), date(2026, 1, 31))
+
+
+def test_streams_of_one_deal_never_touch_another():
+    """События потока — своей сделке: чужие гашения и рождения не достаются.
+
+    Ревью 08 (P0): две просрочки с одним плановым днём; пул покрыл вхождение
+    «второго» — его плановый платёж не гасит поток «первого», а рождение не
+    дублируется в чужих сделках.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    first = _deal("первый", amount=D("100000"),
+                  schedule=_rule(days=(10,), payment=D("1000"),
+                                 shift_weekend=False),
+                  penalties=(rule,))
+    second = _deal("второй", amount=D("100000"),
+                   schedule=_rule(days=(10,), payment=D("1000"),
+                                  shift_weekend=False),
+                   penalties=(rule,))
+    roll = roll_deals(_book(first, second), START, D(0), max_months=1,
+                      budgets={1: D("-1000")})
+    # Пул 1000 покрыл ровно одно вхождение (ряды идут «второй» → «первый»):
+    # урезан «первый» — у него поток; «второй» заплатил в свой срок.
+    assert roll.months[0].short == D("1000")
+    streams = [(date(2026, 1, 10), D("1000"), D("1000"))]
+    assert roll.months[0].interest == accrued_penalty(
+        rule, streams, date(2026, 1, 1), date(2026, 1, 31))
+    assert roll.months[0].balances["второй"] == D("99000.00")
+    assert roll.months[0].balances["первый"] == D("100000.00") + \
+        roll.months[0].interest
