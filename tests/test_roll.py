@@ -10,8 +10,9 @@ from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
                           SKIPPED, AVALANCHE, AllocationRule, Assignment,
                           CAP_NONE, CAP_SUM,
-                          Counterparty, Deal, FirstPayment, Movement,
-                          OccurrenceEdit, PenaltyCap, PenaltyRule, PenaltyStep,
+                          Counterparty, Deal, FirstPayment, INTEREST, Movement,
+                          OccurrenceEdit, PENALTY, PenaltyCap, PenaltyRule,
+                          PenaltyStep,
                           ScheduleRule, Settlements, Wallet, accrued_interest,
                           accrued_penalty, compare_deal_strategies,
                           deal_balance, occurrences, roll_deals, validate)
@@ -1948,3 +1949,161 @@ def test_a_body_charge_keeps_the_deal_in_the_roll():
     assert roll.start_total == D("500.00")
     assert roll.months[0].balances["заём"] == D("500.00")
     assert roll.months[0].parts["заём"][BODY] == D("500.00")
+
+
+# --- stalled и окно при неустойке (10) ------------------------------------------
+
+def _accruing_deal(**kw) -> Deal:
+    """Долг с процентами, графиком на 12 месяцев и неустойкой 5% в день.
+
+    Пул меньше обязательного (отрицательный бюджет): урезания рождают потоки
+    просрочки — на них и на проценты и ложится проверка ширины `stalled`.
+    """
+    base = dict(amount=D("3000"), rate_per_year=D("0.12"),
+                schedule=_rule(days=(10,), payment=D("100"), count=12,
+                               start=START, shift_weekend=False),
+                penalties=(_penalty(PenaltyStep(0, D("0.05"))),))
+    base.update(kw)
+    return _deal("заём", **base)
+
+
+def test_payment_below_the_periods_accrual_is_stalled():
+    """Платёж меньше начисляемого за период: stalled, а не ложная дата (10-Т4).
+
+    Пул режет обязательный платёж до 30: проценты (30) плюс неустойка
+    урезанного (73.50) втрое больше платежа — баланс растёт, и прокат отвечает
+    честным «не закрывается» с причиной, а не выдуманным сроком.
+    """
+    roll = roll_deals(_book(_accruing_deal()), START, D(0), max_months=12,
+                      budgets={index: D("-70") for index in range(1, 13)})
+    month = roll.months[0]
+    assert month.paid < (month.interest_parts[INTEREST]
+                         + month.interest_parts[PENALTY])
+    assert roll.stalled
+    assert roll.freedom is None
+    assert roll.payoff_by_graph is None
+    assert roll.payoff_by_graph_reason == PAYOFF_NOT_CLOSED
+
+
+def test_payment_covering_interest_but_not_penalty_is_stalled():
+    """Платёж покрывает проценты, но не неустойку периода: всё ещё stalled (10-Т1).
+
+    Ширина формулировки заперта тестом: пул даёт 50, проценты месяца (30)
+    покрыты, а с неустойкой урезанного (52.50) начисляемое за период больше
+    платежа — баланс растёт, и до конца окна сделка не закрывается.
+    """
+    roll = roll_deals(_book(_accruing_deal()), START, D(0), max_months=12,
+                      budgets={index: D("-50") for index in range(1, 13)})
+    month = roll.months[0]
+    assert month.interest_parts[INTEREST] <= month.paid
+    assert month.paid < (month.interest_parts[INTEREST]
+                         + month.interest_parts[PENALTY])
+    assert roll.stalled
+    assert roll.freedom is None
+
+
+def test_payment_covering_the_accrual_closes_without_a_stall():
+    """Платёж покрывает начисляемое (проценты плюс неустойка): свобода без stalled.
+
+    Входной поток декабрьского вхождения капает первый месяц, но бюджет
+    покрывает и обязательные, и набежавшее: сделка закрывается внутри окна —
+    «не закрывается» не о чём (10-Т4, третья ширина).
+    """
+    deal = _accruing_deal(start=date(2025, 12, 1),
+                          schedule=_rule(days=(10,), payment=D("100"), count=13,
+                                         start=date(2025, 12, 1),
+                                         shift_weekend=False))
+    roll = roll_deals(_book(deal), START, D(700), max_months=12)
+    month = roll.months[0]
+    assert (month.interest_parts[INTEREST]
+            + month.interest_parts[PENALTY]) <= month.paid
+    assert roll.freedom is not None
+    assert not roll.stalled
+    assert roll.window.reason == WINDOW_DEBTS_CLOSED
+
+
+def test_growing_penalty_does_not_extend_the_window():
+    """Капающая неустойка окно не продлевает: конец окна тот же, что без неё (10-Т2).
+
+    Окно — минимум по графику, доходам и пределу месяцев; потоки просрочки в
+    границу не входят. Прокат кончается окном, и переживший его поток дальше не
+    капитализируется — «не достигнута за окно» с причиной конца окна.
+    """
+    scheduled = _rule(days=(10,), payment=D("100"), count=12, start=START,
+                      shift_weekend=False)
+    with_rule = _accruing_deal(schedule=scheduled)
+    without = _accruing_deal(schedule=scheduled, penalties=())
+    plain = roll_window(_book(without), START, 12)
+    rolled = roll_window(_book(with_rule), START, 12)
+    assert (rolled.months, rolled.until, rolled.reason) == (plain.months,
+                                                            plain.until,
+                                                            plain.reason)
+    assert rolled.reason == WINDOW_DEBTS_CLOSED
+    roll = roll_deals(_book(with_rule), START, D(0), max_months=12,
+                      budgets={index: D("-50") for index in range(1, 13)})
+    assert len(roll.months) == roll.window.months
+    assert roll.months[-1].balances["заём"] > 0     # поток пережил окно
+    assert roll.stalled
+    assert roll.freedom is None
+    assert roll.payoff_by_graph_reason == PAYOFF_NOT_CLOSED
+
+
+def test_streams_do_not_end_the_window_without_a_payment_count():
+    """Потоки у сделки без числа платежей окно не продлевают (10-Т3).
+
+    Ряда нет конца — границы по долгам нет вовсе: окно задают доходы и предел
+    месяцев, а `stalled` держится с причиной «кончился предел месяцев».
+    """
+    deal = _accruing_deal(schedule=_rule(days=(10,), payment=D("100"),
+                                         shift_weekend=False))
+    roll = roll_deals(_book(deal), START, D(0), max_months=6,
+                      budgets={index: D("-50") for index in range(1, 7)})
+    assert roll.window.months == 6
+    assert roll.window.reason == WINDOW_MONTH_CAP
+    assert len(roll.months) == 6
+    assert roll.stalled
+    assert roll.freedom is None
+
+
+def test_a_reached_cap_stops_the_growth_but_not_the_stall():
+    """Потолок достигнут: неустойка перестала расти, `stalled` держится (10-Т3).
+
+    Потолок останавливает начисление, а не погашает долг: набранные 100 стоят
+    на месте с третьего месяца, и пока части не погашены, свободы нет.
+    """
+    capped = _penalty(PenaltyStep(0, D("0.05")), cap=PenaltyCap(CAP_SUM, D("100")))
+    roll = roll_deals(_book(_accruing_deal(penalties=(capped,))), START, D(0),
+                      max_months=12,
+                      budgets={index: D("-50") for index in range(1, 13)})
+    penalties = [month.interest_parts[PENALTY] for month in roll.months]
+    assert penalties[0] > 0
+    assert sum(penalties) == D("100.00")            # потолок достигнут
+    assert penalties[2] == 0                        # рост прекратился
+    assert roll.stalled
+    assert roll.freedom is None
+
+
+def test_a_stream_paid_off_inside_the_window_gives_freedom():
+    """Поток погашен внутри окна: свобода появляется, stalled не выставляется (10-Т3).
+
+    Неустойка первого месяца погашена вместе с долгом — окно кончается «долги
+    закрыты», и честного «не закрывается» не возникает. Окно без долгов — тот
+    же ответ: закрывать было нечего.
+    """
+    deal = _accruing_deal(start=date(2025, 12, 1),
+                          schedule=_rule(days=(10,), payment=D("100"), count=13,
+                                         start=date(2025, 12, 1),
+                                         shift_weekend=False))
+    roll = roll_deals(_book(deal), START, D(300), max_months=12)
+    assert roll.months[0].interest_parts[PENALTY] > 0   # неустойка была
+    assert roll.freedom is not None
+    assert not roll.stalled
+    assert roll.window.reason == WINDOW_DEBTS_CLOSED
+    paid = Movement(date(2025, 12, 20), D("1000"), "заём")
+    closed = _accruing_deal(amount=D("1000"), rate_per_year=D("0"),
+                            schedule=_rule(days=(20,), payment=D("1000"),
+                                           start=date(2025, 12, 1), count=1,
+                                           shift_weekend=False))
+    done = roll_deals(_book(closed, movements=[paid]), START, D(0), max_months=12)
+    assert not done.stalled
+    assert done.freedom == START
