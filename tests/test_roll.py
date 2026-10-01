@@ -1,6 +1,7 @@
 """Тесты проката сделок — синтетические фикстуры, без личных данных."""
 from __future__ import annotations
 
+import calendar
 from datetime import date
 from decimal import Decimal as D
 
@@ -9,13 +10,14 @@ import pytest
 from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
                           SKIPPED, AVALANCHE, AllocationRule, Assignment,
-                          CAP_NONE, CAP_SUM,
-                          Counterparty, Deal, FirstPayment, INTEREST, Movement,
-                          OccurrenceEdit, PENALTY, PenaltyCap, PenaltyRule,
+                          CAP_NONE, CAP_SUM, Charge, Counterparty, COSTS, Deal,
+                          FirstPayment, INTEREST, Movement, OccurrenceEdit,
+                          PARTS, PENALTY, PartPayment, PenaltyCap, PenaltyRule,
                           PenaltyStep,
                           ScheduleRule, Settlements, Wallet, accrued_interest,
                           accrued_penalty, compare_deal_strategies,
-                          deal_balance, occurrences, roll_deals, validate)
+                          deal_balance, deal_parts, occurrences, roll_deals,
+                          validate)
 from finance_core import (WINDOW_DEBTS_CLOSED, WINDOW_INCOME_ENDS,
                           WINDOW_MONTH_CAP, roll_window)
 from finance_core.roll import _DealsRoll
@@ -2107,3 +2109,265 @@ def test_a_stream_paid_off_inside_the_window_gives_freedom():
     done = roll_deals(_book(closed, movements=[paid]), START, D(0), max_months=12)
     assert not done.stalled
     assert done.freedom == START
+
+
+# --- фикс-проход 09: равенство на ходовых книгах (18) ----------------------------
+
+def _canon_agrees(book: Settlements, roll) -> None:
+    """Дозаписывает платежи проката в книгу и сверяет месяц за месяцем.
+
+    Остаток и части проката на конец месяца равны канону на ту же дату —
+    итогом и по каждой части (R3-Q21, Q10); сделка с обвалившейся раскладкой
+    сверяется итогом: частей нет ни там, ни там (Q34).
+    """
+    for month in roll.months:
+        for payment in month.payments:
+            book.movements.append(Movement(payment.date, payment.amount,
+                                           payment.deal,
+                                           occurrence=payment.planned))
+        on = date(month.month.year, month.month.month,
+                  calendar.monthrange(month.month.year, month.month.month)[1])
+        assert month.balances["заём"] == deal_balance(book, "заём", on)
+        assert month.parts.get("заём") == deal_parts(book, "заём", on)
+        if month.parts.get("заём") is not None:
+            assert sum(month.parts["заём"].values()) == month.balances["заём"]
+
+
+def _scheduled(**kw) -> ScheduleRule:
+    """График на 20-е с декабря: декабрьское вхождение просрочено на окне."""
+    base = dict(days=(20,), payment=D("1000"), count=6,
+                start=date(2025, 12, 1), shift_weekend=False)
+    base.update(kw)
+    return ScheduleRule(**base)
+
+
+def test_annual_rate_with_a_schedule_and_parts_matches_the_canon():
+    """Годовая ставка + уплаченный график + раскладка: прокат равен канону (P0-1).
+
+    Платёж внутри месяца у годовой ставки не меняет начисление этого месяца:
+    прокат считает месяц одним вызовом от остатка на начало, как канон, —
+    300.00, а не отрезками от своей базы.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0.12"),
+                 schedule=_scheduled(), allocations=(AllocationRule(PARTS),))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=3,
+                      budgets={index: D("0") for index in range(1, 4)})
+    # Декабрь начислил 100 (лежат в балансе на открытии), январь — 101.00:
+    # годовой месяц от остатка на начало, платёж 20-го его не меняет.
+    assert roll.months[0].interest_parts[INTEREST] == D("101.00")
+    _canon_agrees(book, roll)
+
+
+def test_book_facts_settle_streams_of_a_parts_deal():
+    """Факты книги — связанный и несвязанный — гасят потоки раскладочной сделки (P1-1).
+
+    Связанный платёж закрывает своё вхождение 15-го, несвязанный 25-го гасит
+    декабрьский поток по FIFO — неустойка проката равна канону в каждый месяц,
+    а не капает по мёртвому потоку.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", amount=D("5000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0"), schedule=_scheduled(count=4),
+                 allocations=(AllocationRule(PARTS),), penalties=(rule,))
+    book = _book(deal, movements=[
+        Movement(date(2026, 1, 15), D("300"), "заём",
+                 occurrence=date(2025, 12, 20)),
+        Movement(date(2026, 1, 25), D("500"), "заём")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=2,
+                      budgets={1: D("-1000"), 2: D("0")})
+    _canon_agrees(book, roll)
+
+
+def test_a_prepayment_settles_streams_of_a_parts_deal_in_its_day():
+    """Досрочка гасит старые потоки раскладочной сделки FIFO в свой день (P1-2).
+
+    База последнего дня уменьшена до начисления за этот день — досрочка датирована
+    концом месяца, и неустойка дня считается уже на урезанных потоках.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", amount=D("5000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0"), schedule=_scheduled(count=4),
+                 allocations=(AllocationRule(PARTS),), penalties=(rule,))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D("500"), max_months=2)
+    _canon_agrees(book, roll)
+
+
+def test_a_cap_remembers_the_in_window_accrual():
+    """Потолок на второй месяц не превышается: внутриоконное накопление живёт (P1-3).
+
+    Декабрь набрал 110, январь добил потолок до 300 — и на следующий месяц
+    рост стоит: «уже накопленное» не откатывается к открытию окна.
+    """
+    capped = _penalty(PenaltyStep(0, D("0.01")), cap=PenaltyCap(CAP_SUM, D("300")))
+    deal = _deal("заём", amount=D("1000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0"), schedule=_scheduled(count=4),
+                 allocations=(AllocationRule(PARTS),), penalties=(capped,))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=3,
+                      budgets={index: D("-1000") for index in range(1, 4)})
+    by_month = [month.interest_parts[PENALTY] for month in roll.months]
+    assert by_month[0] == D("190.00")            # добивает потолок 110+190=300
+    assert by_month[1] == D("0.00") and by_month[2] == D("0.00")
+    # Накопленное с декабрём — ровно потолок, месяц-в-месяц с каноном.
+    assert roll.months[-1].parts["заём"][PENALTY] == D("300.00")
+    _canon_agrees(book, roll)
+
+
+def test_a_collapsed_layout_finishes_the_month_on_the_balance():
+    """Обвал раскладки в середине месяца: месяц дорабатывается балансом (P1-4).
+
+    Платёж без правила на свою дату рушит раскладку (04-Т5): набранное месяцем
+    падает в баланс, проценты и неустойка до конца месяца считаются один раз —
+    двойного счёта нет, месяцы самосогласованы.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0"), schedule=_scheduled(),
+                 penalties=(rule,))
+    book = _book(deal, movements=[
+        Movement(date(2025, 12, 15), D("1000"), "заём",
+                 allocation=(PartPayment("тело", D("1000")),))])
+    validate(book)
+    opening = deal_balance(book, "заём", date(2025, 12, 31))
+    roll = roll_deals(book, START, D("0"), max_months=2)
+    month = roll.months[0]
+    assert "заём" not in month.parts             # раскладки больше нет (Q34)
+    # Самосогласованность: начисленное (проценты и неустойка) легло в баланс.
+    assert month.balances["заём"] == (opening + month.interest
+                                      - month.paid)
+    assert month.interest_parts[PENALTY] > 0     # неустойка посчитана один раз
+
+
+def test_a_return_enters_the_interest_base_by_its_date():
+    """Возврат против сделки входит в базу процентов со своей даты (P1-5).
+
+    Возврат наполняет тело и увеличивает базу с дня возврата — раскладка
+    проката сходится с каноном, где доля движения идёт в базу со знаком.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0.12"), schedule=_scheduled(),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal, movements=[
+        Movement(date(2026, 1, 15), D("700"), "заём", direction="приход")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=2,
+                      budgets={index: D("0") for index in range(1, 3)})
+    _canon_agrees(book, roll)
+
+
+def test_an_explicit_allocation_of_a_movement_beats_the_rule():
+    """Движение с явной разбивкой: прокат чтит факт кредитора, а не правило (P1-6).
+
+    Разбивка уводит 200 в издержки при правиле «тело первым» — части проката
+    равны канону, и издержки в них ровно строка разбивки.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0.12"), schedule=_scheduled(),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal, charges=[Charge("решение", date(2026, 1, 10), D("300"),
+                                       "заём", "издержки", basis="решение")],
+                 movements=[
+        Movement(date(2026, 1, 15), D("700"), "заём",
+                 allocation=(PartPayment("издержки", D("200")),
+                             PartPayment("тело", D("500"))))])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=2,
+                      budgets={index: D("0") for index in range(1, 3)})
+    # Правило «тело первым» издержек не тронуло бы: до них дошёл факт кредитора.
+    assert roll.months[0].parts["заём"]["издержки"] == D("100.00")
+    _canon_agrees(book, roll)
+
+
+def test_a_daily_rate_with_parts_matches_the_canon():
+    """Дневная ставка + раскладка: месяц равен канону до последнего дня (P0-1).
+
+    Дневная ставка идёт отрезками между событиями, но без компаунда внутри
+    месяца: начисление отрезка ложится в части и в баланс, а базу следующего
+    отрезка не растит — канон добавляет начисление месяца на месячной
+    границе. Последний день месяца входит в начисление.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=None, rate_per_day=D("0.0005"),
+                 schedule=_scheduled(), allocations=(AllocationRule(PARTS),))
+    book = _book(deal)
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=3,
+                      budgets={index: D("0") for index in range(1, 4)})
+    assert roll.months[0].interest_parts[INTEREST] == D("145.48")
+    _canon_agrees(book, roll)
+
+
+def test_a_body_charge_enters_the_annual_base_in_its_month():
+    """Начисление в тело при годовой ставке — в базе того же месяца (04-Т3).
+
+    Канон включает начисления в тело в базу месяца, в котором они случились:
+    январь — 106.00 (1% от 10 600: тело с декабрьским начислением плюс
+    доначисленные с 10 января 500), а не 101.00 без факта.
+    """
+    from finance_core import BODY, Charge
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0.12"), schedule=_scheduled(),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal, charges=[Charge("дозаем", date(2026, 1, 10), D("500"),
+                                       "заём", BODY, basis="решение")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=2,
+                      budgets={index: D("0") for index in range(1, 3)})
+    assert roll.months[0].interest_parts[INTEREST] == D("106.00")
+    # Тело: 10 000 + доначисление 500 − два платежа по 1000 (дек и янв).
+    assert roll.months[0].parts["заём"][BODY] == D("8500.00")
+    _canon_agrees(book, roll)
+
+
+def test_a_stream_born_after_a_collapse_keeps_accruing():
+    """Поток, рождённый урезанием после обвала раскладки, живёт и капает (P1-4).
+
+    События `pay_row` после обвала применяются к потокам сразу, в свой день:
+    рождённый 25 января поток капает в феврале 28.00 — носитель просрочки
+    не потерян.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0"), schedule=_scheduled(days=(25,)),
+                 allocations=(AllocationRule(PARTS,
+                                             effective=date(2026, 2, 1)),),
+                 penalties=(rule,))
+    book = _book(deal, movements=[
+        Movement(date(2025, 12, 15), D("1000"), "заём",
+                 allocation=(PartPayment("тело", D("1000")),)),
+        Movement(date(2026, 1, 10), D("1000"), "заём")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=2,
+                      budgets={1: D("-1000"), 2: D("0")})
+    assert "заём" not in roll.months[0].parts      # раскладка обвалилась
+    assert roll.months[1].interest_parts[PENALTY] == D("28.00")
+
+
+def test_a_charge_reaches_a_deal_without_a_layout():
+    """Записи-начисления проводятся сделкам и без раскладки (P2-1).
+
+    Баланс растёт на начисление в свой месяц, раскладка начисленного месяца
+    видит факт в своей части — симметрично производным штрафам.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0"), schedule=_scheduled())
+    book = _book(deal, charges=[Charge("решение", date(2026, 1, 15), D("500"),
+                                       "заём", COSTS, basis="решение")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=1)
+    month = roll.months[0]
+    assert month.interest_parts["издержки"] == D("500.00")
+    # Декабрьское вхождение платится в первый месяц: баланс = тело + факт − платежи.
+    assert month.balances["заём"] == D("8500.00")
+    for payment in month.payments:
+        book.movements.append(Movement(payment.date, payment.amount,
+                                       payment.deal,
+                                       occurrence=payment.planned))
+    assert month.balances["заём"] == deal_balance(book, "заём", date(2026, 1, 31))
