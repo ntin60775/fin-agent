@@ -2,8 +2,8 @@
 node_type: ticket
 title: Копилка с частями
 service: _platform
-status: draft
-updated: 2026-09-28
+status: active
+updated: 2026-10-01
 links:
   documents: [../../../finance_core/roll.py, ../../../tests/test_roll.py]
   part_of: [README.md]

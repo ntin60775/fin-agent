@@ -558,6 +558,192 @@ def test_an_inside_window_assignment_enters_the_member_balance_and_the_target():
             deal_balance(book, "участник", on)
 
 
+def test_unit_charges_do_not_grow_the_target_or_the_pot():
+    """Неустойка и издержки участника — в его частях: цель и котёл не растут (15-Т1).
+
+    Записи-начисления (01; формула 06 не нужна) падают в части участника и в
+    его остаток — как проценты: копилка копит только деньги, цель фиксирована
+    при договорённости (R3-Q17). Платёж тем временем двигает обе стороны
+    сразу: котёл растёт, части участника падают. На закрытии части обнуляются
+    разом вместе с остатками.
+    """
+    first = _deal(uid="первый", amount=D("2000"), rate_per_year=D("0"),
+                  closure_unit="копилка", schedule=_rule(payment=D("1000")),
+                  allocations=(AllocationRule(PARTS),))
+    second = _deal(uid="второй", amount=D("1000"), rate_per_year=D("0"),
+                   closure_unit="копилка", schedule=_rule(payment=D("1000")),
+                   allocations=(AllocationRule(PARTS),))
+    book = _book(first, second,
+                 charges=[Charge("пени", date(2026, 1, 15), D("300"), "первый",
+                                 PENALTY, basis="решение"),
+                          Charge("издержки", date(2026, 1, 10), D("200"),
+                                 "первый", COSTS, basis="решение")])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3)
+
+    jan = roll.months[0]
+    # Цель — тела участников (3 000), котёл — платежи (2 000): начислениями
+    # не выросли ни на копейку.
+    assert jan.units["копилка"].target == D("3000")
+    assert jan.units["копилка"].pot == D("2000")
+    # Неустойка и издержки — в частях участника: тело 1 000 упало платежом
+    # в котёл, начисленное 500 осталось при нём.
+    assert jan.parts["первый"] == {BODY: D("1000"), INTEREST: D("0"),
+                                   PENALTY: D("300"), COSTS: D("200")}
+    assert jan.balances["первый"] == D("1500")
+    assert sum(jan.parts["первый"].values()) == jan.balances["первый"]
+    # Начисленное месяца видно числом — и нигде не в котле и не в цели.
+    assert jan.interest == D("500")
+
+    # Февраль: котёл добран платёжем «первого» — закрытие разом стирает
+    # и остатки, и части участников.
+    feb = roll.months[1]
+    assert feb.units["копилка"].closed
+    assert feb.units["копилка"].pot == D("3000")
+    assert feb.balances["первый"] == D("0")
+    assert feb.parts["первый"] == {part: D("0") for part in PARTS}
+    assert feb.parts["второй"] == {part: D("0") for part in PARTS}
+
+
+def test_a_unit_member_never_pays_past_his_balance():
+    """Платёж участника не превышает его остаток: минус невозможен (Q33, 15-Т2).
+
+    Хочет график 1 200 при теле 1 000 — платит 1 000, остальное видно
+    нехваткой. Раньше room был только котлом: участник платил за соседа,
+    его остаток уходил в минус, и закрытие разом стирало переплату молча.
+    """
+    first = _deal(uid="первый", amount=D("1000"), rate_per_year=D("0"),
+                  closure_unit="копилка", schedule=_rule(payment=D("1200")))
+    second = _deal(uid="второй", amount=D("5000"), rate_per_year=D("0"),
+                   closure_unit="копилка", schedule=_rule(payment=D("500")))
+    alive = _deal(uid="живая", amount=D("20000"), rate_per_year=D("0.1"),
+                  schedule=_rule(payment=D("500")))
+    book = _book(first, second, alive)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=12)
+
+    jan = roll.months[0]
+    # Платил свой остаток, не want: минуса нет, урезание названо числом.
+    assert jan.balances["первый"] == D("0")
+    assert jan.units["копилка"].pot == D("1500")
+    assert jan.short == D("200")
+    # Свободный остаток пула уходит «живой» (дороже копилки в лавине),
+    # а не досрочкой в котёл за участника с нулевым остатком: 20000 − 500
+    # платежа − 200 досрочки + 166,67 процентов января.
+    assert jan.balances["живая"] == D("19466.67")
+    # Февраль: участнику с нулевым остатком платить нечем — нехватка растёт.
+    assert roll.months[1].short == D("1200")
+    # Минуса нет ни в одном месяце; единицу закрывают платежи должника
+    # ровно по цели — обнулять нечего (Q33).
+    for month in roll.months:
+        assert month.balances["первый"] >= 0
+        assert month.balances["второй"] >= 0
+        assert month.units["копилка"].pot <= month.units["копилка"].target
+    assert roll.months[9].units["копилка"].closed
+    assert roll.months[9].units["копилка"].pot == D("6000")
+
+
+def test_a_unit_return_shrinks_the_pot_and_reopens_the_unit():
+    """Возврат по участнику — зеркало платежа: котёл падает, части растут (15-Т3).
+
+    Механика возврата сохранена (03-Т5): котёл уменьшается движением против
+    сделки, остаток участника наполняется телом. Если закрытая единица
+    теряет котёл ниже цели — она раскрывается (правило `closed = pot >=
+    target`), и её график снова копит нехватку (15-Т4).
+    """
+    first = _deal(uid="первый", amount=D("2000"), rate_per_year=D("0"),
+                  closure_unit="копилка",
+                  schedule=_rule(days=(20,), payment=D("1000"), count=2,
+                                 start=START),
+                  allocations=(AllocationRule(PARTS),))
+    second = _deal(uid="второй", amount=D("1000"), rate_per_year=D("0"),
+                   closure_unit="копилка",
+                   schedule=_rule(days=(20,), payment=D("1000"), count=2,
+                                  start=START),
+                   allocations=(AllocationRule(PARTS),))
+    alone = _deal(uid="одиночная", amount=D("9000"), rate_per_year=D("0.2"),
+                  schedule=_rule(payment=D("500")))
+    book = _book(first, second, alone,
+                 movements=[Movement(date(2026, 3, 10), D("1500"), "первый",
+                                     direction="приход")])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3)
+
+    # Февраль: котёл добран, единица закрыта разом — остатки и части нули.
+    feb = roll.months[1]
+    assert feb.units["копилка"].closed
+    assert feb.units["копилка"].pot == D("3000")
+    assert feb.balances["первый"] == D("0")
+    # Март: возврат 1 500 уменьшил котёл до 1 500 — единица раскрыта,
+    # у участника снова долг, весь в теле.
+    mar = roll.months[2]
+    assert not mar.units["копилка"].closed
+    assert mar.units["копилка"].pot == D("1500")
+    assert mar.parts["первый"] == {BODY: D("1500"), INTEREST: D("0"),
+                                   PENALTY: D("0"), COSTS: D("0")}
+    assert mar.balances["первый"] == D("1500")
+
+
+def test_a_zero_target_unit_is_closed_on_entry():
+    """Цель 0 (участники без тела): закрывать нечего — прокат не начинается (15-Т4).
+
+    Тела участников нулевые — сделки закрываются к началу проката, единица
+    в нём не возникает вовсе: ни цели, ни котла, ни нехватки от их графика.
+    """
+    first = _deal(uid="первый", amount=D("0"), rate_per_year=D("0"),
+                  closure_unit="копилка", schedule=_rule(payment=D("1000")))
+    second = _deal(uid="второй", amount=D("0"), rate_per_year=D("0"),
+                   closure_unit="копилка", schedule=_rule(payment=D("1000")))
+    book = _book(first, second)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=3)
+
+    assert roll.gaps == []
+    jan = roll.months[0]
+    assert jan.units == {}
+    assert jan.balances == {}
+    assert jan.short == D("0")
+    assert jan.total == D("0")
+
+
+def test_a_unit_prepayment_settles_only_the_first_members_streams():
+    """Досрочка копилки гасит потоки первого участника, остальных не трогает (15-Т4).
+
+    Досрочка числится за первым участником (08-Т2): его просроченные потоки
+    гасятся FIFO своим днём платежа — последний день неустойки ему не капает;
+    потоки соседа продолжают капать весь месяц и дальше.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+    first = _deal(uid="первый", amount=D("2000"), rate_per_year=D("0"),
+                  start=date(2025, 11, 1), closure_unit="копилка",
+                  schedule=_rule(days=(20,), payment=D("500")),
+                  allocations=(AllocationRule(PARTS),), penalties=(rule,))
+    second = _deal(uid="второй", amount=D("2000"), rate_per_year=D("0"),
+                   start=date(2025, 11, 1), closure_unit="копилка",
+                   schedule=_rule(days=(20,), payment=D("500")),
+                   allocations=(AllocationRule(PARTS),), penalties=(rule,))
+    book = _book(first, second)
+    validate(book)
+    roll = roll_deals(book, START, D("1000"), max_months=2,
+                      budgets={1: D("1000"), 2: D("0")})
+
+    jan = roll.months[0]
+    # Досрочка ушла в котёл и числится за первым участником.
+    assert [(sp.deal, sp.amount, sp.unit)
+            for sp in jan.payments if sp.planned is None] == \
+        [("первый", D("1000"), "копилка")]
+    assert jan.prepaid == D("1000")
+    # Оба капали весь месяц одинаково; последний день досрочка отняла
+    # только у первого — его потоки погашены FIFO, минуса у него нет.
+    assert jan.parts["первый"] == {BODY: D("500"), INTEREST: D("0"),
+                                   PENALTY: D("55.00"), COSTS: D("0")}
+    assert jan.parts["второй"][PENALTY] == D("56.00")
+    # Февраль: накопленная неустойка первого замерла — потоков нет; у второго
+    # капает дальше (28 дней по 1,00).
+    assert roll.months[1].parts["первый"][PENALTY] == D("55.00")
+    assert roll.months[1].parts["второй"][PENALTY] == D("84.00")
+
+
 def test_repeating_the_month_step_keeps_the_transfer_delta_once():
     """Повтор шага месяца проводит дельту цессии в цель единицы ровно один раз.
 
@@ -806,8 +992,12 @@ def test_a_unit_closed_together_stops_showing_a_shortfall():
     assert roll.months[1].units["копилка"].pot == D("3000")
     assert [roll.months[i].balances["первый"] for i in range(1, 4)] == [D("0")] * 3
     assert [roll.months[i].balances["второй"] for i in range(1, 4)] == [D("0")] * 3
-    # Ни в месяц закрытия, ни после — нехватки нет.
-    assert [m.short for m in roll.months] == [D("0")] * 4
+    # Нехватки нет ни в месяц закрытия, ни после; в феврале она честно
+    # видна один раз: вхождение «второго» урезано его нулевым остатком
+    # (Q33 — платёж не идёт за чужой остаток), единицу закрывает платёж
+    # «первого», чьё тело ещё не выплачено.
+    assert [m.short for m in roll.months] == [D("0"), D("1000"), D("0"),
+                                              D("0")]
     # Равенство `prepaid == short` на такой книге не выполняется (В-2):
     # нехватки нет, а освободившийся из графика единицы платёж уходит
     # досрочкой живым сделкам.
