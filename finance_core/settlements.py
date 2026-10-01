@@ -1203,11 +1203,12 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
     """Раскладка канона по частям на дату — или `None`, если раскладка не известна.
 
     Тело — версии тела плюс начисления в тело минус платежи в тело; проценты —
-    начисленное минус платежи в проценты; неустойка и издержки — свои начисления
-    минус свои платежи. Раскладка известна, когда у сделки есть правило
-    распределения или у платежей есть явные разбивки; иначе — `None`: пробел,
-    а не выдумка (Q12, Q34). Платёж без разбивки и без правила на свою дату
-    раскладку делает неопределённой целиком: половинок не бывает.
+    начисленное формулой плюс записи-факты в проценты минус платежи в проценты;
+    неустойка и издержки — свои начисления минус свои платежи. Раскладка
+    известна, когда у сделки есть правило распределения или у платежей есть
+    явные разбивки; иначе — `None`: пробел, а не выдумка (Q12, Q34). Платёж
+    без разбивки и без правила на свою дату раскладку делает неопределённой
+    целиком: половинок не бывает.
 
     Платежи распределяются хронологически по остаткам частей на день платежа
     (`allocate_payment`, правило версии на дату платежа); возврат части не гасит,
@@ -1218,6 +1219,10 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
     Неустойка — своя производная: капает по правилу зоны на потоках просрочки
     (`_penalty_of`), входит в свою часть начисленным и не входит в базу
     процентов; день платежа видит её начисленной до прошлого дня (06-Т3).
+    Начисление в «проценты» (01) — наоборот, в базе: база процентов —
+    тело плюс проценты (правка 2), приросты части входят в неё с даты
+    события (04-Т3). Штраф триггера в «проценты» (07) — так же, как штраф
+    в тело (07-Т5): зона выбрала часть — механика части едина.
     Штрафы триггеров — тоже производные (`trigger_charges`), входят в часть из
     правила с даты срабатывания, как записи-факты, — фактом случай вытесняется,
     двойного входа нет (07-Т5).
@@ -1236,7 +1241,9 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
     paid = {part: Decimal(0) for part in PARTS}
     into_base: list[tuple[date, Decimal]] = []   # доли платежей в тело+проценты
     grows = [(a.date, a.delta) for a in book.assignments if a.deal == deal_uid]
+    interest_grows: list[tuple[date, Decimal]] = []   # факты в проценты — в базе
     body_before = Decimal(0)       # начисления в тело до начала долга — в базе
+    interest_before = Decimal(0)   # факты в проценты до начала долга — так же
 
     def interest(until: date) -> Decimal:
         """Начисленное к дате: одна функция, база — тело плюс проценты."""
@@ -1245,8 +1252,9 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
         base = (deal_amount_at(book, deal_uid, since)
                 - sum((share for when, share in into_base if when < since),
                       Decimal(0))
-                + body_before)
-        return accrued_interest(deal, base, since, until, into_base, grows)
+                + body_before + interest_before)
+        return accrued_interest(deal, base, since, until, into_base,
+                                grows + interest_grows)
 
     for event in sorted([*movements,
                          *(c for c in book.charges if c.deal == deal_uid
@@ -1261,6 +1269,18 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
                     body_before += event.amount
                 else:
                     grows.append((event.date, event.amount))
+            elif event.part == INTEREST:
+                # Начисление в проценты — фактом или штрафом триггера —
+                # капает, как формульные: база процентов — тело плюс
+                # проценты (правка 2), приросты части входят в неё с даты
+                # события (04-Т3); до начала долга — в стартовой базе, как
+                # тело-факты (`body_before`). Зона выбрала часть — механика
+                # части едина: штраф в тело в базу входит (07-Т5), в
+                # проценты — так же.
+                if since is not None and event.date < since:
+                    interest_before += event.amount
+                else:
+                    interest_grows.append((event.date, event.amount))
             continue
         movement = event
         sign = Decimal(1) if _along(deal, movement) else Decimal(-1)
@@ -1276,7 +1296,8 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
             balances = {
                 BODY: max(deal_amount_at(book, deal_uid, movement.date)
                           + charged[BODY] - paid[BODY], Decimal(0)),
-                INTEREST: max(interest(day_before) - paid[INTEREST], Decimal(0)),
+                INTEREST: max(charged[INTEREST] + interest(day_before)
+                              - paid[INTEREST], Decimal(0)),
                 PENALTY: max(charged[PENALTY] + penalty(day_before)
                              - paid[PENALTY], Decimal(0)),
                 COSTS: max(charged[COSTS] - paid[COSTS], Decimal(0)),
@@ -1289,7 +1310,7 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
                                   + shares.get(INTEREST, Decimal(0)))))
 
     return {BODY: deal_amount_at(book, deal_uid, on) + charged[BODY] - paid[BODY],
-            INTEREST: interest(on) - paid[INTEREST],
+            INTEREST: charged[INTEREST] + interest(on) - paid[INTEREST],
             PENALTY: charged[PENALTY] + penalty(on) - paid[PENALTY],
             COSTS: charged[COSTS] - paid[COSTS]}
 

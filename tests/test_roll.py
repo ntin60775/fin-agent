@@ -2553,3 +2553,105 @@ def test_a_prepayment_settles_the_oldest_streams_first():
         rule, [(date(2026, 1, 20), D("2000"), D("1000")),
                (date(2026, 2, 20), D("2000"), D("100"))],
         date(2026, 4, 1), date(2026, 4, 30))
+
+
+# --- начисление в «проценты»: части, база, равенство с каноном (19) -------------
+
+def test_an_interest_charge_enters_the_part_and_the_roll_matches_the_canon():
+    """Факт в «проценты» живёт в части — прокат равен канону (находка 14).
+
+    Раскладочный канон терял запись-начисление в «проценты» (`_parts_at` не
+    знал `charged[INTEREST]`): баланс проката 9300 против канона 9000 при
+    нулевой ставке. Теперь факт в части обоих носителей, а раскладка
+    начисленного месяца видит его в строке «проценты» — сумма равна
+    `interest` (09-Т3).
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0"), schedule=_scheduled(count=1),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal,
+                 movements=[Movement(date(2025, 12, 28), D("1000"), "заём",
+                                     occurrence=date(2025, 12, 20),
+                                     allocation=(PartPayment("тело", D("1000")),))],
+                 charges=[Charge("проц-факт", date(2026, 1, 15), D("300"), "заём",
+                                 INTEREST, basis="решение")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=2)
+    month = roll.months[0]
+    # Нулевая ставка: тело 9000 (декабрьский платёж ушёл разбивкой в тело)
+    # плюс факт 300 — канон на ту же дату согласен.
+    assert month.balances["заём"] == D("9300.00")
+    assert month.parts["заём"] == {BODY: D("9000"), INTEREST: D("300.00"),
+                                   PENALTY: D("0"), COSTS: D("0")}
+    assert month.interest == D("300.00")
+    assert month.interest_parts[INTEREST] == D("300.00")
+    assert sum(month.interest_parts.values()) == month.interest
+    _canon_agrees(book, roll)
+
+
+def test_an_interest_charge_compounds_the_annual_base():
+    """Факт в «проценты» входит в базу процентов с даты события (правка 2).
+
+    Симметрично начислению в тело (04-Т3): база процентов — тело плюс
+    проценты, факт — те же проценты. Январь: (9100 + 300) × 1 % = 94.00;
+    февраль — 1 % от 8494 = 84.94 (платёж 28.01 уменьшил базу), март — 1 %
+    от 7578.94 = 75.79; канон тем же вызовом даёт те же числа. Без факта
+    в базе февраль был бы 81.91 — тест различает.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=D("0.12"), schedule=_scheduled(count=4),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal,
+                 movements=[Movement(when, D("1000"), "заём",
+                                     occurrence=date(when.year, when.month, 20),
+                                     allocation=(PartPayment("тело", D("1000")),))
+                            for when in (date(2025, 12, 28), date(2026, 1, 28),
+                                         date(2026, 2, 28), date(2026, 3, 28))],
+                 charges=[Charge("проц-факт", date(2026, 1, 15), D("300"), "заём",
+                                 INTEREST, basis="решение")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=3)
+    # Декабрь: 10 000 × 1 % = 100.00; платёж 28.12 уменьшает базу января.
+    assert roll.months[0].interest_parts[INTEREST] == D("394.00")  # 94 + 300
+    assert sum(roll.months[0].interest_parts.values()) == roll.months[0].interest
+    assert roll.months[0].parts["заём"][INTEREST] == D("494.00")
+    assert roll.months[1].interest == D("84.94")
+    assert roll.months[2].interest == D("75.79")
+    # Месячная мера канона: база марта — 7578.94 (тело + формулы + факт).
+    assert roll.months[2].interest == accrued_interest(
+        deal, D("7578.94"), date(2026, 3, 1), date(2026, 3, 31), (), ())
+    _canon_agrees(book, roll)
+
+
+def test_an_interest_charge_compounds_the_daily_base():
+    """Факт в «проценты» — в дневной базе с дня события (правка 2, тикет 19).
+
+    Дневная ставка: канон добавляет дельту в базу в день факта
+    (`left += shift`), прокат — в день факта растит базу прогулки
+    (`base += c.amount`): январь 289.71 дневных (9.31 за день до 15-го,
+    9.61 после) плюс факт 300. Без базы январь был бы 284.61 — тест
+    различает; канон на тех же событиях даёт те же числа.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 rate_per_year=None, rate_per_day=D("0.001"),
+                 schedule=_scheduled(count=4),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal,
+                 movements=[Movement(when, D("1000"), "заём",
+                                     occurrence=date(when.year, when.month, 20),
+                                     allocation=(PartPayment("тело", D("1000")),))
+                            for when in (date(2025, 12, 28), date(2026, 1, 28),
+                                         date(2026, 2, 28), date(2026, 3, 28))],
+                 charges=[Charge("проц-факт", date(2026, 1, 15), D("300"), "заём",
+                                 INTEREST, basis="решение")])
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=3)
+    assert roll.months[0].interest == D("589.71")     # 289.71 + 300 факта
+    assert roll.months[0].interest_parts[INTEREST] == D("589.71")
+    assert sum(roll.months[0].interest_parts.values()) == roll.months[0].interest
+    # Месячная мера канона: база января 9310 (10 000 + 310 декабрьских
+    # − 1000 платежа 28.12), дельта 15.01, платёж 28.01.
+    assert roll.months[0].interest == D("300.00") + accrued_interest(
+        deal, D("9310.00"), date(2026, 1, 1), date(2026, 1, 31),
+        [(date(2026, 1, 28), D("1000"))], [(date(2026, 1, 15), D("300"))])
+    _canon_agrees(book, roll)

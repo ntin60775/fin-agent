@@ -1421,6 +1421,84 @@ def test_a_backdated_body_charge_grows_the_base_from_the_event_date():
     assert parts[INTEREST] == D("343.21")        # февраль на 12 100, март на 12 221
 
 
+def test_a_charge_into_interest_grows_interest_from_its_own_date():
+    """Начисление в проценты — в части и в базе, как начисление в тело (19).
+
+    База процентов — тело плюс проценты (правка 2): факт капает с даты
+    события, март — (10 201 + 2 000) × 1 % = 122.01. Без базы было бы
+    2 303.01 — тест различает.
+    """
+    grown = _rule_book(_rate_deal(allocations=(AllocationRule(PARTS),)),
+                       charges=[Charge("проц-факт", date(2026, 3, 1), D("2000"),
+                                       "заём", INTEREST)])
+    parts = deal_parts(grown, "заём", date(2026, 3, 31))
+    assert parts[BODY] == D("10000")
+    assert parts[INTEREST] == D("2323.01")       # 323.01 формулы + 2000 факта
+    assert sum(parts.values()) == deal_balance(grown, "заём", date(2026, 3, 31))
+
+
+def test_an_interest_charge_before_the_deal_start_enters_the_base():
+    """Факт в «проценты» до начала долга — в стартовой базе (19).
+
+    Симметрично телу (`body_before`): январь — (10 000 + 300) × 1 % = 103.00;
+    прокат, чья база — сумма частей на открытие окна, даёт то же число.
+    """
+    back = _rule_book(_rate_deal(allocations=(AllocationRule(PARTS),),
+                                 wallet="карта",
+                                 schedule=ScheduleRule(days=(), payment=D("1000"))),
+                      charges=[Charge("проц-факт", date(2025, 12, 15), D("300"),
+                                      "заём", INTEREST)])
+    parts = deal_parts(back, "заём", date(2026, 1, 31))
+    assert parts[BODY] == D("10000")
+    assert parts[INTEREST] == D("403.00")
+    from finance_core import Wallet, roll_deals
+    back.wallets.append(Wallet("карта", "Карта", "карта", D("0")))
+    roll = roll_deals(back, date(2026, 1, 1), D("0"), max_months=1)
+    assert roll.months[0].balances["заём"] == D("10403.00")
+    assert roll.months[0].parts["заём"][INTEREST] == D("403.00")
+
+
+def test_a_payment_after_an_interest_charge_settles_the_fact():
+    """Платёж по правилу видит факт в остатке части «проценты» (19).
+
+    Балансы распределения строятся на тех же частях, что и канон: на день
+    платежа остаток «процентов» = факт 300 + формулы 251.47 (янв 100 +
+    фев 104 + 14 дней марта от 10 504) = 551.47, платёж 400 уходит в
+    проценты, тело не тронуто. Без факта в остатке платёж ушёл бы в тело —
+    распределение разъехалось бы с прокатом.
+    """
+    settled = _rule_book(
+        _rate_deal(allocations=(AllocationRule((PENALTY, INTEREST, BODY, COSTS)),)),
+        charges=[Charge("проц-факт", date(2026, 2, 15), D("300"), "заём",
+                        INTEREST)],
+        movements=[Movement(date(2026, 3, 15), D("400"), "заём")])
+    parts = deal_parts(settled, "заём", date(2026, 3, 31))
+    assert parts[BODY] == D("10000")
+    # Формулы: янв 100, фев (10 100 + 300) × 1 % = 104.00, март 105.04;
+    # + факт 300 − платёж 400 = 209.04.
+    assert parts[INTEREST] == D("209.04")
+    assert sum(parts.values()) == deal_balance(settled, "заём", date(2026, 3, 31))
+
+
+def test_interest_charge_paths_agree_without_a_rate():
+    """Без ставки оба пути канона дают одно число (19).
+
+    Раскладочный и безраскладочный канон включают факт в остаток; разница
+    путей — только в базе процентов (отложка 07) — без ставки базы нет.
+    Раскладка раскладывает, пробел остаётся пробелом (Q34).
+    """
+    ruled = _rule_book(_rate_deal(rate_per_year=None,
+                                  allocations=(AllocationRule(PARTS),)),
+                       charges=[Charge("проц-факт", date(2026, 1, 15), D("300"),
+                                       "заём", INTEREST)])
+    plain = _rule_book(_rate_deal(rate_per_year=None),
+                       charges=[Charge("проц-факт", date(2026, 1, 15), D("300"),
+                                       "заём", INTEREST)])
+    assert deal_balance(ruled, "заём", date(2026, 1, 31)) == D("10300.00")
+    assert deal_balance(plain, "заём", date(2026, 1, 31)) == D("10300.00")
+    assert deal_parts(ruled, "заём", date(2026, 1, 31))[INTEREST] == D("300")
+    assert deal_parts(plain, "заём", date(2026, 1, 31)) is None
+
 def test_without_rules_there_are_no_parts_but_the_canon_answers():
     """Нет правила и разбивок — раскладка пробел (Q34), канон прежних чисел."""
     plain = _rule_book(_rate_deal())
