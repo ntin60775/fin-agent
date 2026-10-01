@@ -2,7 +2,7 @@
 node_type: ticket
 title: «Фикс-проход 15 — Q33 на досрочке копилки и неустойка в раскладке начисленного»
 service: _platform
-status: draft
+status: active
 updated: 2026-10-01
 links:
   documents: [../../../finance_core/roll.py, ../../../finance_core/README.md, ../../../tests/test_roll.py]
