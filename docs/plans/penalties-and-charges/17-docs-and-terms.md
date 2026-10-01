@@ -2,8 +2,8 @@
 node_type: ticket
 title: Доки, термины и записи решений
 service: _platform
-status: draft
-updated: 2026-09-28
+status: archived
+updated: 2026-10-02
 links:
   documents: [../../../finance_core/README.md, ../../../CONTEXT.md, ../../decisions/README.md]
   part_of: [README.md]
