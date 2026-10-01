@@ -769,24 +769,29 @@ def _debted_deal(amount: D = D("10000")) -> Deal:
 
 
 def test_a_charge_moves_no_cash():
-    """Начисление — рост долга без денег: касса его не видит (11-Т4.1).
+    """Начисление — рост долга без денег: платежа от него не появляется (11-Т4.1).
 
-    Две книги — с начислением и без: месяцы кассы совпадают (платежей от
-    начисления не появляется, кошельки одинаковы), обязательные платятся те же,
-    а расчётный остаток вырос ровно на начисление.
+    Касса начисления как события не видит: месяц с начислением совпадает
+    день в день с месяцем долга, просто большего на начисление, — свободные
+    деньги, кошельки и платежи те же. Расчётный остаток вырос ровно на
+    начисление.
     """
     charge = Charge("решение", date(2026, 1, 15), D("1500"), "заём", "неустойка",
                     basis="решение")
     plain_book = _book(_debted_deal())
     charged_book = _book(_debted_deal(), charges=[charge])
-    plain = roll_months(plain_book, date(2026, 1, 1),
-                        [_wallet_like()], [], [], D("0"), max_months=2)
-    charged = roll_months(charged_book, date(2026, 1, 1),
-                          [_wallet_like()], [], [], D("0"), max_months=2)
+    bigger_book = _book(_debted_deal(D("11500")))
+    wallets = [_wallet_like()]
+    roll_months(plain_book, date(2026, 1, 1), wallets, [], [],
+                D("0"), max_months=2)
+    charged = roll_months(charged_book, date(2026, 1, 1), [_wallet_like()], [],
+                          [], D("0"), max_months=2)
+    bigger = roll_months(bigger_book, date(2026, 1, 1), [_wallet_like()], [],
+                         [], D("0"), max_months=2)
     assert [(m.balances, m.hole, m.free) for m in charged.cash_months] == [
-        (m.balances, m.hole, m.free) for m in plain.cash_months]
+        (m.balances, m.hole, m.free) for m in bigger.cash_months]
     assert [month.paid for month in charged.deal_roll.months] == [
-        month.paid for month in plain.deal_roll.months]
+        month.paid for month in bigger.deal_roll.months]
     # Книга не мутируется прокатом: канон — тело плюс начисление,
     # платежей в книге нет (расписание — проекция, а не факт книги).
     assert deal_balance(charged_book, "заём", date(2026, 1, 31)) == D("11500")
