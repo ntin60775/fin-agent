@@ -466,7 +466,8 @@ def test_pot_member_balance_falls_with_pot_payments_and_equals_the_canon():
     и на них уже не прокат считает, а канон остатка (тот же путь, что у обычной
     сделки в тесте канона). После записи остаток участника на конец месяца и
     расчётный остаток — одно число: обязательные платежи, досрочка в котёл
-    (числится за первым участником) и начисление проводятся одинаково.
+    (доли лесенки — своим участникам, суперсед 08-Т2) и начисление проводятся
+    одинаково.
     """
     first = _deal(uid="первый", amount=D("20000"), start=date(2025, 6, 1),
                   rate_per_year=D("0.24"), rate_per_day=None,
@@ -592,8 +593,12 @@ def test_unit_charges_do_not_grow_the_target_or_the_pot():
                                    PENALTY: D("300"), COSTS: D("200")}
     assert jan.balances["первый"] == D("1500")
     assert sum(jan.parts["первый"].values()) == jan.balances["первый"]
-    # Начисленное месяца видно числом — и нигде не в котле и не в цели.
+    # Начисленное месяца видно числом и в раскладке по видам: факт входит
+    # в строку своей части, сумма строк равна `interest` (09-Т3, фикс 20).
     assert jan.interest == D("500")
+    assert jan.interest_parts[PENALTY] == D("300")
+    assert jan.interest_parts[COSTS] == D("200")
+    assert sum(jan.interest_parts.values()) == jan.interest
 
     # Февраль: котёл добран платёжем «первого» — закрытие разом стирает
     # и остатки, и части участников.
@@ -707,11 +712,12 @@ def test_a_zero_target_unit_is_closed_on_entry():
 
 
 def test_a_unit_prepayment_settles_only_the_first_members_streams():
-    """Досрочка копилки гасит потоки первого участника, остальных не трогает (15-Т4).
+    """Досрочка в пределах остатка первого участника — одна доля, как раньше (20).
 
-    Досрочка числится за первым участником (08-Т2): его просроченные потоки
-    гасятся FIFO своим днём платежа — последний день неустойки ему не капает;
-    потоки соседа продолжают капать весь месяц и дальше.
+    Регресс лесенки: пока остатка первого участника хватает, досрочка идёт
+    одной долей — его просроченные потоки гасятся FIFO своим днём платежа,
+    последний день неустойки ему не капает; потоки соседа не тронуты и капают
+    весь месяц и дальше.
     """
     rule = _penalty(PenaltyStep(0, D("0.001")))
     first = _deal(uid="первый", amount=D("2000"), rate_per_year=D("0"),
@@ -728,7 +734,7 @@ def test_a_unit_prepayment_settles_only_the_first_members_streams():
                       budgets={1: D("1000"), 2: D("0")})
 
     jan = roll.months[0]
-    # Досрочка ушла в котёл и числится за первым участником.
+    # Досрочка ушла в котёл одной долей первого участника.
     assert [(sp.deal, sp.amount, sp.unit)
             for sp in jan.payments if sp.planned is None] == \
         [("первый", D("1000"), "копилка")]
@@ -742,6 +748,98 @@ def test_a_unit_prepayment_settles_only_the_first_members_streams():
     # капает дальше (28 дней по 1,00).
     assert roll.months[1].parts["первый"][PENALTY] == D("55.00")
     assert roll.months[1].parts["второй"][PENALTY] == D("84.00")
+
+
+def test_a_unit_prepayment_is_a_ladder_over_members():
+    """Досрочка копилки — лесенка по участникам: не больше своего остатка (Q33, 20).
+
+    Суперсед 08-Т2 «числится за первым»: свободные 1 000 при остатках
+    500 и 4 500 дают две доли — 500 первому и 500 второму, каждая своей
+    строкой расписания. Минус невозможен, поэтому закрытие разом ничего не
+    стирает; канон сходится по каждому участнику — платёж записан движением
+    по нему.
+    """
+    first = _deal(uid="первый", amount=D("500"), rate_per_year=D("0"),
+                  closure_unit="копилка",
+                  schedule=_rule(days=(20,), payment=D("100"), count=6,
+                                 start=date(2026, 3, 1), shift_weekend=False),
+                  allocations=(AllocationRule(PARTS),))
+    second = _deal(uid="второй", amount=D("5000"), rate_per_year=D("0"),
+                   closure_unit="копилка",
+                   schedule=_rule(days=(20,), payment=D("100"), count=6,
+                                  start=date(2026, 3, 1), shift_weekend=False),
+                   allocations=(AllocationRule(PARTS),))
+    book = _book(first, second)
+    validate(book)
+    roll = roll_deals(book, START, D("1000"), max_months=2,
+                      budgets={1: D("1000"), 2: D("0")})
+
+    jan = roll.months[0]
+    # Две доли лесенки: первому — ровно его остаток, остаток — второму.
+    assert [(sp.deal, sp.amount, sp.unit)
+            for sp in jan.payments if sp.planned is None] == \
+        [("первый", D("500"), "копилка"), ("второй", D("500"), "копилка")]
+    assert jan.prepaid == D("1000")
+    assert jan.units["копилка"].pot == D("1000")
+    # Минуса нет: первый закрыт своим остатком, второй отдал свою долю.
+    assert jan.balances["первый"] == D("0")
+    assert jan.balances["второй"] == D("4500")
+    assert jan.parts["первый"] == {part: D("0") for part in PARTS}
+    assert jan.parts["второй"] == {BODY: D("4500"), INTEREST: D("0"),
+                                   PENALTY: D("0"), COSTS: D("0")}
+
+    # Канон: те же доли движениями по своим участникам — одно число.
+    book.movements += [Movement(date(2026, 1, 31), D("500"), "первый"),
+                       Movement(date(2026, 1, 31), D("500"), "второй")]
+    for on in (date(2026, 1, 31), date(2026, 2, 28)):
+        assert roll.months[0].balances["первый"] == \
+            deal_balance(book, "первый", on)
+        assert roll.months[0].balances["второй"] == \
+            deal_balance(book, "второй", on)
+        assert roll.months[0].parts["первый"] == \
+            deal_parts(book, "первый", on)
+        assert roll.months[0].parts["второй"] == \
+            deal_parts(book, "второй", on)
+
+
+def test_a_unit_prepay_ladder_settles_each_members_streams():
+    """Доля лесенки гасит потоки своего участника FIFO (08-Т2, суперсед «за первым»).
+
+    Досрочночные 2 500 больше остатка первого (1 709,00 с неустойкой): ему —
+    его остаток, второму — остальное. Раньше вся сумма ушла бы первому, его
+    остаток ушёл бы в минус −791,00, и закрытие разом стёрло бы переплату.
+    Теперь минуса нет, а потоки каждого погашены его долей: неустойка второго
+    в феврале замерла — его потоки тоже погашены.
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")))
+
+    def _member(uid: str) -> Deal:
+        return _deal(uid=uid, amount=D("2000"), rate_per_year=D("0"),
+                     start=date(2025, 11, 1), closure_unit="копилка",
+                     schedule=_rule(days=(20,), payment=D("100"), count=6,
+                                    start=date(2025, 11, 1),
+                                    shift_weekend=False),
+                     allocations=(AllocationRule(PARTS),), penalties=(rule,))
+
+    book = _book(_member("первый"), _member("второй"))
+    validate(book)
+    roll = roll_deals(book, START, D("2500"), max_months=2,
+                      budgets={1: D("2500"), 2: D("0")})
+
+    jan = roll.months[0]
+    # Лесенка: первому — его остаток с неустойкой, второму — остальное.
+    assert [(sp.deal, sp.amount, sp.unit)
+            for sp in jan.payments if sp.planned is None] == \
+        [("первый", D("1709.00"), "копилка"), ("второй", D("791.00"), "копилка")]
+    # Минуса нет ни у кого (на прежней механике первый ушёл бы в −791,00).
+    assert jan.balances["первый"] == D("0")
+    assert jan.balances["второй"] == D("918.00")
+    assert jan.parts["первый"] == {part: D("0") for part in PARTS}
+    assert jan.parts["второй"] == {BODY: D("909.00"), INTEREST: D("0"),
+                                   PENALTY: D("9.00"), COSTS: D("0")}
+    # Февраль: потоки обоих погашены их долями — неустойка второго замерла.
+    assert roll.months[1].parts["второй"][PENALTY] == D("9.00")
+    assert all(balance >= 0 for balance in roll.months[1].balances.values())
 
 
 def test_repeating_the_month_step_keeps_the_transfer_delta_once():

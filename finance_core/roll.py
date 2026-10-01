@@ -268,11 +268,16 @@ class _Unit:
 
 @dataclass
 class _Target:
-    """Куда идут свободные деньги: сделка или копилка."""
+    """Куда идут свободные деньги: сделка или копилка.
+
+    `pay` проводит досрочку и возвращает доли «участник — сумма»: у сделки
+    доля одна, у копилки — лесенка по участникам (Q33, суперсед 08-Т2
+    «за первым»): каждая доля — свой платёж за своего участника.
+    """
     uid: str
     rate: Decimal
     remaining: Decimal
-    pay: Callable[[Decimal], None]
+    pay: Callable[[Decimal], list[tuple[str, Decimal]]]
 
 
 # --- календарь -------------------------------------------------------------
@@ -1413,19 +1418,22 @@ class _DealsRoll:
             amount = min(target.remaining, pool)
             if amount <= 0:
                 break
-            target.pay(amount)
+            # Досрочки цели не исчерпали — раскладка долей (у копилки —
+            # лесенка по участникам, Q33) обязана покрыть всю сумму.
+            shares = target.pay(amount)
             pool -= amount
             paid += amount
             prepaid += amount
-            payment = _prepayment(self.book, open_deals, open_units, target,
-                                  amount, month)
-            # Досрочка — платёж без вхождения: гасит старые потоки первыми,
-            # у копилки числится за первым участником (08-Т2) — как в payment.
-            load.stream_events.append(
-                ("reduce", payment.deal, _month_end(month), None, amount))
-            _reduce_streams_now(open_deals, payment.deal, amount)
-            load.payments.append(payment)
-            prepayments.append(payment)
+            # Досрочка — платёж без вхождения: гасит старые потоки первыми
+            # (08-Т2), у копилки каждый участник — своей долей лесенки.
+            for member, share in shares:
+                payment = _prepayment(self.book, open_deals, open_units,
+                                      target, share, month, member)
+                load.stream_events.append(
+                    ("reduce", member, _month_end(month), None, share))
+                _reduce_streams_now(open_deals, member, share)
+                load.payments.append(payment)
+                prepayments.append(payment)
 
         # 4. Второй приоритет: сам не платится — предлагается. Предложение —
         # срез свободных денег месяца, которым не нашлось места: свободные
@@ -1442,17 +1450,18 @@ class _DealsRoll:
                 amount = min(target.remaining, pool)
                 if amount <= 0:
                     break
-                target.pay(amount)
+                shares = target.pay(amount)
                 pool -= amount
                 paid += amount
                 prepaid += amount
-                payment = _prepayment(self.book, open_deals, open_units, target,
-                                      amount, month)
-                load.stream_events.append(
-                    ("reduce", payment.deal, _month_end(month), None, amount))
-                _reduce_streams_now(open_deals, payment.deal, amount)
-                load.payments.append(payment)
-                prepayments.append(payment)
+                for member, share in shares:
+                    payment = _prepayment(self.book, open_deals, open_units,
+                                          target, share, month, member)
+                    load.stream_events.append(
+                        ("reduce", member, _month_end(month), None, share))
+                    _reduce_streams_now(open_deals, member, share)
+                    load.payments.append(payment)
+                    prepayments.append(payment)
 
         # 5. Неустойка месяца. У сделок с раскладкой прогулка натекла до
         # предпоследнего дня — последний день добирается здесь, после досрочек,
@@ -1531,13 +1540,15 @@ class _DealsRoll:
                           for p in load.payments]
 
         # Раскладка начисленного месяца по видам (09-Т3): проценты, неустойка
-        # и начисления в свою часть; сумма равна `interest`. Записи-факты в
-        # «проценты» входят в строку процентов, как в «тело» и «издержки»
-        # (P2-1, тикет 19) — иначе сумма раскладки теряла бы факт.
+        # и начисления в свою часть; сумма равна `interest`. Записи-факты
+        # входят в строку своей части у всех четырёх частей — и в «неустойку»
+        # тоже (фикс шипа 15, родич тикета 19): иначе сумма раскладки
+        # теряла бы факт.
         interest_parts = {
             INTEREST: load.interest + load.charged_parts[INTEREST]
                       + trigger_parts[INTEREST],
-            PENALTY: penalty + trigger_parts[PENALTY],
+            PENALTY: penalty + load.charged_parts[PENALTY]
+                     + trigger_parts[PENALTY],
             BODY: load.charged_parts[BODY] + trigger_parts[BODY],
             COSTS: load.charged_parts[COSTS] + trigger_parts[COSTS],
         }
@@ -1758,16 +1769,18 @@ def _month_penalty(opened: _Open, events: Sequence[tuple],
 
 def _prepayment(book: Settlements, open_deals: dict[str, _Open],
                 open_units: dict[str, _Unit], target: _Target,
-                amount: Decimal, month: date) -> ScheduledPayment:
+                amount: Decimal, month: date,
+                member: str | None = None) -> ScheduledPayment:
     """Досрочка как платёж расписания: вхождения нет, деньги уходят сверх графика.
 
     Дата — конец месяца: свободные деньги становятся известны, когда обязательные
-    платежи месяца уже прошли. У копилки платёж числится за первым участником.
-    Досрочка всегда долговая: движок направляет её на долг, а долг кредитным
-    лимитом не платится.
+    платежи месяца уже прошли. У копилки лесенка по участникам (Q33, суперсед
+    08-Т2 «числится за первым»): каждая доля — свой платёж за своего участника
+    (`member`). Досрочка всегда долговая: движок направляет её на долг, а долг
+    кредитным лимитом не платится.
     """
     unit = open_units.get(target.uid)
-    uid = unit.members[0] if unit is not None else target.uid
+    uid = member if unit is not None else target.uid
     when = _month_end(month)
     return ScheduledPayment(
         date=when, amount=amount, deal=uid,
@@ -1795,9 +1808,12 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
             continue                       # регулярный расход не досрочится
         if not opened.deal.prepay:
             continue                       # досрочка этой сделки запрещена
-        rows.append(_Target(uid, _rate(opened.deal), opened.balance,
-                            lambda amount, opened=opened:
-                            _pay_opened(opened, amount, when)))
+
+        def pay(amount: Decimal, opened=opened) -> list[tuple[str, Decimal]]:
+            _pay_opened(opened, amount, when)
+            return [(opened.deal.uid, amount)]
+
+        rows.append(_Target(uid, _rate(opened.deal), opened.balance, pay))
     for uid, unit in open_units.items():
         if unit.second != second:
             continue
@@ -1807,12 +1823,27 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
         # гасится первой, а не после любой standalone-сделки с ненулевой ставкой.
         rate = max(_rate(open_deals[member].deal) for member in unit.members)
 
-        def pay(amount: Decimal, unit: _Unit = unit) -> None:
-            # Досрочка копилки — в котёл и в остаток первого участника тем же
-            # платёжом: у копилки платёж числится за первым участником
-            # (`_prepayment`), и его остаток падает, как движение по нему.
-            unit.pay(amount)
-            _pay_opened(open_deals[unit.members[0]], amount, when)
+        def pay(amount: Decimal, unit: _Unit = unit) -> list[tuple[str, Decimal]]:
+            # Досрочка копилки — лесенка по участникам (Q33, суперсед 08-Т2
+            # «числится за первым»): первому — не больше его остатка,
+            # недобранное — следующему по списку; котёл растёт ровно на
+            # распределённое. Минус у участника невозможен, поэтому закрытие
+            # разом ничего не стирает; взыскание в единице по-прежнему гасится
+            # первым приоритетом: сумма остатков участников не меньше остатка
+            # единицы, лесенка добирает её до конца.
+            left = amount
+            shares: list[tuple[str, Decimal]] = []
+            for member in unit.members:
+                take = min(left, max(open_deals[member].balance, Decimal(0)))
+                if take <= 0:
+                    continue
+                unit.pay(take)
+                _pay_opened(open_deals[member], take, when)
+                shares.append((member, take))
+                left -= take
+                if left <= 0:
+                    break
+            return shares
 
         rows.append(_Target(uid, rate, unit.remaining, pay))
     return rows
