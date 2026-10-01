@@ -3,7 +3,7 @@ node_type: index
 title: Решения
 service: _platform
 status: active
-updated: 2026-09-26
+updated: 2026-10-02
 links:
   part_of: [../README.md]
 ---
@@ -29,3 +29,7 @@ links:
 - [wallet-pays-what-it-has.md](wallet-pays-what-it-has.md) — кошелёк платит тем, что у него есть; дыра — «денег нет нигде»
 - [floor-excludes-events.md](floor-excludes-events.md) — событие уже в остатке — в число минимума не кладётся
 - [ontology-full-scope.md](ontology-full-scope.md) — модель знаний распространяется на каждый документ зоны: без исключений для корневых и пакетных
+- [deal-parts-and-charges.md](deal-parts-and-charges.md) — долг раскладывается на четыре части, рост от события несёт запись-начисление с уидом события
+- [penalty-and-overdue.md](penalty-and-overdue.md) — неустойка капает по дням просрочки от обрезанного потока, без компаунда и с явным потолком
+- [charged-vs-paid.md](charged-vs-paid.md) — начислено и уплачено — разные регистры: один факт — один носитель, избыток платежа несёт тело
+- [zone-rules-and-forms.md](zone-rules-and-forms.md) — правила зоны — данные закрытых форм с версиями по дате; исполнение и счёт — в движке
