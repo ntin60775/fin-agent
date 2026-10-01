@@ -7,13 +7,15 @@ from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (LEGAL, Bridge, Counterparty, Deal, Direct,
-                          ForecastInput, ImpossibleAction, Income, Movement,
-                          OccurrenceEdit, Prepay, ScheduleRule,
+from finance_core import (LEGAL, AllocationRule, BODY, Bridge, Charge,
+                          Counterparty, Deal, Direct,
+                          ForecastInput, ImpossibleAction, INTEREST, Income,
+                          Movement,
+                          OccurrenceEdit, PARTS, PENALTY, Prepay, ScheduleRule,
                           Settlements, Move, Variant, Wallet, applied, baseline,
-                          deal_balance, facts, forecast, horizon, impossible,
-                          occurrences, price, prices, roll_deals, roll_months,
-                          validate, variants)
+                          deal_balance, deal_parts, facts, forecast, horizon,
+                          impossible, occurrences, price, prices, roll_deals,
+                          roll_months, validate, variants)
 
 START = date(2026, 1, 1)
 
@@ -34,7 +36,8 @@ def _deal(uid: str = "заём", amount: D | None = D("20000"), wallet: str = "�
     return Deal(**base)
 
 
-def _book(*deals, wallets=None, counterparties=(), movements=(), edits=()) -> Settlements:
+def _book(*deals, wallets=None, counterparties=(), movements=(), edits=(),
+          charges=()) -> Settlements:
     return Settlements(
         counterparties=[Counterparty(uid="банк", name="Банк", kind=LEGAL,
                                      subtype="банк", groups=("долги",)),
@@ -42,7 +45,8 @@ def _book(*deals, wallets=None, counterparties=(), movements=(), edits=()) -> Se
                                      kind=LEGAL, subtype="прочее"),
                         *counterparties],
         wallets=list(wallets) if wallets is not None else [_wallet()],
-        deals=list(deals), movements=list(movements), edits=list(edits))
+        deals=list(deals), movements=list(movements), edits=list(edits),
+        charges=list(charges))
 
 
 def _inp(book: Settlements, wallets=None, **kw) -> ForecastInput:
@@ -406,6 +410,77 @@ def test_a_prepay_respects_the_closure_unit():
     beyond = Variant("больше участника", (
         Prepay(deal="первый", date=date(2026, 1, 15), amount=D("1076")),))
     assert "больше остатка" in impossible(base, beyond)
+
+
+def test_a_penalty_charge_does_not_shrink_the_prepay_budget():
+    """Накопленная неустойка — долг, а не нагрузка месяца (R2-Q8, 14-Т3).
+
+    Запись-начисление (01) растит канон на 2000, кассу не двигает: свободные
+    деньги и бюджет досрочек месяца те же, что без записи, — досрочка в их
+    предел проходит, копейка сверху нет. График с фиксированной суммой: рост
+    долга обязательную нагрузку не двигает.
+    """
+
+    def _base(with_charge):
+        wallets = [_wallet("карта", D("15000"))]
+        charges = [Charge("пени", date(2026, 1, 10), D("2000"), "заём",
+                          PENALTY, basis="решение")] if with_charge else []
+        book = _book(_deal(uid="заём", amount=D("10000")),
+                     wallets=wallets, charges=charges)
+        validate(book)
+        return baseline(_inp(book, wallets=wallets))
+
+    charged, plain = _base(True), _base(False)
+    on = date(2026, 1, 31)
+    assert (deal_balance(charged.inp.book, "заём", on)
+            == deal_balance(plain.inp.book, "заём", on) + D("2000.00"))
+    assert charged.forecast.months[0].free == D("12000")   # 15 000 − 3 000
+    assert charged.forecast.months[0].free == plain.forecast.months[0].free
+    assert charged.forecast.months[0].prepay_budget == D("12000")
+
+    variant = Variant("досрочка", (
+        Prepay(deal="заём", date=date(2026, 1, 15), amount=D("12000")),))
+    assert impossible(charged, variant) is None
+    over = Variant("сверх бюджета", (
+        Prepay(deal="заём", date=date(2026, 1, 15), amount=D("12001")),))
+    assert "больше свободных денег месяца" in impossible(charged, over)
+
+
+def test_a_prepay_is_bounded_by_the_canon_sum_of_parts():
+    """Предел досрочки — канон, он же сумма частей (14-Т1).
+
+    У сделки с раскладкой в остаток входят проценты и неустойка-факт:
+    досрочка ровно в канон возможна, копейка сверху — «больше остатка».
+    """
+    wallets = [_wallet("карта", D("25000"))]
+    deal = _deal(uid="заём", amount=D("10000"), rate_per_year=D("0.12"),
+                 rate_per_day=None, start=date(2025, 12, 1),
+                 schedule=ScheduleRule(days=(20,), payment=D("3000"),
+                                       start=date(2025, 12, 1),
+                                       shift_weekend=False),
+                 allocations=(AllocationRule(PARTS),))
+    book = _book(deal, wallets=wallets,
+                 movements=[Movement(date(2025, 12, 28), D("3000"), "заём",
+                                     occurrence=date(2025, 12, 20))],
+                 charges=[Charge("пени", date(2025, 12, 20), D("2000"), "заём",
+                                 PENALTY, basis="решение")])
+    validate(book)
+    base = baseline(_inp(book, wallets=wallets))
+
+    on = date(2026, 1, 15)
+    parts = deal_parts(book, "заём", on)
+    assert parts[BODY] == D("7000") and parts[PENALTY] == D("2000")
+    # Проценты в остатке: декабрь 100,00 + 15 дней января по ставке 0,12.
+    assert parts[INTEREST] == D("134.35")
+    remaining = deal_balance(book, "заём", on)
+    assert sum(parts.values()) == remaining            # канон = сумма частей
+
+    exact = Variant("в остаток", (
+        Prepay(deal="заём", date=on, amount=remaining),))
+    assert impossible(base, exact) is None
+    over = Variant("сверх остатка", (
+        Prepay(deal="заём", date=on, amount=remaining + D("0.01")),))
+    assert "больше остатка" in impossible(base, over)
 
 
 def test_direct_is_the_owners_consent_for_the_second_priority():

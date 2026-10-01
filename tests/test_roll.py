@@ -7,9 +7,10 @@ from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
+from finance_core import (BODY, EXPECTED, LEGAL, OWED_TO_ME, PAID, PAID_LATE,
                           PAYOFF_CLOSED_BEFORE, PAYOFF_NOT_CLOSED, POSTPONED,
-                          SKIPPED, AVALANCHE, AllocationRule, Assignment,
+                          SKIPPED, AVALANCHE, SNOWBALL, AllocationRule,
+                          Assignment,
                           CAP_NONE, CAP_SUM, Charge, Counterparty, COSTS, Deal,
                           FirstPayment, INTEREST, Movement, OccurrenceEdit,
                           PARTS, PENALTY, PartPayment, PenaltyCap, PenaltyRule,
@@ -2371,3 +2372,184 @@ def test_a_charge_reaches_a_deal_without_a_layout():
                                        payment.deal,
                                        occurrence=payment.planned))
     assert month.balances["заём"] == deal_balance(book, "заём", date(2026, 1, 31))
+
+
+# --- досрочка и стратегии с частями (14) ---------------------------------------
+
+def test_a_prepayment_is_allocated_by_the_zone_rule_by_parts():
+    """Досрочка — тот же платёж: части гасит правило зоны, не «в тело» (R3-Q16).
+
+    Правило ведёт неустойку, затем издержки: досрочка 600 съедает неустойку 200,
+    издержки 300 и лишь потом 100 тела — очередь правила, а не тело первым.
+    Сумма долей равна досрочке, канон на ту же дату согласен. Явная разбивка
+    факта вытесняет правило и так — заперто P1-6.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 schedule=_scheduled(count=1),
+                 allocations=(AllocationRule((PENALTY, COSTS, BODY, INTEREST)),))
+    book = _book(deal,
+                 movements=[Movement(date(2025, 12, 28), D("1000"), "заём",
+                                     occurrence=date(2025, 12, 20),
+                                     allocation=(PartPayment("тело", D("1000")),))],
+                 charges=[Charge("пени", date(2025, 12, 15), D("200"), "заём",
+                                 PENALTY, basis="решение"),
+                          Charge("издержки", date(2025, 12, 10), D("300"), "заём",
+                                 COSTS, basis="решение")])
+    validate(book)
+    opening = deal_parts(book, "заём", date(2025, 12, 31))
+    # Декабрьский платёж ушёл явной разбивкой в тело: части на входе окна —
+    # тело 9000, неустойка 200, издержки 300.
+    assert opening == {BODY: D("9000"), INTEREST: D("0"), PENALTY: D("200"),
+                       COSTS: D("300")}
+
+    roll = roll_deals(book, START, D("600"), max_months=2)
+    month = roll.months[0]
+    assert [sp.amount for sp in month.payments if sp.planned is None] == [D("600")]
+    assert month.parts["заём"] == {BODY: D("8900"), INTEREST: D("0"),
+                                   PENALTY: D("0"), COSTS: D("0")}
+    # Сумма долей равна досрочке: неустойка 200 + издержки 300 + тело 100.
+    assert ((opening[PENALTY] - month.parts["заём"][PENALTY])
+            + (opening[COSTS] - month.parts["заём"][COSTS])
+            + (opening[BODY] - month.parts["заём"][BODY])) == month.prepaid
+    assert sum(month.parts["заём"].values()) == month.balances["заём"]
+
+    # Без досрочки части стоят на месте — решает именно досрочка.
+    idle = roll_deals(book, START, D("0"), max_months=2)
+    assert idle.months[0].prepaid == D("0")
+    assert idle.months[0].parts["заём"][PENALTY] == D("200")
+
+    # Канон с тем же фактом досрочки — те же части на ту же дату.
+    book.movements.append(Movement(date(2026, 1, 31), D("600"), "заём"))
+    assert month.parts["заём"] == deal_parts(book, "заём", date(2026, 1, 31))
+
+
+def test_snowball_ranks_deals_by_the_canon_not_by_a_part():
+    """Снежный ком меряет канон-остаток сделки, а не отдельную часть (14-Т2).
+
+    У «малого» тело меньше (3900 против 4000), но канон больше (4300 против
+    4200 — неустойка 400): первым гасится «большой». Цели — сделки; части
+    целями не становятся.
+    """
+    big = _deal(uid="большой", amount=D("5000"), start=date(2025, 12, 1),
+                schedule=_scheduled(count=1), allocations=(AllocationRule(PARTS),))
+    small = _deal(uid="малый", amount=D("4900"), start=date(2025, 12, 1),
+                  schedule=_scheduled(count=1), allocations=(AllocationRule(PARTS),))
+    book = _book(big, small,
+                 movements=[Movement(date(2025, 12, 28), D("1000"), "большой",
+                                     occurrence=date(2025, 12, 20)),
+                            Movement(date(2025, 12, 28), D("1000"), "малый",
+                                     occurrence=date(2025, 12, 20))],
+                 charges=[Charge("пени-б", date(2025, 12, 15), D("200"), "большой",
+                                 PENALTY, basis="решение"),
+                          Charge("пени-м", date(2025, 12, 15), D("400"), "малый",
+                                 PENALTY, basis="решение")])
+    validate(book)
+    assert deal_parts(book, "большой", date(2025, 12, 31))[BODY] == D("4000")
+    assert deal_parts(book, "малый", date(2025, 12, 31))[BODY] == D("3900")
+    assert (deal_balance(book, "большой", date(2025, 12, 31))
+            < deal_balance(book, "малый", date(2025, 12, 31)))
+
+    roll = roll_deals(book, START, D("3000"), strategy=SNOWBALL, max_months=2)
+    month = roll.months[0]
+    assert [sp.deal for sp in month.payments if sp.planned is None] == ["большой"]
+    assert month.prepaid == D("3000")
+    assert month.balances["большой"] == D("1200.00")   # 4200 − 3000
+    assert month.balances["малый"] == D("4300.00")
+
+
+def test_avalanche_on_parts_deals_ranks_by_the_deal_rate():
+    """Лавина ведёт ставкой сделки; цена просрочки в ранжирование не входит.
+
+    У «дешёвого» неустойка 0,2 % в день — 73 % годовых, дороже «дорогого»
+    (40 %), но первым гасится «дорогой»: у сделки одна цена денег (Q16),
+    части и неустойка целями не становятся.
+    """
+    expensive = _deal(uid="дорогой", amount=D("5000"), rate_per_year=D("0.4"),
+                      start=date(2025, 12, 1), schedule=_scheduled(count=1),
+                      allocations=(AllocationRule(PARTS),))
+    cheap = _deal(uid="дешёвый", amount=D("5000"), rate_per_year=D("0.1"),
+                  start=date(2025, 12, 1), schedule=_scheduled(count=1),
+                  allocations=(AllocationRule(PARTS),),
+                  penalties=(_penalty(PenaltyStep(0, D("0.002"))),))
+    book = _book(expensive, cheap,
+                 movements=[Movement(date(2025, 12, 28), D("1000"), "дорогой",
+                                     occurrence=date(2025, 12, 20))])
+    validate(book)
+    roll = roll_deals(book, START, D("4500"), strategy=AVALANCHE, max_months=2)
+    month = roll.months[0]
+    # Канон «дорогого» на дату досрочки: тело 4000 (5000 − 1000 декабрьского)
+    # + проценты 166,67 (5000 × 0,4/12, декабрь) + 138,89 (4166,67 × 0,4/12,
+    # январь — годовая от остатка на начало месяца).
+    prepaid = [(sp.deal, sp.amount) for sp in month.payments if sp.planned is None]
+    assert prepaid == [("дорогой", D("4305.56")), ("дешёвый", D("194.44"))]
+    assert month.prepaid == D("4500")                    # остаток пула 4500
+    assert month.balances["дорогой"] == D("0.00")
+    # «Дешёвый»: тело 4000 − 194,44 досрочки; проценты 41,67 + 42,01 (январь
+    # от 5041,67 — платежи месяца базу не меняют); неустойка 60,00 (30 дней
+    # × 0,002 × 1000: с 21.12 по 19.01 — 20-го платёж погасил свой поток).
+    assert month.balances["дешёвый"] == D("3949.24")
+
+
+def test_a_prepayment_without_an_allocation_rule_keeps_the_gap():
+    """Нет правила распределения — досрочка гасит канон, раскладка пробел (Q34).
+
+    Долг уменьшается по прежней механике, частей у сделки нет ни в прокате,
+    ни в каноне: прогноз по частям неполный, а не нулевой.
+    """
+    deal = _deal("заём", amount=D("10000"), start=date(2025, 12, 1),
+                 schedule=_scheduled(count=1))
+    book = _book(deal,
+                 movements=[Movement(date(2025, 12, 28), D("1000"), "заём",
+                                     occurrence=date(2025, 12, 20))])
+    validate(book)
+    roll = roll_deals(book, START, D("400"), max_months=2)
+    month = roll.months[0]
+    assert month.prepaid == D("400")
+    assert month.balances["заём"] == D("8600.00")       # 9000 − 400
+    assert "заём" not in month.parts                    # пробел, не ноль
+    book.movements.append(Movement(date(2026, 1, 31), D("400"), "заём"))
+    assert month.balances["заём"] == deal_balance(book, "заём", date(2026, 1, 31))
+    assert deal_parts(book, "заём", date(2026, 1, 31)) is None
+
+
+def test_a_prepayment_settles_the_oldest_streams_first():
+    """Досрочка меньше просрочки гасит старые потоки FIFO, свежий не тронула.
+
+    Развитие test_a_scheduled_payment_touches_only_its_own_stream_and_prepay_
+    is_fifo: там досрочка покрывает просрочку целиком, здесь — частично.
+    Две январские урезки и одна февральская: досрочка 3000 в конце марта
+    обнуляет поток 10-го, урезает поток 20-го и не трогает февральский —
+    как у любого движения (08-Т2). Мера — формула канона; различает порядок
+    ступенчатая шкала в апреле: после FIFO остатки 1000+100 капают 77.00,
+    после LIFO было бы 125.40 (один поток 1100 старшего возраста).
+    """
+    rule = _penalty(PenaltyStep(0, D("0.001")), PenaltyStep(90, D("0.005")))
+    deal = _deal("заём", amount=D("30000"),
+                 schedule=_rule(days=(10, 20), payment=D("2000"),
+                                shift_weekend=False),
+                 penalties=(rule,))
+    roll = roll_deals(_book(deal), START, D("0"), max_months=4,
+                      budgets={1: D("-4000"), 2: D("-100"), 3: D("3000"),
+                               4: D("0")})
+    assert [m.short for m in roll.months] == [D("4000"), D("100"), D("0"), D("0")]
+    jan = [(date(2026, 1, 10), D("2000"), D("2000")),
+           (date(2026, 1, 20), D("2000"), D("2000"))]
+    feb = jan + [(date(2026, 2, 20), D("2000"), D("100"))]
+    assert roll.months[0].interest == accrued_penalty(
+        rule, jan, date(2026, 1, 1), date(2026, 1, 31))
+    assert roll.months[1].interest == accrued_penalty(
+        rule, feb, date(2026, 2, 1), date(2026, 2, 28))
+    # Март: досрочка 3000 ушла в последний день FIFO — старшие потоки погашены,
+    # свежий февральский остался 100.
+    assert roll.months[2].prepaid == D("3000")
+    assert roll.months[2].interest == accrued_penalty(
+        rule, feb, date(2026, 3, 1), date(2026, 3, 31),
+        payments=[(date(2026, 3, 31), D("3000"))])
+    # Апрель — различающая мера: до 90-го дня возраста ставка 0,001, дальше
+    # 0,005. Состояние после FIFO — 1000 у потока 20-го и 100 у февральского;
+    # порядок гашения в марте на число марта не влиял (платёж в последний
+    # день), а вот апрель считает именно этот расклад.
+    assert roll.months[3].interest == accrued_penalty(
+        rule, [(date(2026, 1, 20), D("2000"), D("1000")),
+               (date(2026, 2, 20), D("2000"), D("100"))],
+        date(2026, 4, 1), date(2026, 4, 30))
