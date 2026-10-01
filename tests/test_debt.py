@@ -5,12 +5,13 @@ from datetime import date, timedelta
 from decimal import ROUND_CEILING
 from decimal import Decimal as D
 
-from finance_core import (BODY, CAP_NONE, CAP_SHARE, CAP_SUM, LEGAL, PARTS,
-                          PENALTY, AllocationRule, Charge, Counterparty, Deal,
-                          Movement, PenaltyCap, PenaltyRule, PenaltyStep,
-                          ScheduleRule, Settlements, Wallet,
-                          accrued_penalty, compare_deal_strategies,
-                          overdue_amount, roll_deals)
+from finance_core import (BODY, CAP_NONE, CAP_SHARE, CAP_SUM, COSTS, INTEREST,
+                          LEGAL, OWED_TO_ME, PARTS, PENALTY, TRIGGER_OVERDUE,
+                          AllocationRule, Charge, Counterparty, Deal, Movement,
+                          PenaltyCap, PenaltyRule, PenaltyStep, ScheduleRule,
+                          Settlements, TriggerRule, Wallet, accrued_interest,
+                          accrued_penalty, compare_deal_strategies, deal_balance,
+                          deal_growth, deal_parts, overdue_amount, roll_deals)
 from finance_core.settlements import _principal_left
 
 START = date(2026, 1, 1)
@@ -312,3 +313,237 @@ def test_penalty_zero_rate_accrues_nothing_and_already_keeps_the_cap():
                            cap=PenaltyCap(CAP_SUM, D("3")))
     assert accrued_penalty(capped, STREAM, date(2026, 1, 11), date(2026, 1, 15),
                            already=D("2.50")) == D("0.50")
+
+
+# --- what-if «тянуть до даты» (13) --------------------------------------------
+
+def _growth_deal(**kw) -> Deal:
+    """Сделка what-if: платёж десятого числа без сдвига выходных, раскладка есть."""
+    base = dict(schedule=_rule(days=(10,), payment=D("300"), shift_weekend=False),
+                allocations=(AllocationRule(PARTS),))
+    base.update(kw)
+    return _deal(**base)
+
+
+def test_growth_debt_without_payments_matches_manual_formula():
+    """Приёмка 13-1: долг без платежей «набежал» к дате — разбивка по частям
+    и дельта за период сходятся с ручным замером формулы; начисления-факты
+    (доза в тело, издержки) входят своими датами, дельта частей сходится
+    с дельтой канона."""
+    penalty = _penalty_rule(PenaltyStep(0, D("0.001")), PenaltyStep(15, D("0.002")))
+    deal = _growth_deal(rate_per_year=D("0.24"), penalties=(penalty,))
+    book = _book(deal, charges=[Charge("дозаем", date(2026, 1, 20), D("100"),
+                                       "заём", BODY),
+                                Charge("издержки", date(2026, 2, 1), D("40"),
+                                       "заём", COSTS)])
+    since, until = date(2026, 1, 15), date(2026, 2, 20)
+    # Ручной замер: проценты — база 1000, доза 20-го входит в базу того же
+    # месяца (январь: 1100 × 0.02 = 22.00; февраль: 1122 × 0.02 × 20/28 =
+    # 16.03); на 15-е января — 1000 × 0.02 × 15/31 = 9.68.
+    assert accrued_interest(deal, D("1000"), START, until, [],
+                            [(date(2026, 1, 20), D("100"))]) == D("38.03")
+    assert accrued_interest(deal, D("1000"), START, since, [], []) == D("9.68")
+    # Неустойка: два потока по 300 со своих сроков (долг без неустойки больше
+    # 600 — обрезки нет); 11–24 января по 0.30, дальше 0.60, второй поток
+    # с 11-го февраля по 0.30: 14×0.30 + 27×0.60 + 10×0.30 = 23.40; на 15-е
+    # января — 5 × 0.30 = 1.50.
+    streams = [(date(2026, 1, 10), D("300"), D("300")),
+               (date(2026, 2, 10), D("300"), D("300"))]
+    assert accrued_penalty(penalty, streams, date(2026, 1, 11), until) == D("23.40")
+    assert accrued_penalty(penalty, streams[:1], date(2026, 1, 11),
+                           since) == D("1.50")
+    growth = deal_growth(book, "заём", since, until)
+    assert growth.on == until
+    assert growth.parts == {BODY: D("1100"), INTEREST: D("38.03"),
+                            PENALTY: D("23.40"), COSTS: D("40")}
+    assert growth.grown == {BODY: D("100"), INTEREST: D("28.35"),
+                            PENALTY: D("21.90"), COSTS: D("40")}
+    # Дельта частей сходится с дельтой канона: инвариант «канон = сумма
+    # частей» держится и на приросте (Q34 — раскладка известна).
+    assert (sum(growth.grown.values())
+            == deal_balance(book, "заём", until) - deal_balance(book, "заём", since))
+
+
+def test_growth_streams_go_overdue_on_their_own_due_with_own_steps():
+    """Приёмка 13-2: каждое вхождение просрочивается со своего срока, ступени
+    применяются по возрасту своей просрочки, а не первой."""
+    deal = _growth_deal(
+        schedule=_rule(days=(5, 20), payment=D("250"), shift_weekend=False),
+        penalties=(_penalty_rule(PenaltyStep(0, D("0.001")),
+                                 PenaltyStep(10, D("0.003"))),))
+    book = _book(deal)
+    # Первая просрочка: срок 05-го, к 08-му — три дня по 0.25; 09–14 января —
+    # возраст 4–9, шесть дней по 0.25. Вторая (срок 20-го) ещё не просрочена.
+    assert deal_growth(book, "заём", date(2026, 1, 8),
+                       date(2026, 1, 14)).grown[PENALTY] == D("1.50")
+    # К 30-му: первая — 01-06..01-30 (9 × 0.25 + 16 × 0.75), вторая —
+    # 01-21..01-30 (9 × 0.25 + 1 × 0.75): её ступень 0.003 — с 30-го,
+    # возраст 10 включительно, по своему сроку.
+    assert deal_growth(book, "заём", date(2026, 1, 8),
+                       date(2026, 1, 30)).grown[PENALTY] == D("16.50")
+    # Три просрочки к 18-му февраля, каждая растёт по своей шкале:
+    # 28.50 + 17.25 + 5.25 = 51.00; дельта от 0.75 на 08-е.
+    growth = deal_growth(book, "заём", date(2026, 1, 8), date(2026, 2, 18))
+    assert growth.parts[PENALTY] == D("51.00")
+    assert growth.grown[PENALTY] == D("50.25")
+
+
+def test_growth_keeps_partial_payments_made_before_since():
+    """Приёмка 13-3: частичные платежи до `since` учтены — база растёт только
+    от неуплаченного; платёж после срока исходную просроченную сумму не меняет
+    (Q36), база дня — текущий остаток потока."""
+    penalty = _penalty_rule(PenaltyStep(0, D("0.001")))
+    deal = _growth_deal(rate_per_year=D("0.24"), penalties=(penalty,))
+    book = _book(deal, movements=[Movement(date(2026, 1, 15), D("150"), "заём",
+                                           occurrence=date(2026, 1, 10))])
+    # Неустойка: до платежа (11–14 января) база дня — 300, после (15-е и
+    # позже) — 150: 4 × 0.30 + 37 × 0.15; второй поток целиком 10 × 0.30.
+    assert accrued_penalty(penalty, [(date(2026, 1, 10), D("300"), D("300"))],
+                           date(2026, 1, 11), date(2026, 1, 14)) == D("1.20")
+    assert accrued_penalty(penalty, [(date(2026, 1, 10), D("300"), D("150"))],
+                           date(2026, 1, 15), date(2026, 2, 20)) == D("5.55")
+    assert accrued_penalty(penalty, [(date(2026, 2, 10), D("300"), D("300"))],
+                           date(2026, 2, 11), date(2026, 2, 20)) == D("3.00")
+    # Проценты: платёж 15-го уменьшает остаток со своего дня; годовая — платёж
+    # месяца начисление января не меняет (20 дней января включительно к 20-му),
+    # февраль — от 870 за 20/28.
+    assert accrued_interest(deal, D("1000"), START, date(2026, 1, 20),
+                            [(date(2026, 1, 15), D("150"))]) == D("12.90")
+    assert accrued_interest(deal, D("1000"), START, date(2026, 2, 20),
+                            [(date(2026, 1, 15), D("150"))]) == D("32.43")
+    growth = deal_growth(book, "заём", date(2026, 1, 20), date(2026, 2, 20))
+    assert growth.parts == {BODY: D("850"), INTEREST: D("32.43"),
+                            PENALTY: D("9.75"), COSTS: D("0")}
+    assert growth.grown == {BODY: D("0"), INTEREST: D("19.53"),
+                            PENALTY: D("7.65"), COSTS: D("0")}
+
+
+def test_growth_drops_payments_of_the_segment_and_keeps_the_state_at_since():
+    """13-Т2: платежи отрезка (since, until] в what-if не платятся — вхождение
+    просрочивается и капает, как без платежа; движение ровно на `since` —
+    часть состояния: проекция режет книгу по `since` включительно."""
+    deal = _growth_deal(penalties=(_penalty_rule(PenaltyStep(0, D("0.001"))),))
+    paid = Movement(date(2026, 2, 15), D("300"), "заём",
+                    occurrence=date(2026, 2, 10))
+    book = _book(deal, movements=[paid])
+    since, until = date(2026, 1, 20), date(2026, 2, 20)
+    growth = deal_growth(book, "заём", since, until)
+    # Платёж 15-го февраля закрыл бы второй поток — в what-if его нет:
+    # раскладка равна книге без этого движения, тело не тает, второй поток
+    # капает все десять дней (02-11..02-20 по 0.30).
+    assert growth.parts == deal_parts(_book(deal), "заём", until)
+    assert growth.parts == {BODY: D("1000"), INTEREST: D("0"),
+                            PENALTY: D("15.30"), COSTS: D("0")}
+    assert growth.grown[PENALTY] == D("12.30")   # в том числе 3.00 второго потока
+    on_since = _book(deal, movements=[Movement(date(2026, 1, 20), D("150"),
+                                               "заём", occurrence=date(2026, 1, 10))])
+    kept = deal_growth(on_since, "заём", date(2026, 1, 20), until)
+    assert kept.parts == deal_parts(on_since, "заём", until)
+    assert kept.parts[BODY] == D("850")
+
+
+def test_growth_without_payments_is_deal_parts_of_the_same_functions():
+    """Приёмка 13-4: прямой ассертир «те же функции» — без платежей what-if
+    на дату равен `deal_parts` на ту же дату; дельта — разность частей."""
+    deal = _growth_deal(rate_per_year=D("0.24"),
+                        penalties=(_penalty_rule(PenaltyStep(0, D("0.001"))),))
+    book = _book(deal, charges=[Charge("издержки", date(2026, 1, 25), D("40"),
+                                       "заём", COSTS)])
+    for day in (START, date(2026, 1, 20), date(2026, 2, 20)):
+        grown = deal_growth(book, "заём", day, day)
+        assert grown.parts == deal_parts(book, "заём", day)
+        assert grown.grown == {part: D(0) for part in PARTS}
+    since, until = date(2026, 1, 10), date(2026, 2, 20)
+    forward = deal_growth(book, "заём", since, until)
+    assert forward.parts == deal_parts(book, "заём", until)
+    before = deal_parts(book, "заём", since)
+    assert forward.grown == {part: forward.parts[part] - before[part]
+                             for part in PARTS}
+
+
+def test_growth_trigger_fires_on_its_condition_date_into_its_part():
+    """Приёмка 13-5: штраф триггера срабатывает в дату условия (R5-Q29: «срок
+    прошёл» — дата срока) и попадает в grown своей частью; неустойка не
+    смешана — свой поток и своя часть."""
+    triggers = (TriggerRule(uid="триг", condition=TRIGGER_OVERDUE, part=COSTS,
+                            basis="не уплатил в срок", charge_amount=D("50")),)
+    deal = _growth_deal(penalties=(_penalty_rule(PenaltyStep(0, D("0.001"))),),
+                        triggers=triggers)
+    book = _book(deal)
+    before = deal_growth(book, "заём", date(2026, 1, 5), date(2026, 1, 9))
+    assert before.parts[COSTS] == D("0") and before.grown[COSTS] == D("0")
+    on_due = deal_growth(book, "заём", date(2026, 1, 5), date(2026, 1, 10))
+    assert on_due.parts[COSTS] == D("50") and on_due.grown[COSTS] == D("50")
+    assert on_due.grown[PENALTY] == D("0")    # неустойка — с 11-го, штраф — в издержках
+    after = deal_growth(book, "заём", date(2026, 1, 5), date(2026, 1, 12))
+    assert after.grown[COSTS] == D("50")      # штраф одноразовый
+    assert after.grown[PENALTY] == D("0.60")  # 11–12 января по 0.30
+
+
+def test_growth_edges_zero_period_and_since_before_all_facts():
+    """Края 13-Т3: пустой период — нули и разбивка на `since`; `since` раньше
+    всех фактов — канон на него равен телу версий, рост идёт от него."""
+    deal = _growth_deal(amount=D("600"),
+                        penalties=(_penalty_rule(PenaltyStep(0, D("0.001"))),))
+    book = _book(deal)
+    zero = deal_growth(book, "заём", date(2026, 2, 1), date(2026, 1, 20))
+    assert zero.on == date(2026, 1, 20)
+    assert zero.grown == {part: D(0) for part in PARTS}
+    assert zero.parts == deal_parts(book, "заём", date(2026, 2, 1))
+    before_all = date(2025, 12, 1)
+    assert deal_parts(book, "заём", before_all) == {
+        BODY: D("600"), INTEREST: D("0"), PENALTY: D("0"), COSTS: D("0")}
+    growth = deal_growth(book, "заём", before_all, date(2026, 1, 20))
+    # Единственный рост — неустойка первого потока: 11–20 января по 0.30.
+    assert growth.grown == {BODY: D("0"), INTEREST: D("0"),
+                            PENALTY: D("3.00"), COSTS: D("0")}
+
+
+def test_growth_without_allocation_is_a_gap_while_the_canon_answers():
+    """Край Q34: раскладки нет — обе разбивки `None`; сумма и «набежало»
+    отвечает канон прежнего пути (производная неустойка в него не входит —
+    прогноз неполный, это и есть пробел). Пустой период и без раскладки
+    отвечает нулями: «набежать за ноль дней» известно (13-Т3)."""
+    deal = _growth_deal(allocations=(),
+                        penalties=(_penalty_rule(PenaltyStep(0, D("0.001"))),))
+    book = _book(deal)
+    growth = deal_growth(book, "заём", date(2026, 1, 5), date(2026, 1, 20))
+    assert growth.parts is None and growth.grown is None
+    assert deal_parts(book, "заём", date(2026, 1, 20)) is None
+    assert overdue_amount(book, "заём", date(2026, 1, 20)) == D("300")
+    assert deal_balance(book, "заём", date(2026, 1, 5)) == D("1000")
+    assert deal_balance(book, "заём", date(2026, 1, 20)) == D("1000")
+    zero = deal_growth(book, "заём", date(2026, 1, 20), date(2026, 1, 5))
+    assert zero.grown == {part: D(0) for part in PARTS}
+
+
+def test_growth_of_regular_expense_and_claim_grows_nothing():
+    """Край: у регулярного расхода и требования растить нечего — обе разбивки
+    `None` (Q23)."""
+    expense = _growth_deal(amount=None, uid="аренда", title="Аренда")
+    claim = _growth_deal(direction=OWED_TO_ME, uid="требование",
+                         title="Требование")
+    book = _book(expense, claim)
+    for uid in ("аренда", "требование"):
+        grown = deal_growth(book, uid, date(2026, 1, 5), date(2026, 2, 20))
+        assert grown.parts is None and grown.grown is None
+
+
+def test_growth_caps_penalty_like_history_and_no_scale_accrues_nothing():
+    """Края 13-Т3: потолок обрезает накопленную неустойку, как в истории;
+    шкалы нет — неустойка не капает (пробел 12-Т3), хотя просрочка жива."""
+    capped = _growth_deal(
+        penalties=(_penalty_rule(PenaltyStep(0, D("0.001")),
+                                 cap=PenaltyCap(CAP_SUM, D("2"))),))
+    book = _book(capped)
+    # 11–15 января — 5 × 0.30, потолок ещё не достигнут; к 20-му набежало бы
+    # 3.00 — обрезано до 2.00, как в истории (06).
+    assert deal_growth(book, "заём", date(2026, 1, 5),
+                       date(2026, 1, 15)).grown[PENALTY] == D("1.50")
+    assert deal_growth(book, "заём", date(2026, 1, 5),
+                       date(2026, 1, 20)).grown[PENALTY] == D("2.00")
+    bare = _growth_deal()
+    plain = _book(bare)
+    assert overdue_amount(plain, "заём", date(2026, 1, 20)) == D("300")
+    grown = deal_growth(plain, "заём", date(2026, 1, 5), date(2026, 1, 20))
+    assert grown.parts[PENALTY] == D("0") and grown.grown[PENALTY] == D("0")

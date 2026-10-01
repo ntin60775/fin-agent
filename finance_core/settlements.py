@@ -469,6 +469,25 @@ class TriggeredCharge:
 
 
 @dataclass
+class DebtGrowth:
+    """Ответ what-if «тянуть до даты»: разбивка на дату и «набежало за период».
+
+    Вопрос заявки («сколько набежит, если тянуть месяц») отвечает `deal_growth`;
+    это его носитель. `on` — дата ответа, `until` запроса. `parts` — долг по
+    частям, те же четыре ключа, что у `deal_parts` (при пустом периоде —
+    состояние на `since`: проекция вперёд не разворачивается, см. `deal_growth`).
+    `grown` — «набежало за период», дельта каждой части между `until` и `since`;
+    дельта честная, со знаком: часть может и уменьшиться (отрицательная дельта
+    передачи). При неизвестной раскладке (Q34) обе разбивки — `None`: сумму и
+    её прирост отвечает канон (`deal_balance`), части не выдумываются, прогноз
+    неполный.
+    """
+    on: date
+    parts: dict[str, Decimal] | None
+    grown: dict[str, Decimal] | None
+
+
+@dataclass
 class ObservedBalance:
     """Фактический остаток сделки на дату — наблюдение извне, а не второй источник.
 
@@ -1326,6 +1345,56 @@ def deal_parts(book: Settlements, deal_uid: str,
     раскладка известна, — по построению, одним путём расчёта.
     """
     return _parts_at(book, deal_uid, on)
+
+
+def deal_growth(book: Settlements, deal_uid: str, since: date,
+                until: date) -> DebtGrowth:
+    """What-if «тянуть до даты»: сколько набежит, если с `since` не платить.
+
+    Отдельный расчёт теми же функциями (R3-Q20), явный вход «вхождения не
+    платятся» — пустой список платежей на отрезке (13-Т2). Состояние на `since`
+    — факты книги; дальше платёж не приходит: вхождения просрочиваются целиком
+    со своих сроков (потоки 05), неустойка капает (`accrued_penalty` 06),
+    триггеры срабатывают (`trigger_charges` 07), тело не тает, а приросты тела
+    (записи в тело, дельты передач) идут по своим датам. Второго пути нет:
+    считает та же `_parts_at` на книге фактов до `since` (`_facts_to`), поэтому
+    прогноз обязан совпасть с историей, когда та же неуплата случится в книге
+    (R4-Q26). Начисления-факты и правки — не платежи: они остаются и действуют
+    по своим датам, как в истории.
+
+    Ответ — `DebtGrowth`: `parts` — разбивка на `until`, `grown` — «набежало за
+    период», дельта частей между `until` и `since`. Края (13-Т3):
+
+    - `until <= since` — период пустой: `grown` — нули («набежать за ноль дней»
+      известно и без раскладки), `parts` — разбивка на `since`: проекция идёт
+      вперёд от `since`, назад не разворачивается;
+    - `since` раньше всех фактов — состояние на `since` равно телу версий, рост
+      идёт от него;
+    - неизвестная раскладка (Q34) — обе разбивки `None`, сумму и её прирост
+      отвечает канон (`deal_balance`) по самой книге: в его числах нет
+      проекции, а без раскладки — и производной неустойки, так что в этой
+      части прогноз неполный; это пробел, не выдумка;
+    - потолок (06) обрезает накопленную неустойку, как в истории; шкалы нет —
+      неустойка не капает (пробел 12-Т3);
+    - штраф триггера срабатывает в дату условия и попадает в `grown` своей
+      частью (07).
+
+    У регулярного расхода и требования растить нечего — обе разбивки `None`
+    (Q23).
+    """
+    deal = _deal(book, deal_uid)
+    if deal.amount is None or deal.direction == OWED_TO_ME:
+        return DebtGrowth(until, None, None)
+    if until <= since:
+        return DebtGrowth(until, _parts_at(book, deal_uid, since),
+                          {part: Decimal(0) for part in PARTS})
+    projection = _facts_to(book, deal_uid, since)
+    before = _parts_at(projection, deal_uid, since)
+    after = _parts_at(projection, deal_uid, until)
+    if after is None or before is None:
+        return DebtGrowth(until, None, None)   # раскладка не известна (Q34)
+    grown = {part: after[part] - before[part] for part in PARTS}
+    return DebtGrowth(until, after, grown)
 
 
 def deal_balance(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
