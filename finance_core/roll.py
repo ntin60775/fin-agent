@@ -950,7 +950,11 @@ class _DealsRoll:
             # или чей котёл урезал платёж при живом обязательстве.
             done = unit is not None and unit.closed
             if unit is not None:
-                room = unit.remaining
+                # Платёж идёт за конкретного участника: не превышает ни
+                # свободного котла, ни его собственного остатка (Q33) —
+                # минус у участника невозможен, и закрытие разом ничего
+                # не стирает (15-Т2).
+                room = min(unit.remaining, opened.balance)
             elif opened.deal.amount is None:
                 room = want     # регулярный расход: остатка нет, платится целиком
             else:
