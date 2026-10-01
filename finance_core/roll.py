@@ -1219,12 +1219,13 @@ class _DealsRoll:
             # Годовая — как у канона: начисление месяца одним вызовом от
             # остатка на начало месяца; платежи месяца в нём не участвуют,
             # свои доли в тело/проценты уменьшают базу следующего (P0-1).
-            # Начисления-факты в тело входят в базу того же месяца (04-Т3).
+            # Начисления-факты в тело и в проценты входят в базу того же
+            # месяца с даты события (04-Т3, правка 2; тикет 19).
             seg = accrued_interest(
                 deal, base, cur, month_end, (),
                 sorted(list(shift_by_day.items())
                        + [(c.date, c.amount) for c in charges
-                          if c.part == BODY]))
+                          if c.part in (BODY, INTEREST)]))
             interest += seg
             parts[INTEREST] += seg
             base += seg
@@ -1294,8 +1295,11 @@ class _DealsRoll:
                 charged_parts[c.part] += c.amount
                 if opened.parts is not None:
                     parts[c.part] += c.amount
-                    if c.part == BODY:
-                        base += c.amount   # начисление в тело — в базе с даты
+                    if c.part in (BODY, INTEREST):
+                        # Начисление в тело и в проценты — в базе с даты
+                        # (04-Т3, правка 2; тикет 19): дневная база растёт
+                        # с дня факта, как у канона (`left += shift`).
+                        base += c.amount
                 else:
                     opened.balance += c.amount
             delta = shift_by_day.get(day)
@@ -1523,9 +1527,12 @@ class _DealsRoll:
                           for p in load.payments]
 
         # Раскладка начисленного месяца по видам (09-Т3): проценты, неустойка
-        # и начисления в свою часть; сумма равна `interest`.
+        # и начисления в свою часть; сумма равна `interest`. Записи-факты в
+        # «проценты» входят в строку процентов, как в «тело» и «издержки»
+        # (P2-1, тикет 19) — иначе сумма раскладки теряла бы факт.
         interest_parts = {
-            INTEREST: load.interest + trigger_parts[INTEREST],
+            INTEREST: load.interest + load.charged_parts[INTEREST]
+                      + trigger_parts[INTEREST],
             PENALTY: penalty + trigger_parts[PENALTY],
             BODY: load.charged_parts[BODY] + trigger_parts[BODY],
             COSTS: load.charged_parts[COSTS] + trigger_parts[COSTS],
