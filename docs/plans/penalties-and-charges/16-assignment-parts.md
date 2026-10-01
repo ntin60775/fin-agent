@@ -2,8 +2,8 @@
 node_type: ticket
 title: Передача долга с частями
 service: _platform
-status: draft
-updated: 2026-09-28
+status: active
+updated: 2026-10-01
 links:
   documents: [../../../finance_core/settlements.py, ../../../tests/test_settlements.py]
   part_of: [README.md]

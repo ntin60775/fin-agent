@@ -1356,6 +1356,166 @@ def test_parts_sum_equals_the_canon_with_everything_inside():
         assert sum(parts.values()) == deal_balance(book, "заём", day), day
 
 
+# --- цессия с частями -------------------------------------------------------
+
+def _transferred_book(delta: D, amount: D | None = D("10000"),
+                   **deal_kw) -> tuple[Settlements, Deal]:
+    """Сделка с накопленной неустойкой и издержками, передача 1 марта."""
+    deal = _rate_deal(amount=amount, counterparty="коллектор",
+                      allocations=(AllocationRule(PARTS),), **deal_kw)
+    book = _rule_book(
+        deal,
+        charges=[Charge("неустойка", date(2026, 2, 1), D("500"), "заём", PENALTY),
+                 Charge("издержки", date(2026, 2, 15), D("100"), "заём", COSTS)],
+        assignments=[Assignment(date(2026, 3, 1), "заём", from_holder="банк",
+                                to_holder="коллектор", amount=D("10000"),
+                                delta=delta)])
+    book.counterparties.append(_counterparty(uid="коллектор", name="Коллектор",
+                                             subtype="ПКО"))
+    return book, deal
+
+
+def test_an_assignment_moves_the_body_and_keeps_the_accumulated():
+    """Дельта передачи — в тело; накопленное не сбрасывается (R3-Q18, 16-Т1).
+
+    Неустойка и издержки переходят с долгом без изменений; тело скачет ровно
+    на дельту в день передачи; проценты видят новое тело со дня передачи:
+    март 323.01 — как у начисления в тело той же суммой (04-Т3, правка 2).
+    """
+    book, deal = _transferred_book(D("2000"))
+    deal.amount = D("12000")            # зона держит поле у последней версии
+    validate(book)
+    before = deal_parts(book, "заём", date(2026, 2, 28))
+    after = deal_parts(book, "заём", date(2026, 3, 1))
+    assert before == {BODY: D("10000"), INTEREST: D("201.00"),
+                      PENALTY: D("500"), COSTS: D("100")}
+    assert after == {BODY: D("12000"), INTEREST: D("204.94"),
+                     PENALTY: D("500"), COSTS: D("100")}
+    march = deal_parts(book, "заём", date(2026, 3, 31))
+    assert march[INTEREST] == D("323.01")
+    assert sum(march.values()) == deal_balance(book, "заём", date(2026, 3, 31))
+
+
+def test_after_an_assignment_the_parts_sum_to_the_canon_and_amount_stays_the_version():
+    """`deal_amount_at` — тело версий; «сколько» отвечает канон (R3-Q18, 16-Т2).
+
+    После передачи `deal_amount_at` = сумма на момент передачи плюс дельта
+    (12 000), а не сумма частей (в них живут ещё и проценты): второе имя
+    одного числа было бы вторым носителем. Канон = сумма частей непрерывен —
+    скачет только на дельту передачи.
+    """
+    book, deal = _transferred_book(D("2000"))
+    deal.amount = D("12000")
+    validate(book)
+    assert deal_amount_at(book, "заём", date(2026, 2, 28)) == D("10000")
+    assert deal_amount_at(book, "заём", date(2026, 3, 1)) == D("12000")
+    parts = deal_parts(book, "заём", date(2026, 3, 31))
+    assert deal_amount_at(book, "заём", date(2026, 3, 31)) == D("12000")
+    assert sum(parts.values()) == D("12923.01") != D("12000")
+    for day in (date(2026, 2, 27), date(2026, 2, 28), date(2026, 3, 1),
+                date(2026, 3, 31)):
+        assert sum(deal_parts(book, "заём", day).values()) == \
+            deal_balance(book, "заём", day), day
+
+
+def test_trigger_epochs_keep_their_keys_across_an_assignment():
+    """Эпохи правил не смешиваются, уиды не двигаются (R4-Q25, R8-Q35, 16-Т2).
+
+    До передачи случаи по старому правилу (500), с даты передачи — по новому
+    (700), включая день передачи: версия действует с даты включительно (02-Т7).
+    Факт старой эпохи (`Charge.trigger` старого уида) вытесняет ровно свой
+    случай — соседние живы, март не задет; `Charge.uid` не изменился.
+    """
+    deal = _deal("заём", amount=D("3000"), counterparty="коллектор",
+                 rate_per_year=D("0"),
+                 schedule=_rule(days=(10, 20), payment=D("1000")),
+                 allocations=(AllocationRule((PENALTY, BODY, INTEREST, COSTS)),),
+                 triggers=(TriggerRule(uid="штраф-1", condition=TRIGGER_OVERDUE,
+                                       part=PENALTY, basis="не уплатил в срок",
+                                       charge_amount=D("500"),
+                                       effective=date(2026, 1, 1)),
+                           TriggerRule(uid="штраф-2", condition=TRIGGER_OVERDUE,
+                                       part=PENALTY, basis="не уплатил в срок",
+                                       charge_amount=D("700"),
+                                       effective=date(2026, 3, 1))))
+    book = Settlements(counterparties=[_counterparty(),
+                                       _counterparty(uid="коллектор",
+                                                     subtype="ПКО")],
+                       deals=[deal],
+                       assignments=[Assignment(date(2026, 3, 1), "заём",
+                                               from_holder="банк",
+                                               to_holder="коллектор",
+                                               amount=D("3000"), delta=D("0"))])
+    validate(book)
+    old = trigger_charges(book, "заём", date(2026, 1, 1), date(2026, 2, 28))
+    assert [(c.trigger, c.date, c.amount) for c in old] == [
+        ("штраф-1", date(2026, 1, 10), D("500.00")),
+        ("штраф-1", date(2026, 1, 20), D("500.00")),
+        ("штраф-1", date(2026, 2, 10), D("500.00")),
+        ("штраф-1", date(2026, 2, 20), D("500.00")),
+    ]
+    new = trigger_charges(book, "заём", date(2026, 3, 1), date(2026, 3, 31))
+    assert [(c.trigger, c.date, c.amount) for c in new] == [
+        ("штраф-2", date(2026, 3, 10), D("700.00")),
+        ("штраф-2", date(2026, 3, 20), D("700.00")),
+    ]
+
+    # Факт старой эпохи — свой уид, своя дата: связь «факт ↔ случай» цела.
+    fact = Charge("факт-эпохи", date(2026, 2, 10), D("500"), "заём", PENALTY,
+                  basis="не уплатил в срок", trigger="штраф-1")
+    book.charges.append(fact)
+    keys = {(c.trigger, c.date) for c in
+            trigger_charges(book, "заём", date(2026, 1, 1), date(2026, 2, 28))}
+    assert ("штраф-1", date(2026, 2, 10)) not in keys
+    assert ("штраф-1", date(2026, 2, 20)) in keys
+    assert fact.uid == "факт-эпохи" and fact.trigger == "штраф-1"
+    assert [(c.trigger, c.date) for c in
+            trigger_charges(book, "заём", date(2026, 3, 1), date(2026, 3, 31))] == [
+        ("штраф-2", date(2026, 3, 10)), ("штраф-2", date(2026, 3, 20))]
+
+
+def test_a_negative_assignment_delta_sinks_the_body_into_overpayment():
+    """Отрицательная дельта валит тело ниже нуля — переплата на теле (Q33, 16-Т3).
+
+    Тело почти погашено платежом (1 000), передача списывает ещё 2 000:
+    тело-часть уходит в −1 000, канон равен сумме частей — избыток несёт тело,
+    минус по остальным частям не размазывается.
+    """
+    deal = _rate_deal(amount=D("10000"), rate_per_year=D("0"),
+                      counterparty="коллектор",
+                      allocations=(AllocationRule(PARTS),))
+    book = _rule_book(
+        deal,
+        movements=[Movement(date(2026, 2, 20), D("9000"), "заём")],
+        assignments=[Assignment(date(2026, 3, 1), "заём", from_holder="банк",
+                                to_holder="коллектор", amount=D("10000"),
+                                delta=D("-2000"))])
+    book.counterparties.append(_counterparty(uid="коллектор", name="Коллектор",
+                                             subtype="ПКО"))
+    deal.amount = D("8000")
+    validate(book)
+    parts = deal_parts(book, "заём", date(2026, 3, 31))
+    assert parts == {BODY: D("-1000"), INTEREST: D("0.00"),
+                     PENALTY: D("0"), COSTS: D("0")}
+    assert sum(parts.values()) == deal_balance(book, "заём", date(2026, 3, 31))
+    assert deal_amount_at(book, "заём", date(2026, 3, 31)) == D("8000")
+
+
+def test_an_undated_rule_version_must_be_the_only_one():
+    """Правило без даты — только единственной версией; рядом с версиями — ошибка (02-Т1).
+
+    Новый кредитор обязан датировать своё правило датой передачи: версия без
+    даты при других версиях не определяет свой период — валидация падает
+    текстом по существу. Одиночная версия без даты легальна.
+    """
+    undated = _rule_book(_rate_deal(allocations=(
+        AllocationRule(PARTS), AllocationRule(PARTS, effective=date(2026, 3, 1)))))
+    with pytest.raises(ValueError, match="без даты"):
+        validate(undated)
+    sole = _rule_book(_rate_deal(allocations=(AllocationRule(PARTS),)))
+    validate(sole)                     # единственная без даты — легальна
+
+
 def test_a_charge_into_penalty_does_not_grow_interest():
     """Неустойка в базе процентов не живёт: проценты — на теле и процентах."""
     plain = _rule_book(_rate_deal())
