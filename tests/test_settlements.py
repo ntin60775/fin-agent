@@ -1359,7 +1359,7 @@ def test_parts_sum_equals_the_canon_with_everything_inside():
 # --- цессия с частями -------------------------------------------------------
 
 def _transferred_book(delta: D, amount: D | None = D("10000"),
-                   **deal_kw) -> tuple[Settlements, Deal]:
+                      **deal_kw) -> tuple[Settlements, Deal]:
     """Сделка с накопленной неустойкой и издержками, передача 1 марта."""
     deal = _rate_deal(amount=amount, counterparty="коллектор",
                       allocations=(AllocationRule(PARTS),), **deal_kw)
@@ -1422,13 +1422,15 @@ def test_trigger_epochs_keep_their_keys_across_an_assignment():
     """Эпохи правил не смешиваются, уиды не двигаются (R4-Q25, R8-Q35, 16-Т2).
 
     До передачи случаи по старому правилу (500), с даты передачи — по новому
-    (700), включая день передачи: версия действует с даты включительно (02-Т7).
-    Факт старой эпохи (`Charge.trigger` старого уида) вытесняет ровно свой
-    случай — соседние живы, март не задет; `Charge.uid` не изменился.
+    (700), включая день передачи: передача 1 марта и вхождение 1-го — случай
+    этого дня по новому правилу (16-Т3, 02-Т7). Факт своей эпохи вытесняет
+    ровно свой случай; факт чужой эпохи с датой случая новой (`Charge.trigger`
+    старого уида, 1 марта) случай не вытесняет: ключ — пара «уид правила,
+    дата срабатывания», а не дата (Q35). `Charge.uid` не изменился.
     """
     deal = _deal("заём", amount=D("3000"), counterparty="коллектор",
                  rate_per_year=D("0"),
-                 schedule=_rule(days=(10, 20), payment=D("1000")),
+                 schedule=_rule(days=(1,), payment=D("1000")),
                  allocations=(AllocationRule((PENALTY, BODY, INTEREST, COSTS)),),
                  triggers=(TriggerRule(uid="штраф-1", condition=TRIGGER_OVERDUE,
                                        part=PENALTY, basis="не уплатил в срок",
@@ -1449,29 +1451,29 @@ def test_trigger_epochs_keep_their_keys_across_an_assignment():
     validate(book)
     old = trigger_charges(book, "заём", date(2026, 1, 1), date(2026, 2, 28))
     assert [(c.trigger, c.date, c.amount) for c in old] == [
-        ("штраф-1", date(2026, 1, 10), D("500.00")),
-        ("штраф-1", date(2026, 1, 20), D("500.00")),
-        ("штраф-1", date(2026, 2, 10), D("500.00")),
-        ("штраф-1", date(2026, 2, 20), D("500.00")),
+        ("штраф-1", date(2026, 1, 1), D("500.00")),
+        ("штраф-1", date(2026, 2, 1), D("500.00")),
     ]
     new = trigger_charges(book, "заём", date(2026, 3, 1), date(2026, 3, 31))
     assert [(c.trigger, c.date, c.amount) for c in new] == [
-        ("штраф-2", date(2026, 3, 10), D("700.00")),
-        ("штраф-2", date(2026, 3, 20), D("700.00")),
+        ("штраф-2", date(2026, 3, 1), D("700.00")),
     ]
 
-    # Факт старой эпохи — свой уид, своя дата: связь «факт ↔ случай» цела.
-    fact = Charge("факт-эпохи", date(2026, 2, 10), D("500"), "заём", PENALTY,
-                  basis="не уплатил в срок", trigger="штраф-1")
-    book.charges.append(fact)
-    keys = {(c.trigger, c.date) for c in
-            trigger_charges(book, "заём", date(2026, 1, 1), date(2026, 2, 28))}
-    assert ("штраф-1", date(2026, 2, 10)) not in keys
-    assert ("штраф-1", date(2026, 2, 20)) in keys
-    assert fact.uid == "факт-эпохи" and fact.trigger == "штраф-1"
+    # Факт своей эпохи вытесняет свой случай; факт чужой эпохи с датой
+    # случая новой — нет: вытеснение по (уид правила, дата), а не по дате.
+    own = Charge("факт-эпохи", date(2026, 2, 1), D("500"), "заём", PENALTY,
+                 basis="не уплатил в срок", trigger="штраф-1")
+    foreign = Charge("факт-чужой", date(2026, 3, 1), D("500"), "заём", PENALTY,
+                     basis="не уплатил в срок", trigger="штраф-1")
+    book.charges += [own, foreign]
     assert [(c.trigger, c.date) for c in
-            trigger_charges(book, "заём", date(2026, 3, 1), date(2026, 3, 31))] == [
-        ("штраф-2", date(2026, 3, 10)), ("штраф-2", date(2026, 3, 20))]
+            trigger_charges(book, "заём", date(2026, 1, 1),
+                            date(2026, 2, 28))] == [("штраф-1", date(2026, 1, 1))]
+    assert [(c.trigger, c.date) for c in
+            trigger_charges(book, "заём", date(2026, 3, 1),
+                            date(2026, 3, 31))] == [("штраф-2", date(2026, 3, 1))]
+    assert own.uid == "факт-эпохи" and own.trigger == "штраф-1"
+    assert foreign.uid == "факт-чужой" and foreign.trigger == "штраф-1"
 
 
 def test_a_negative_assignment_delta_sinks_the_body_into_overpayment():
