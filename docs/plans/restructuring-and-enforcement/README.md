@@ -3,7 +3,7 @@ node_type: plan
 title: 'Реструктуризация и взыскание — условия меняются со дня, принуждение видно кассе'
 service: _platform
 status: active
-updated: 2026-10-02
+updated: 2026-10-03
 links:
   documents: [../../../finance_core/settlements.py, ../../../finance_core/roll.py, ../../../finance_core/solver.py, ../../../finance_core/actions.py, ../../../finance_core/forecast.py]
   depends_on: [../../decisions/deal-balance-canon.md, ../../decisions/deal-parts-and-charges.md, ../../decisions/charged-vs-paid.md, ../../decisions/penalty-and-overdue.md, ../../decisions/zone-rules-and-forms.md, ../../decisions/derived-balances.md, ../../decisions/unknown-is-not-zero.md, ../../decisions/single-free-money-basis.md]
@@ -137,7 +137,7 @@ links:
 
 | # | Тикет | Единица | Blocked by | Статус |
 |---|---|---|---|---|
-| 01 | [Версия условий — сумма и ставка со дня](01-restructure-sum-rate.md) | запись-реструктуризация переустанавливает сумму и ставку со дня; эпохи, прощение, валидация | — | draft |
+| 01 | [Версия условий — сумма и ставка со дня](01-restructure-sum-rate.md) | запись-реструктуризация переустанавливает сумму и ставку со дня; эпохи, прощение, валидация | — | archived |
 | 02 | [Версия графика — эпохи вхождений](02-restructure-schedule.md) | новый график со дня, будущие старых аннулируются, прошлые — история | 01 | draft |
 | 03 | [Просрочка и неустойка на стыке эпох](03-overdue-across-epochs.md) | просрочка живёт в частях, капает правилом своей эпохи, гасится новым графиком (приёмочный) | 02 | draft |
 | 04 | [Принудительный факт — удержание и списание в кассе](04-forced-payment.md) | признак принуждения: без ёмкости и доступности, порог зоны, FIFO просрочек | — | draft |
