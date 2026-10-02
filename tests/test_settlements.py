@@ -1,6 +1,7 @@
 """Тесты взаиморасчётов — синтетические фикстуры, без личных данных."""
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import date, timedelta
 from decimal import Decimal as D
 import pytest
@@ -14,8 +15,9 @@ from finance_core import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
                           TRIGGER_OVERDUE_SUM, Account, AllocationRule,
                           Assignment, Charge, Counterparty, Deal, Movement,
                           OccurrenceEdit, PartPayment, Payment, PenaltyCap,
-                          PenaltyRule, PenaltyStep, Scenario, ScheduleRule,
-                          Settlements, TriggerRule, TriggeredCharge, Wallet,
+                          PenaltyRule, PenaltyStep, Restructure, Scenario,
+                          ScheduleRule, Settlements, TriggerRule,
+                          TriggeredCharge, Wallet,
                           accrued_interest, allocate_payment, beneficiary,
                           counterparty_balance, counterparty_role,
                           deal_amount_at, deal_balance, deal_holder_at,
@@ -2209,3 +2211,298 @@ def test_two_occurrences_on_one_date_share_the_case_key():
     validate(recorded)
     assert trigger_charges(recorded, "заём", START, date(2026, 1, 20)) == ()
     assert deal_parts(recorded, "заём", date(2026, 1, 20))[PENALTY] == D("700")
+
+
+# --- реструктуризация: версии условий со дня -------------------------------
+
+def _restructured_book(**kw) -> Settlements:
+    """Беспроцентный долг 100 000: 1 марта 2026 мировое переустановило 90 000.
+
+    Снимок прежней суммы — передача «банк → банк» без дельты: сумма на момент
+    и есть снимок, держатель не менялся. Сумма сделки сходится с последней
+    записью условий — реструктуризацией.
+    """
+    base = dict(
+        counterparties=[_counterparty()],
+        deals=[_deal(uid="заём", amount=D("90000"),
+                     allocations=(AllocationRule(PARTS),))],
+        assignments=[Assignment(date(2026, 1, 10), "заём",
+                                from_holder="банк", to_holder="банк",
+                                amount=D("100000"), delta=D("0"))],
+        restructures=[Restructure(date(2026, 3, 1), "заём", amount=D("90000"))],
+    )
+    base.update(kw)
+    return Settlements(**base)                      # type: ignore[arg-type]
+
+
+def test_a_restructure_resets_the_amount_from_its_day():
+    """Эпохи суммы: до даты версии — прежняя, с даты включительно — новая (01-а).
+
+    «Долг на дату» и раскладка частей считаются по эпохам: до 10 января и до
+    1 марта действует снимок 100 000, с 1 марта — 90 000; день версии входит
+    включительно. Канон и части на датах до/после/на дату версии сходятся
+    между собой — канон остаётся суммой частей.
+    """
+    book = _restructured_book()
+    validate(book)
+    for day, amount in ((date(2026, 1, 9), D("100000")),
+                        (date(2026, 1, 10), D("100000")),
+                        (date(2026, 2, 28), D("100000")),
+                        (date(2026, 3, 1), D("90000")),
+                        (date(2026, 3, 31), D("90000"))):
+        assert deal_amount_at(book, "заём", day) == amount, day
+        assert deal_balance(book, "заём", day) == amount, day
+        parts = deal_parts(book, "заём", day)
+        assert parts == {BODY: amount, INTEREST: D("0"), PENALTY: D("0"),
+                         COSTS: D("0")}, day
+        assert sum(parts.values()) == deal_balance(book, "заём", day), day
+
+
+def test_forgiveness_lowers_the_body_without_any_movement():
+    """Прощение — сумма вниз: тело падает записью условия, деньги не уходят (01-б).
+
+    Движений в книге нет: канон до даты версии 100 000, после — 90 000, и упало
+    ровно тело. Сумма частей равна канону — переустановка не рвёт раскладку.
+    """
+    book = _restructured_book()
+    validate(book)
+    before = deal_parts(book, "заём", date(2026, 2, 28))
+    after = deal_parts(book, "заём", date(2026, 3, 1))
+    assert before[BODY] == D("100000") and after[BODY] == D("90000")
+    assert book.movements == []          # денег никто не двигал
+    for day in (date(2026, 2, 28), date(2026, 3, 1), date(2026, 3, 31)):
+        assert sum(deal_parts(book, "заём", day).values()) == \
+            deal_balance(book, "заём", day), day
+
+
+def test_a_version_without_amount_keeps_the_previous_epoch():
+    """Пустые поля наследуются: запись только ставки сумму не трогает (01-Т3).
+
+    Прежняя эпоха отвечает полным набором условий: сумма наследуется так же,
+    как ставка, — до и после версии тело одно.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("90000"))],
+        restructures=[Restructure(date(2026, 3, 1), "заём",
+                                  rate_per_year=D("0"))])
+    validate(book)                      # запись — только ставка
+    assert deal_amount_at(book, "заём", date(2026, 2, 28)) == D("90000")
+    assert deal_amount_at(book, "заём", date(2026, 3, 1)) == D("90000")
+
+
+def test_interest_runs_the_rate_of_its_epoch_and_the_month_stays_whole():
+    """Ставка по эпохам: до версии — прежняя, с неё — новая; месяц не рвётся (01-в).
+
+    Смена 15 февраля делит месяц: [1–14] — 24 % от базы февраля, [15–28] —
+    12 % от остатка на 15-е (с начисленным первой части) — 14 + 14 = 28 дней,
+    ни один день не потерян и не задвоен. Март целиком идёт новой ставкой.
+    """
+    deal = _deal(amount=D("120000"), start=date(2025, 6, 1),
+                 rate_per_year=D("0.24"), rate_per_day=None)
+    book = Settlements(counterparties=[_counterparty()], deals=[deal],
+                       restructures=[Restructure(date(2026, 2, 15), "заём",
+                                                 rate_per_year=D("0.12"))])
+    validate(book)
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == D("140599.13")
+    assert deal_balance(book, "заём", date(2026, 2, 14)) == D("142005.12")
+    assert deal_balance(book, "заём", date(2026, 2, 28)) == D("142715.15")
+    assert deal_balance(book, "заём", date(2026, 3, 31)) == D("144142.30")
+
+    # Тот же канон с раскладкой: версия ставки не рвёт «канон = сумма частей».
+    allocated = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("120000"), start=date(2025, 6, 1),
+                     rate_per_year=D("0.24"), rate_per_day=None,
+                     allocations=(AllocationRule(PARTS),))],
+        restructures=[Restructure(date(2026, 2, 15), "заём",
+                                  rate_per_year=D("0.12"))])
+    validate(allocated)
+    for day in (date(2026, 1, 31), date(2026, 2, 14), date(2026, 2, 28),
+                date(2026, 3, 31)):
+        assert sum(deal_parts(allocated, "заём", day).values()) == \
+            deal_balance(allocated, "заём", day), day
+
+
+def test_a_daily_rate_version_switches_by_the_day_of_its_epoch():
+    """Дневная ставка по эпохам: ставка дня — по эпохе дня (01-Т3).
+
+    14 дней января по 0,1 % и 17 дней по 0,05 % — смена в середине месяца
+    режет отрезок по дням, как и положено дневной базе.
+    """
+    interest = accrued_interest(
+        _daily(), D("100000"), date(2026, 1, 1), date(2026, 1, 31), [],
+        rates=[(date(2026, 1, 15), None, D("0.0005"))])
+    # 14 × 100,00; остаток на 15-е — 101 400 (канон непрерывен, кусок капитален);
+    # 17 × 50,70 от него.
+    assert interest == D("2261.90")
+
+
+def test_a_rate_version_may_switch_the_rate_kind_by_zeroing_the_old_one():
+    """Смена типа ставки: прежняя снимается нулём, ноль — не наследование (01-Т3).
+
+    Годовая 24 % до 15 января, с 15-го — дневная 0,05 %: годовая часть месяца —
+    пропорционально дням от базы месяца, дневная — по дням от остатка на 15-е.
+    """
+    deal = _deal(amount=D("120000"), start=date(2026, 1, 1),
+                 rate_per_year=D("0.24"), rate_per_day=None)
+    book = Settlements(counterparties=[_counterparty()], deals=[deal],
+                       restructures=[Restructure(
+                           date(2026, 1, 15), "заём",
+                           rate_per_year=D("0"), rate_per_day=D("0.0005"))])
+    validate(book)
+    # Январь: 2 400 × 14/31 = 1 083,87 годовой; 17 × 60,54 дневной от 121 083,87.
+    assert deal_balance(book, "заём", date(2026, 1, 31)) == D("122113.05")
+
+
+def test_a_backdated_version_recomputes_from_the_event_date():
+    """Задним числом допустимо: запись меняет расчёт с даты события (01-г).
+
+    До события канон прежний, с события — новая версия, и дельта входит в базу
+    начисления своей датой: декабрьские проценты идут на 80 000 (сумма после
+    версии), а не на 100 000 — той же механикой, что дельта передачи.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("80000"), start=date(2025, 6, 1),
+                     rate_per_year=D("0.24"), rate_per_day=None)],
+        assignments=[Assignment(date(2025, 6, 1), "заём", from_holder="банк",
+                                to_holder="банк", amount=D("100000"))],
+        restructures=[Restructure(date(2025, 12, 1), "заём", amount=D("80000"))])
+    validate(book)
+    # Июнь–ноябрь на 100 000: 12 616,24; декабрь на 80 000 — его базе 92 616,24.
+    assert deal_balance(book, "заём", date(2025, 11, 30)) == D("112616.24")
+    assert deal_balance(book, "заём", date(2025, 12, 1)) == D("92675.99")
+    assert deal_balance(book, "заём", date(2025, 12, 31)) == D("94468.56")
+
+
+def test_the_restructure_carries_only_the_conditions():
+    """Форма записи: только условия — контрагент, направление и единица полей не имеют.
+
+    Контрагента меняет передача, направление и единица закрытия не меняются
+    вовсе: полей в записи нет, и форма заперта — расширившие её сломают
+    семантику «запись меняет только условия».
+    """
+    assert {f.name for f in fields(Restructure)} == {
+        "date", "deal", "amount", "rate_per_year", "rate_per_day"}
+
+
+def test_validation_names_the_substance_of_a_bad_version():
+    """Тексты валидации по существу: сходимость, отрицательная, «ничего не меняет».
+
+    Сумма сделки сходится с последней записью условий — обобщение проверки про
+    передачу: расхождение — два носителя одного числа, текст называет запись.
+    """
+    diverged = _restructured_book(
+        deals=[_deal(uid="заём", amount=D("100000"))])
+    with pytest.raises(ValueError, match="расходится с реструктуризацией"):
+        validate(diverged)
+
+    negative = _restructured_book(
+        restructures=[Restructure(date(2026, 3, 1), "заём", amount=D("-1"))])
+    with pytest.raises(ValueError, match="прощение не делает долг отрицательным"):
+        validate(negative)
+
+    empty = _restructured_book(
+        restructures=[Restructure(date(2026, 3, 1), "заём")])
+    with pytest.raises(ValueError, match="реструктуризация ничего не меняет"):
+        validate(empty)
+
+    both = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("90000"), start=date(2026, 1, 1))],
+        restructures=[Restructure(date(2026, 3, 1), "заём",
+                                  rate_per_year=D("0.12"),
+                                  rate_per_day=D("0.001"))])
+    with pytest.raises(ValueError, match="заданы и годовая, и дневная"):
+        validate(both)
+
+
+def test_validation_keeps_one_live_rate_per_epoch_and_one_record_a_day():
+    """«Либо годовая, либо дневная» — на эпоху; записи условий — по одной в дату.
+
+    Наследование собирает эпоху из записи и прежних ставок: годовая при
+    наследованной дневной — две живых ставки, текст подсказывает снятие нулём.
+    Две записи условий одной даты не упорядочить — какая действует последней.
+    """
+    inherited = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("10000"), start=date(2026, 1, 1),
+                     rate_per_year=None, rate_per_day=D("0.001"))],
+        restructures=[Restructure(date(2026, 3, 1), "заём",
+                                  rate_per_year=D("0.12"))])
+    with pytest.raises(ValueError, match="прежняя снимается нулём"):
+        validate(inherited)
+
+    clash = _restructured_book(
+        assignments=[Assignment(date(2026, 3, 1), "заём", from_holder="банк",
+                                to_holder="банк", amount=D("100000"))])
+    with pytest.raises(ValueError, match="две записи условий в одну дату"):
+        validate(clash)
+
+    twice = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("95000"), start=date(2026, 1, 1))],
+        restructures=[Restructure(date(2026, 3, 1), "заём", amount=D("95000")),
+                      Restructure(date(2026, 3, 1), "заём",
+                                 rate_per_year=D("0.12"))])
+    with pytest.raises(ValueError, match="две записи условий в одну дату"):
+        validate(twice)
+
+
+def test_a_regular_expense_has_no_amount_to_reset_and_a_rate_needs_a_start():
+    """У регулярного расхода переустанавливать нечего; ставке версии нужна дата.
+
+    Суммы у расхода нет — версии суммы нечем действовать; ставка живёт по
+    эпохам, и версия со ставкой спрашивает начало долга так же, как ставка
+    самой сделки.
+    """
+    expense = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=None)],
+        restructures=[Restructure(date(2026, 3, 1), "заём", amount=D("500"))])
+    with pytest.raises(ValueError,
+                       match="у регулярного расхода суммы нет"):
+        validate(expense)
+
+    no_start = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("10000"))],
+        restructures=[Restructure(date(2026, 3, 1), "заём",
+                                  rate_per_year=D("0.24"))])
+    with pytest.raises(ValueError, match="начала долга нет"):
+        validate(no_start)
+
+
+def test_a_rate_only_version_does_not_switch_off_the_amount_convergence():
+    """Запись без суммы не выключает сходимость: носитель — последняя суммовая.
+
+    Версия только ставки сумму не меняет — и не может развязать сумму сделки с
+    действующей версией: сверка идёт с последней записью, задающей сумму, той
+    же выборкой, что `deal_amount_at`. Ревью тикета 01: до почты обе книги
+    молча проходили `validate` при разошедшейся сумме.
+    """
+    after_restructure = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("80000"), start=date(2026, 1, 1))],
+        assignments=[Assignment(date(2026, 1, 10), "заём", from_holder="банк",
+                                to_holder="банк", amount=D("100000"))],
+        restructures=[Restructure(date(2026, 3, 1), "заём", amount=D("90000")),
+                      Restructure(date(2026, 4, 1), "заём",
+                                  rate_per_year=D("0.12"))])
+    with pytest.raises(ValueError, match="расходится с реструктуризацией"):
+        validate(after_restructure)
+    after_restructure.deals[0].amount = D("90000")
+    validate(after_restructure)         # сошлось — запись ставки ни при чём
+
+    after_assignment = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(amount=D("90000"), start=date(2026, 1, 1))],
+        assignments=[Assignment(date(2026, 1, 10), "заём", from_holder="банк",
+                                to_holder="банк", amount=D("100000"))],
+        restructures=[Restructure(date(2026, 4, 1), "заём",
+                                  rate_per_year=D("0.12"))])
+    with pytest.raises(ValueError, match="расходится с последней передачей"):
+        validate(after_assignment)
+    after_assignment.deals[0].amount = D("100000")
+    validate(after_assignment)

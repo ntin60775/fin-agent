@@ -1,7 +1,10 @@
-"""Взаиморасчёты: контрагенты, кошельки, сделки, движения и передачи долга.
+"""Взаиморасчёты: контрагенты, кошельки, сделки, движения, передачи и версии.
 
 Сторона, отвечающая на вопрос «сколько я должен и сколько должны мне». Сделка
-несёт условия — сумму, ставку, правило графика — и направление; движения —
+несёт условия — сумму, ставку, правило графика — и направление; записи условий
+меняют их со дня: передача долга (`Assignment`) — держателя и тело по датам,
+реструктуризация (`Restructure`) — сумму и ставку со дня; прежние условия
+остаются историей — эпохами, как у правил зоны. Движения —
 факты: когда, сколько, куда и кому уплачено; начисления (`Charge`) — факты
 роста долга: решение, штраф, пошлина, издержки растут со своей даты. Ни
 расчётный остаток по сделке, ни сальдо по контрагенту не хранятся: и то и
@@ -531,6 +534,43 @@ class Assignment:
 
 
 @dataclass
+class Restructure:
+    """Реструктуризация — версия условий со дня: сумма и (или) ставка сделки.
+
+    Мировое соглашение, прощение части и присуждение суммы иска меняют
+    договорённость со дня, а не с начала: запись несёт новые значения, прежние
+    остаются историей — эпохами, как у правил зоны. Дата входит включительно:
+    до неё действует прежняя эпоха, с неё — новая; несколько записей — эпохи по
+    порядку дат, задним числом допустимо, как любое поздно записанное условие.
+
+    `amount` — новая сумма к закрытию целиком («долг теперь столько-то»), не
+    дельта: дельту движок вычисляет как разницу с прежней эпохой и ведёт в базу
+    начисления со дня записи — той же механикой, что дельта передачи. Прощение —
+    сумма вниз: тело падает записью условия, деньги не уходят. До первой записи
+    условий действует сумма сделки, у передачи она же — снимком (`amount`
+    «на момент»), поэтому чтобы смена суммы оставила историю «до», зона снимает
+    прежнюю сумму передачей; сумма сделки сходится с последней записью условий —
+    проверяет `validate`.
+
+    `rate_per_year` и `rate_per_day` — новые ставки; каждое `None` — «не
+    меняется, наследуется». Действует не более одной ненулевой — проверка на
+    эпоху целиком: смена типа ставки (дневная ↔ годовая) снимает прежнюю нулём —
+    `Decimal(0)` означает «ставки этой больше нет», а не наследуется. Начисление
+    идёт ставкой своей эпохи: отрезок делится по датам версий (`accrued_interest`).
+
+    Запись меняет только условия. Контрагента меняет передача, направление и
+    единица закрытия не меняются вовсе — полей здесь нет; `Assignment` не
+    расширяется: у него своя семантика и своя валидация, смешение — два смысла
+    одного носителя.
+    """
+    date: date
+    deal: str
+    amount: Decimal | None = None        # новая сумма целиком; None — наследуется
+    rate_per_year: Decimal | None = None  # новая годовая; None — наследуется
+    rate_per_day: Decimal | None = None   # новая дневная; None — наследуется
+
+
+@dataclass
 class OccurrenceEdit:
     """Правка вхождения поверх правила: перенести, пропустить, сменить сумму.
 
@@ -602,12 +642,14 @@ class Occurrence:
 
 @dataclass
 class Settlements:
-    """Взаиморасчёты целиком: контрагенты, кошельки, сделки, движения, передачи.
+    """Взаиморасчёты целиком: контрагенты, кошельки, сделки, движения, записи.
 
     Собранную книгу сначала проверяют `validate`, а потом спрашивают производные
     величины: проверка ловит ссылки на необъявленное и расхождения, на которых
     остаток и сальдо посчитались бы неверно. `charges` — начисления: факты роста
-    долга от события, опознаваемые уидом события. `edits` — правки вхождений из
+    долга от события, опознаваемые уидом события. `assignments` и `restructures`
+    — записи условий: передача меняет держателя и тело, реструктуризация —
+    сумму и ставку со дня. `edits` — правки вхождений из
     журнала зоны: они меняют график, а не условия сделки. `observed` —
     наблюдения извне: фактический остаток с датой, с которым сверяется расчётный.
     """
@@ -617,6 +659,7 @@ class Settlements:
     movements: list[Movement] = field(default_factory=list)
     charges: list[Charge] = field(default_factory=list)
     assignments: list[Assignment] = field(default_factory=list)
+    restructures: list[Restructure] = field(default_factory=list)
     edits: list[OccurrenceEdit] = field(default_factory=list)
     observed: list[ObservedBalance] = field(default_factory=list)
 
@@ -654,6 +697,7 @@ def validate(book: Settlements) -> None:
     _validate_movements(book)
     _validate_charges(book)
     _validate_assignments(book)
+    _validate_restructures(book)
     _validate_edits(book)
     _validate_observed(book)
 
@@ -711,11 +755,15 @@ def _validate_deals(book: Settlements) -> None:
                              f"отрицательной")
         if d.rate_per_year is not None and d.rate_per_day is not None:
             raise ValueError(f"сделка {d.uid!r}: ставка либо годовая, либо дневная")
-        if (d.amount is not None and d.start is None
-                and (d.rate_per_year not in (None, Decimal(0))
-                     or d.rate_per_day not in (None, Decimal(0)))):
-            # Нулевая ставка — не ставка: начисление равно нулю при любой дате,
-            # поэтому дата у такой сделки не нужна — как у беспроцентной.
+        # Нулевая ставка — не ставка: начисление равно нулю при любой дате,
+        # поэтому дата у такой сделки не нужна — как у беспроцентной. Ставка
+        # живёт по эпохам: версия из реструктуризации спрашивает дату так же,
+        # как ставка самой сделки.
+        rated = (d.rate_per_year not in (None, Decimal(0))
+                 or d.rate_per_day not in (None, Decimal(0))
+                 or any(year not in (None, Decimal(0)) or day not in (None, Decimal(0))
+                        for _, year, day in _rate_epochs(book, d)))
+        if d.amount is not None and d.start is None and rated:
             raise ValueError(
                 f"сделка {d.uid!r}: ставка и сумма есть, а начала долга нет — "
                 f"без него долг на дату не считается; укажите дату начала "
@@ -1012,24 +1060,94 @@ def _validate_assignments(book: Settlements) -> None:
         if a.deal in deals and (a.deal not in last or a.date >= last[a.deal].date):
             last[a.deal] = a
 
-    # Последняя передача — действующая версия условий: ни сумма, ни держатель
-    # сделки не имеют права разойтись с записью, иначе у одного числа два носителя.
+    # Последняя передача — держатель сделки: расходиться с записью поле не
+    # имеет права, иначе у одного числа два носителя. Сумму сверяет
+    # `_validate_restructures` — по последней записи условий, передачи и
+    # реструктуризации вместе.
     for uid, a in last.items():
         deal = deals[uid]
         if deal.amount is None:
             raise ValueError(f"сделка {uid!r}: у регулярного расхода передавать "
                              f"нечего — закрывать нечего")
-        version = a.amount + a.delta
-        if deal.amount != version:
-            raise ValueError(
-                f"сделка {uid!r}: сумма {deal.amount} расходится с последней "
-                f"передачей долга ({version}): действует версия из записи, "
-                f"правьте данные, а не число")
         if deal.counterparty != a.to_holder:
             raise ValueError(
                 f"сделка {uid!r}: держатель {deal.counterparty!r} расходится с "
                 f"последней передачей долга ({a.to_holder!r}): правьте данные, "
                 f"а не поле")
+
+
+def _validate_restructures(book: Settlements) -> None:
+    """Реструктуризации: форма записи и сходимость суммы с последней записью.
+
+    Сходимость обобщает проверку про передачу: последняя по дате запись условий
+    задаёт действующую сумму, и сумма сделки обязана сойтись с ней — иначе у
+    одного числа два носителя. У регулярного расхода суммы нет — переустанавливать
+    нечего. Даты записей условий одной сделки не повторяются: при равенстве не
+    определить, какая действует последней.
+    """
+    deals = {d.uid: d for d in book.deals}
+    dates: dict[str, set[date]] = {}
+    for a in book.assignments:
+        dates.setdefault(a.deal, set()).add(a.date)
+    for r in book.restructures:
+        _declared(r.deal, set(deals), "реструктуризация: сделка")
+        if r.amount is not None and r.amount < 0:
+            raise ValueError(f"реструктуризация по сделке {r.deal!r}: сумма версии "
+                             f"не может быть отрицательной — прощение не делает "
+                             f"долг отрицательным")
+        if (r.amount is None and r.rate_per_year is None
+                and r.rate_per_day is None):
+            raise ValueError(f"сделка {r.deal!r} от {r.date}: "
+                             f"реструктуризация ничего не меняет — все поля "
+                             f"наследуются")
+        if (r.rate_per_year not in (None, Decimal(0))
+                and r.rate_per_day not in (None, Decimal(0))):
+            raise ValueError(f"реструктуризация по сделке {r.deal!r} от {r.date}: "
+                             f"заданы и годовая, и дневная — ставка либо годовая, "
+                             f"либо дневная")
+        if r.deal in deals and r.deal in dates and r.date in dates[r.deal]:
+            raise ValueError(f"сделка {r.deal!r}: две записи условий в одну дату "
+                             f"{r.date}: какая из них последняя — не определить")
+        dates.setdefault(r.deal, set()).add(r.date)
+        if r.deal in deals and r.amount is not None and deals[r.deal].amount is None:
+            raise ValueError(f"реструктуризация по сделке {r.deal!r}: у регулярного "
+                             f"расхода суммы нет — переустанавливать нечего")
+
+    # «Либо годовая, либо дневная» — на эпоху целиком: наследование собирает
+    # эпоху из полей записи и прежних ставок, и двух ненулевых в ней не бывает.
+    # Эпохи даёт `_rate_epochs` — тот же путь слияния, что у расчёта.
+    for deal in book.deals:
+        for when, year, day in _rate_epochs(book, deal):
+            if year not in (None, Decimal(0)) and day not in (None, Decimal(0)):
+                raise ValueError(
+                    f"реструктуризация по сделке {deal.uid!r} от {when}: после "
+                    f"версии действуют и годовая ({year}), и дневная ({day}) — "
+                    f"ставка либо годовая, либо дневная; прежняя снимается нулём")
+
+    # Сходимость: последняя запись, задающая сумму, определяет действующую —
+    # той же выборкой, что `deal_amount_at`. Запись без суммы (только ставки)
+    # сумму не меняет и сверку не выключает: носитель действующей суммы —
+    # последняя суммовая запись.
+    for uid, deal in deals.items():
+        if deal.amount is None:
+            continue
+        amount_records = [r for r in _condition_records(book, uid)
+                          if isinstance(r, Assignment) or r.amount is not None]
+        if not amount_records:
+            continue
+        last_record = amount_records[-1]
+        if isinstance(last_record, Assignment):
+            version = last_record.amount + last_record.delta
+            if deal.amount != version:
+                raise ValueError(
+                    f"сделка {uid!r}: сумма {deal.amount} расходится с последней "
+                    f"передачей долга ({version}): действует версия из записи, "
+                    f"правьте данные, а не число")
+        elif deal.amount != last_record.amount:
+            raise ValueError(
+                f"сделка {uid!r}: сумма {deal.amount} расходится с реструктуризацией "
+                f"от {last_record.date} ({last_record.amount}): действует версия "
+                f"из записи, правьте данные, а не число")
 
 
 def _validate_edits(book: Settlements) -> None:
@@ -1167,6 +1285,63 @@ def _assignments(book: Settlements, deal_uid: str) -> list[Assignment]:
                   key=lambda a: a.date)
 
 
+def _restructures(book: Settlements, deal_uid: str) -> list[Restructure]:
+    return sorted((r for r in book.restructures if r.deal == deal_uid),
+                  key=lambda r: r.date)
+
+
+def _condition_records(book: Settlements,
+                       deal_uid: str) -> list[Assignment | Restructure]:
+    """Записи условий сделки по порядку дат: передачи и реструктуризации.
+
+    Дата входит включительно; записи одной даты запрещены валидацией —
+    неоднозначно, какая из них действует последней.
+    """
+    records: list[Assignment | Restructure] = [
+        *(a for a in book.assignments if a.deal == deal_uid),
+        *(r for r in book.restructures if r.deal == deal_uid)]
+    return sorted(records, key=lambda r: r.date)
+
+
+def _restructure_deltas(book: Settlements,
+                        deal_uid: str) -> list[tuple[date, Decimal]]:
+    """Дельты реструктуризаций: новая сумма минус прежняя эпоха, со своей даты.
+
+    Сумма версии — «долг теперь столько-то», а не разница: дельту движок
+    вычисляет сам — как разницу с версией, действовавшей до дня записи, — и той
+    же механикой, что дельта передачи, ведёт в базу начисления. Запись без
+    суммы дельты не рождает.
+    """
+    out: list[tuple[date, Decimal]] = []
+    for r in _restructures(book, deal_uid):
+        if r.amount is None:
+            continue
+        before = deal_amount_at(book, deal_uid, r.date - timedelta(days=1))
+        out.append((r.date, r.amount - before))
+    return out
+
+
+def _rate_epochs(book: Settlements,
+                 deal: Deal) -> list[tuple[date, Decimal | None, Decimal | None]]:
+    """Смены ставки сделки: «дата — годовая — дневная» после слияния наследования.
+
+    Эпоха нулевая — ставки самой сделки; запись реструктуризации наследует
+    `None`-поля прежней эпохи, ноль означает «ставка снята», а не наследуется.
+    Запись без ставок новой эпохи не рождает. Каждая пара — полные ставки
+    действующей с даты эпохи; «ровно одна ненулевая из двух» проверяет
+    валидация, здесь эпохи как есть.
+    """
+    year, day = deal.rate_per_year, deal.rate_per_day
+    epochs: list[tuple[date, Decimal | None, Decimal | None]] = []
+    for r in _restructures(book, deal.uid):
+        if r.rate_per_year is None and r.rate_per_day is None:
+            continue
+        year = r.rate_per_year if r.rate_per_year is not None else year
+        day = r.rate_per_day if r.rate_per_day is not None else day
+        epochs.append((r.date, year, day))
+    return epochs
+
+
 def _along(deal: Deal, movement: Movement) -> bool:
     """Движение по сделке (в зачёт остатка), а не против неё (возврат)."""
     return ((deal.direction == I_OWE and movement.direction == OUT)
@@ -1201,21 +1376,30 @@ def deal_holder_at(book: Settlements, deal_uid: str, on: date) -> str:
 
 
 def deal_amount_at(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
-    """Сумма к закрытию по сделке на дату — с учётом версии условий.
+    """Сумма к закрытию по сделке на дату — версия условий из записей.
 
-    Передача долга создаёт версию: с даты передачи действует сумма на момент
-    передачи плюс её изменение; прежняя сохраняется в записи. У регулярного
-    расхода суммы нет — None: закрывать нечего.
+    Запись условий — передача или реструктуризация; действует последняя по
+    дате со дня включительно: передача задаёт «сумма на момент плюс дельта»,
+    реструктуризация с суммой — новую сумму целиком («долг теперь столько-то»).
+    Запись без суммы (только ставки) версию суммы не рождает — сумма
+    наследуется прежней эпохой. До первой смены суммы — сумма сделки, а при
+    наличии передач — сумма на момент первой из них: снимок «до» живёт в
+    записи передачи. Прежние условия остаются историей. У регулярного расхода
+    суммы нет — None: закрывать нечего.
     """
     deal = _deal(book, deal_uid)
     if deal.amount is None:
         return None
-    assignments = _assignments(book, deal_uid)
-    past = [a for a in assignments if a.date <= on]
+    past = [r for r in _condition_records(book, deal_uid)
+            if r.date <= on and (isinstance(r, Assignment) or r.amount is not None)]
     if past:
         last = past[-1]
-        return last.amount + last.delta
-    return assignments[0].amount if assignments else deal.amount
+        if isinstance(last, Assignment):
+            return last.amount + last.delta
+        return last.amount
+    first_assignment = next((r for r in _condition_records(book, deal_uid)
+                             if isinstance(r, Assignment)), None)
+    return first_assignment.amount if first_assignment else deal.amount
 
 
 def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] | None:
@@ -1260,6 +1444,8 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
     paid = {part: Decimal(0) for part in PARTS}
     into_base: list[tuple[date, Decimal]] = []   # доли платежей в тело+проценты
     grows = [(a.date, a.delta) for a in book.assignments if a.deal == deal_uid]
+    grows += _restructure_deltas(book, deal_uid)   # смена тела версией — как дельта
+    rates = _rate_epochs(book, deal)               # ставки по эпохам версии
     interest_grows: list[tuple[date, Decimal]] = []   # факты в проценты — в базе
     body_before = Decimal(0)       # начисления в тело до начала долга — в базе
     interest_before = Decimal(0)   # факты в проценты до начала долга — так же
@@ -1273,7 +1459,7 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
                       Decimal(0))
                 + body_before + interest_before)
         return accrued_interest(deal, base, since, until, into_base,
-                                grows + interest_grows)
+                                grows + interest_grows, rates)
 
     for event in sorted([*movements,
                          *(c for c in book.charges if c.deal == deal_uid
@@ -1450,12 +1636,15 @@ def _accrued(book: Settlements, deal: Deal, movements: Sequence[Movement],
             - _paid(deal, [m for m in movements if m.date < since]))
     payments = [(m.date, _signed(deal, m)) for m in movements
                 if since <= m.date <= on]
-    # Смены версии тела (передача долга) входят в базу по своей дате: те, что
-    # раньше начала долга, уже в базе (тело берётся версией на начало), а
-    # поздние идут списком в ту же функцию, что и платежи.
+    # Смены версии тела (передача долга, реструктуризация) входят в базу по
+    # своей дате: те, что раньше начала долга, уже в базе (тело берётся версией
+    # на начало), а поздние идут списком в ту же функцию, что и платежи.
     deltas = [(a.date, a.delta) for a in book.assignments
               if a.deal == deal.uid and since <= a.date <= on]
-    return accrued_interest(deal, base, since, on, payments, deltas)
+    deltas += [(when, delta) for when, delta in _restructure_deltas(book, deal.uid)
+               if since <= when <= on]
+    return accrued_interest(deal, base, since, on, payments, deltas,
+                            _rate_epochs(book, deal))
 
 
 def _principal_left(book: Settlements, deal_uid: str, on: date) -> Decimal | None:
@@ -1485,7 +1674,9 @@ def _principal_left(book: Settlements, deal_uid: str, on: date) -> Decimal | Non
 
 def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
                      payments: Sequence[tuple[date, Decimal]],
-                     deltas: Sequence[tuple[date, Decimal]] = ()) -> Decimal:
+                     deltas: Sequence[tuple[date, Decimal]] = (),
+                     rates: Sequence[tuple[date, Decimal | None,
+                                           Decimal | None]] = ()) -> Decimal:
     """Начисление процентов по сделке за отрезок `[since, until]` включительно.
 
     Правило начисления одно, и его вызывают оба носителя остатка: прокат —
@@ -1498,12 +1689,25 @@ def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
     платежей по дням — дело функции, не вызывающего. Полный месяц — частный
     случай отрезка.
 
-    `deltas` — смены версии тела (передача долга), тоже списком «дата — сумма»,
+    `deltas` — смены версии тела (передача долга, реструктуризация), тоже
+    списком «дата — сумма»,
     но с обратным знаком смысла: положительная сумма — долг вырос. Это не
     платёж: деньги не уходили, а вот проценты идут на новое тело. День смены
     увеличивает остаток до начисления за этот день, а в годовой базе смена
     входит в базу того же месяца, в котором случилась, — долг изменился, а не
     был уплачен.
+
+    `rates` — версии ставки списком «дата — годовая — дневная» (`_rate_epochs`):
+    отрезок делится на эпохи по датам версий, каждая считается своей ставкой
+    той же функцией — дата версии входит включительно, смена внутри месяца её
+    не рвёт (у годовой каждая часть месяца — от своей базы, пропорционально
+    дням; у дневной ставка дня — по эпохе дня). Бегущий остаток между эпохами
+    не обрывается: вторых путей и округлений не заводится. Пары несут **полные**
+    ставки действующей эпохи — после слияния наследования, как их собирает
+    `_rate_epochs`, — и идут по возрастанию дат; частичный кортеж (например,
+    `(дата, None, ставка)`) молча затёр бы ставку другого типа, поэтому зоны
+    передают список целиком из `_rate_epochs`. Пустой список — ставка сделки
+    одна на весь отрезок.
 
     Правила прежние, они жили в месячном цикле проката:
 
@@ -1522,10 +1726,6 @@ def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
     """
     if until < since:
         return Decimal(0)
-    daily = deal.rate_per_day
-    yearly = deal.rate_per_year
-    if daily is None and yearly is None:
-        return Decimal(0)
     by_day: dict[date, Decimal] = {}
     for when, amount in payments:
         by_day[when] = by_day.get(when, Decimal(0)) + amount
@@ -1534,34 +1734,55 @@ def accrued_interest(deal: Deal, balance: Decimal, since: date, until: date,
         if since <= when <= until:
             shift[when] = shift.get(when, Decimal(0)) + amount
 
+    def run(a: date, b: date, yearly: Decimal | None, daily: Decimal | None,
+            left: Decimal) -> tuple[Decimal, Decimal]:
+        """Отрезок одной ставки: начисленное и остаток на конец."""
+        total = Decimal(0)
+        for year, month in _months(a, b):
+            days = calendar.monthrange(year, month)[1]
+            from_day = max(a, date(year, month, 1))
+            till_day = min(b, date(year, month, days))
+            month_start = left
+            moved = sum((amount for day, amount in shift.items()
+                         if from_day <= day <= till_day), Decimal(0))
+            accrued = Decimal(0)
+            if daily is not None:
+                day = from_day
+                while day <= till_day:
+                    left -= by_day.get(day, Decimal(0))
+                    left += shift.get(day, Decimal(0))
+                    if left <= 0:
+                        break
+                    accrued += kopek(left * daily)
+                    day += timedelta(days=1)
+            elif yearly is not None and month_start + moved > 0:
+                accrued = (month_start + moved) * yearly / 12
+                covered = (till_day - from_day).days + 1
+                if covered != days:
+                    accrued = accrued * Decimal(covered) / Decimal(days)
+                accrued = kopek(accrued)
+            paid = sum((amount for day, amount in by_day.items()
+                        if from_day <= day <= till_day), Decimal(0))
+            left = month_start + accrued - paid + moved
+            total += accrued
+        return total, left
+
+    # Эпохи ставки: нулевая — сама сделка, дальше смены списком `rates`
+    # (действуют и до отрезка — заданные раньше правят ставку всего отрезка).
+    zero = Decimal(0)
+    edges = [since, *(sorted({when for when, _, _ in rates if since < when <= until})),
+             until + timedelta(days=1)]
     total = Decimal(0)
     left = balance
-    for year, month in _months(since, until):
-        days = calendar.monthrange(year, month)[1]
-        from_day = max(since, date(year, month, 1))
-        till_day = min(until, date(year, month, days))
-        month_start = left
-        moved = sum((amount for day, amount in shift.items()
-                     if from_day <= day <= till_day), Decimal(0))
-        accrued = Decimal(0)
-        if daily is not None:
-            day = from_day
-            while day <= till_day:
-                left -= by_day.get(day, Decimal(0))
-                left += shift.get(day, Decimal(0))
-                if left <= 0:
-                    break
-                accrued += kopek(left * daily)
-                day += timedelta(days=1)
-        elif yearly is not None and month_start + moved > 0:
-            accrued = (month_start + moved) * yearly / 12
-            covered = (till_day - from_day).days + 1
-            if covered != days:
-                accrued = accrued * Decimal(covered) / Decimal(days)
-            accrued = kopek(accrued)
-        paid = sum((amount for day, amount in by_day.items()
-                    if from_day <= day <= till_day), Decimal(0))
-        left = month_start + accrued - paid + moved
+    for a, following in zip(edges, edges[1:]):
+        year, day = deal.rate_per_year, deal.rate_per_day
+        for when, yearly, daily in rates:
+            if when <= a:
+                year, day = yearly, daily
+        b = following - timedelta(days=1)
+        daily_rate = day if day not in (None, zero) else None
+        yearly_rate = year if daily_rate is None and year is not None else None
+        accrued, left = run(a, b, yearly_rate, daily_rate, left)
         total += accrued
     return total
 
@@ -1690,9 +1911,9 @@ def _penalty_bounds(book: Settlements, deal: Deal, until: date) -> list[date]:
 
     Между соседними днями потоки постоянны, и отрезок считает одна формула.
     Рождение потока — день после срока (там поток появляется); платежи и правки
-    меняют остатки и сроки; версии правил — ставку; передачи долга — долг, а с
-    ним и обрезку потоков (единственный немонотонный меняетель долга без
-    движения). Сюда входит и сам `until`.
+    меняют остатки и сроки; версии правил — ставку; передачи долга и
+    реструктуризации — долг, а с ним и обрезку потоков (немонотонные менятели
+    долга без движения). Сюда входит и сам `until`.
     """
     days = {until}
     for occ in occurrences(book, deal.uid, _plan_since(deal, until), until):
@@ -1704,6 +1925,9 @@ def _penalty_bounds(book: Settlements, deal: Deal, until: date) -> list[date]:
     for a in book.assignments:
         if a.deal == deal.uid and a.date <= until:
             days.add(a.date)
+    for r in book.restructures:
+        if r.deal == deal.uid and r.date <= until:
+            days.add(r.date)
     for edit in book.edits:
         if edit.deal != deal.uid:
             continue
@@ -2070,14 +2294,15 @@ def _facts_to(book: Settlements, deal_uid: str, on: date) -> Settlements:
     """Книга на фактах сделки до конца дня `on`: состояние на дату — пересчёт.
 
     Производная не помнит прошлого — она считается заново на фактах до даты
-    вопроса (derived-balances); правки, начисления и передачи передаются как
-    есть: их даты сами решают, входят ли они.
+    вопроса (derived-balances); правки, начисления, передачи и реструктуризации
+    передаются как есть: их даты сами решают, входят ли они.
     """
     return Settlements(counterparties=book.counterparties, wallets=book.wallets,
                        deals=book.deals,
                        movements=[m for m in book.movements
                                   if m.deal == deal_uid and m.date <= on],
                        charges=book.charges, assignments=book.assignments,
+                       restructures=book.restructures,
                        edits=book.edits, observed=book.observed)
 
 
