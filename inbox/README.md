@@ -31,7 +31,7 @@ links:
   [penalties-and-charges](../docs/plans/penalties-and-charges/README.md)
 - [2026-09-24-реструктуризация-и-взыскание.md](2026-09-24-реструктуризация-и-взыскание.md) —
   реструктуризация долга и принудительное взыскание; переработана планом
-  [restructuring-and-enforcement](../docs/plans/restructuring-and-enforcement.md)
+  [restructuring-and-enforcement](../docs/plans/restructuring-and-enforcement/README.md)
 
 ## Порядок разбора
 
@@ -50,7 +50,7 @@ links:
    начисления от события; держится на едином определении остатка из первой.
 3. **[реструктуризация и взыскание](2026-09-24-реструктуризация-и-взыскание.md)** —
    *переработана* планом
-   [restructuring-and-enforcement](../docs/plans/restructuring-and-enforcement.md),
+   [restructuring-and-enforcement](../docs/plans/restructuring-and-enforcement/README.md),
    2026-10-02: изменение условий и принуждение — штраф за неуплату то же начисление,
    а реструктуризация меняет тот же долг. После второй.
 

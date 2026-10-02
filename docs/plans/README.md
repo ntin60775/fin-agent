@@ -3,7 +3,7 @@ node_type: index
 title: Планы
 service: _platform
 status: active
-updated: 2026-09-30
+updated: 2026-10-02
 links:
   part_of: [../README.md]
 ---
@@ -18,7 +18,8 @@ links:
 выполнение — `/ship` по одному тикету.
 
 - [long-debts-single-values/](long-debts-single-values/README.md) — длинный долг считается, у величин один базис: сходимость проходом по месяцам, единое определение свободных денег и остатка сделки
-- [penalties-and-charges/](penalties-and-charges/README.md) — пени, штрафы и начисления от события: долг должен уметь расти — начисления от события, неустойка от просрочки, долг по частям, распределение платежа правилом зоны
+- [penalties-and-charges/](penalties-and-charges/README.md) — пени, штрафы и начисления от события: долг должен уметь расти — начисления от события, неустойка от просрочки, долг по частям, распределение платежа правилом зоны (закрыт 2026-10-02)
+- [restructuring-and-enforcement/](restructuring-and-enforcement/README.md) — реструктуризация и взыскание: условия меняются со дня записью-версией, принуждение видно кассе — удержания из дохода и арестованных кошельков, ограниченные неприкосновенным остатком
 - [obligations/](obligations/README.md) — взаиморасчёты и прогноз: контрагенты, сделки, связка кассы и долгов
 - [zone-split.md](zone-split.md) — разделение проекта на архитектурную и финансовую зоны
 - [engine-wording.md](engine-wording.md) — докстринги движка называют вещи как глоссарий
@@ -28,8 +29,9 @@ links:
 **Порядок.** Считается по блокирующим связям, а не по дате: план или тикет берётся,
 когда все его `depends_on` закрыты.
 
-- `penalties-and-charges` — грилл пройден (10 раундов, вопросы Q1–Q39 и правки
-  1–3), тикеты 01–05 закрыты, 06–17 ждут `/ship` (см.
-  `penalties-and-charges/README.md`);
-- `obligations`, `long-debts-single-values`, `zone-split`, `engine-wording`,
-  `engine-messages` и `model-audit-fixes` — архивные, порядок не задают.
+- `restructuring-and-enforcement` — грилл пройден (3 раунда, Q1–Q14), разбит на
+  тикеты, все `draft` — ждёт `/ship` по одному тикету за запуск (см.
+  `restructuring-and-enforcement/README.md`);
+- `penalties-and-charges`, `obligations`, `long-debts-single-values`, `zone-split`,
+  `engine-wording`, `engine-messages` и `model-audit-fixes` — архивные, порядок
+  не задают.
