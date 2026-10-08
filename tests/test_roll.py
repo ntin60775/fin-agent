@@ -1756,9 +1756,14 @@ def test_edits_are_checked_against_the_book():
     with pytest.raises(ValueError, match="и перенесено, и пропущено"):
         validate(_book(deal, edits=[OccurrenceEdit("заём", date(2026, 1, 20),
                                                    postponed=True, skipped=True)]))
-    with pytest.raises(ValueError, match="такого вхождения по графику нет"):
-        validate(_book(deal, edits=[OccurrenceEdit("заём", date(2026, 1, 21),
-                                                   skipped=True)]))
+    # Правка без предмета не применяется и ошибкой не является (02-Т2): предмет
+    # правки определяется порождением, а не валидацией книги.
+    loose = _book(deal, edits=[OccurrenceEdit("заём", date(2026, 1, 21),
+                                              skipped=True)])
+    validate(loose)
+    assert [(o.planned, o.status) for o in
+            occurrences(loose, "заём", date(2026, 1, 1), date(2026, 2, 28))] == [
+        (date(2026, 1, 20), EXPECTED), (date(2026, 2, 20), EXPECTED)]
     with pytest.raises(ValueError, match="движение по нему есть"):
         validate(_book(deal, movements=[Movement(date(2026, 1, 20), D("100"), "заём",
                                                  occurrence=date(2026, 1, 20))],

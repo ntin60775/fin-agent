@@ -8,7 +8,7 @@ import pytest
 
 from finance_core import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
                           COSTS, CREDITOR, DEBTOR, EXPECTED, IN, INTEREST, LEGAL,
-                          OWED_TO_ME, PAID, PAID_LATE, PARTS, PENALTY, PERSON, SKIPPED,
+                          OWED_TO_ME, PAID, PAID_LATE, PARTS, PENALTY, PERSON, POSTPONED, SKIPPED,
                           STARTER_GROUPS,
                           TRIGGERS, TRIGGER_FULL_UNPAID, TRIGGER_OVERDUE,
                           TRIGGER_OVERDUE_DAYS,
@@ -17,11 +17,13 @@ from finance_core import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
                           OccurrenceEdit, PartPayment, Payment, PenaltyCap,
                           PenaltyRule, PenaltyStep, Restructure, Scenario,
                           ScheduleRule, Settlements, TriggerRule,
-                          TriggeredCharge, Wallet,
+                          TRIGGER_OVERDUE, TriggeredCharge, TriggerRule, Wallet,
+                          WINDOW_MONTH_CAP,
                           accrued_interest, allocate_payment, beneficiary,
                           counterparty_balance, counterparty_role,
                           deal_amount_at, deal_balance, deal_holder_at,
-                          deal_parts, funding_wallet, liquidity, occurrences,
+                          deal_parts, deal_schedule_at, funding_wallet,
+                          liquidity, occurrences, overdue_amounts,
                           payment_channel, roll_deals, rule_at, run,
                           trigger_charges, validate)
 
@@ -2381,10 +2383,11 @@ def test_the_restructure_carries_only_the_conditions():
 
     Контрагента меняет передача, направление и единица закрытия не меняются
     вовсе: полей в записи нет, и форма заперта — расширившие её сломают
-    семантику «запись меняет только условия».
+    семантику «запись меняет только условия». Условия — сумма, ставка и
+    график (Q6): поле `schedule` часть формы (02).
     """
     assert {f.name for f in fields(Restructure)} == {
-        "date", "deal", "amount", "rate_per_year", "rate_per_day"}
+        "date", "deal", "amount", "rate_per_year", "rate_per_day", "schedule"}
 
 
 def test_validation_names_the_substance_of_a_bad_version():
@@ -2506,3 +2509,414 @@ def test_a_rate_only_version_does_not_switch_off_the_amount_convergence():
         validate(after_assignment)
     after_assignment.deals[0].amount = D("100000")
     validate(after_assignment)
+
+
+# --- график версии: эпохи вхождений (02) ------------------------------------
+
+def _instalment_book(**kw) -> Settlements:
+    """Заём 60 000 без процентов: ряд 10 000 10-го числа, шесть раз с 10 января.
+
+    С 1 апреля мировое соглашение ставит рассрочку: 5 000 15-го числа, шесть
+    раз. Ставка нулевая — прокат не считает сделку пробелом; сдвиг с выходного
+    выключен — даты в тестах календарные.
+    """
+    base = dict(
+        counterparties=[_counterparty()],
+        wallets=[Wallet("карта", "Карта", "карта", D(0))],
+        deals=[_deal(uid="заём", amount=D("60000"), start=date(2026, 1, 10),
+                     wallet="карта", rate_per_year=D("0"),
+                     schedule=ScheduleRule(days=(10,), shift_weekend=False,
+                                           start=date(2026, 1, 10),
+                                           payment=D("10000"), count=6))],
+        restructures=[Restructure(date(2026, 4, 1), "заём",
+                                  schedule=ScheduleRule(days=(15,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 4, 1),
+                                                        payment=D("5000"),
+                                                        count=6))],
+    )
+    base.update(kw)
+    return Settlements(**base)                      # type: ignore[arg-type]
+
+
+def test_an_instalment_from_its_day_is_born_by_the_new_rule():
+    """Рассрочка со дня: прошлые вхождения на месте, будущие старые исчезли (02-а).
+
+    График версии действует с даты включительно: до 1 апреля ряд 10-го числа,
+    с 1 апреля — ряд 15-го, шесть раз. Будущие даты прежнего графика не родятся
+    из новой книги — аннулирование следствие порождения эпох (02-Т1).
+    """
+    book = _instalment_book()
+    validate(book)
+    found = occurrences(book, "заём", date(2026, 1, 1), date(2026, 12, 31))
+    assert [(o.planned, o.amount) for o in found] == [
+        (date(2026, 1, 10), D("10000")), (date(2026, 2, 10), D("10000")),
+        (date(2026, 3, 10), D("10000")),
+        (date(2026, 4, 15), D("5000")), (date(2026, 5, 15), D("5000")),
+        (date(2026, 6, 15), D("5000")), (date(2026, 7, 15), D("5000")),
+        (date(2026, 8, 15), D("5000")), (date(2026, 9, 15), D("5000"))]
+    # День версии входит включительно: действует правило своей эпохи.
+    assert deal_schedule_at(book, "заём", date(2026, 3, 31)) \
+        is book.deals[0].schedule
+    assert deal_schedule_at(book, "заём", date(2026, 4, 1)) \
+        is book.restructures[0].schedule
+
+
+def test_past_occurrences_keep_their_statuses():
+    """Прошлые вхождения остаются историей со статусами (02-б).
+
+    Январский платёж закрыт движением, февральский и мартовский не платились:
+    после реструктуризации статусы прежние, потоки просрочки прежней эпохи
+    живы, а аннулированные даты (10 апреля и дальше) в просрочку не попадают.
+    """
+    book = _instalment_book(
+        movements=[Movement(date(2026, 1, 10), D("10000"), "заём",
+                            occurrence=date(2026, 1, 10))])
+    validate(book)
+    found = {o.planned: o for o in
+             occurrences(book, "заём", date(2026, 1, 1), date(2026, 12, 31))}
+    assert found[date(2026, 1, 10)].status == PAID
+    assert found[date(2026, 2, 10)].status == EXPECTED
+    streams = {(due, remaining)
+               for due, _original, remaining in
+               overdue_amounts(book, "заём", date(2026, 5, 1))}
+    assert streams == {(date(2026, 2, 10), D("10000")),
+                       (date(2026, 3, 10), D("10000")),
+                       (date(2026, 4, 15), D("5000"))}
+
+
+def test_an_edit_of_an_annulled_date_has_no_subject():
+    """Правка аннулированной даты не применяется и ошибкой не является (02-в, 02-Т2).
+
+    10 апреля прежний график больше не рождает: правка без предмета ничего
+    не делает, валидация книги её не ловит и на чужие вхождения не перекидывает.
+    Правка своей эпохи (мартовское вхождение) при этом работает как раньше.
+    """
+    book = _instalment_book(
+        edits=[OccurrenceEdit("заём", date(2026, 4, 10), skipped=True)])
+    validate(book)
+    found = {o.planned: o for o in
+             occurrences(book, "заём", date(2026, 1, 1), date(2026, 12, 31))}
+    assert date(2026, 4, 10) not in found
+    assert found[date(2026, 4, 15)].status == EXPECTED
+    assert found[date(2026, 3, 10)].status == EXPECTED
+
+    own = _instalment_book(
+        edits=[OccurrenceEdit("заём", date(2026, 3, 10), postponed=True,
+                              moved_to=date(2026, 3, 12))])
+    validate(own)
+    own_found = {o.planned: o for o in
+                 occurrences(own, "заём", date(2026, 1, 1), date(2026, 12, 31))}
+    assert own_found[date(2026, 3, 10)].due == date(2026, 3, 12)
+
+
+def test_a_moved_occurrence_is_not_annulled_by_its_moved_date():
+    """Перенесённое за версию остаётся: аннулирование меряет плановую дату (02-Т3).
+
+    Мартовское вхождение перенесено на 20 апреля — за версию: оно принадлежит
+    эпохе порождения (плановая дата раньше версии) и перенесённым сроком
+    не аннулируется.
+    """
+    book = _instalment_book(
+        edits=[OccurrenceEdit("заём", date(2026, 3, 10), postponed=True,
+                              moved_to=date(2026, 4, 20))])
+    validate(book)
+    found = {o.planned: o for o in
+             occurrences(book, "заём", date(2026, 1, 1), date(2026, 12, 31))}
+    assert found[date(2026, 3, 10)].status == POSTPONED
+    assert found[date(2026, 3, 10)].due == date(2026, 4, 20)
+
+
+def test_a_backdated_epoch_splits_the_history():
+    """Задним числом: эпоха в середине истории (02-г).
+
+    Версия от 15 февраля записана позже: вхождения до версии — прежний ряд,
+    после — новый; статусы прошлых не переобуваются.
+    """
+    book = _instalment_book(
+        movements=[Movement(date(2026, 2, 10), D("10000"), "заём",
+                            occurrence=date(2026, 2, 10))],
+        restructures=[Restructure(date(2026, 2, 15), "заём",
+                                  schedule=ScheduleRule(days=(20,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 2, 15),
+                                                        payment=D("5000"),
+                                                        count=4))])
+    validate(book)
+    found = occurrences(book, "заём", date(2026, 1, 1), date(2026, 12, 31))
+    assert [(o.planned, o.status) for o in found] == [
+        (date(2026, 1, 10), EXPECTED), (date(2026, 2, 10), PAID),
+        (date(2026, 2, 20), EXPECTED), (date(2026, 3, 20), EXPECTED),
+        (date(2026, 4, 20), EXPECTED), (date(2026, 5, 20), EXPECTED)]
+
+
+def test_the_roll_builds_the_schedule_by_epochs():
+    """Прокат по эпохам: расписание и окно по новому графику, долги в первый месяц (02-д).
+
+    К прокату от 1 апреля непогашенные вхождения прежнего графика уходят в
+    первый месяц (в свой день месяца), обязательные платятся по новому ряду,
+    и окно кончается последним платежом нового графика, а не прежнего.
+    """
+    book = _instalment_book()
+    roll = roll_deals(book, date(2026, 4, 1), D(0), max_months=24)
+    assert roll.window.until == date(2026, 9, 30)     # окно по новому графику
+    assert roll.payoff_by_graph == date(2026, 9, 1)   # срок по графику — тоже
+    assert len(roll.months) == 6
+    first = roll.months[0]
+    assert [(p.date, p.amount) for p in first.payments] == [
+        (date(2026, 4, 10), D("10000")), (date(2026, 4, 10), D("10000")),
+        (date(2026, 4, 10), D("10000")), (date(2026, 4, 15), D("5000"))]
+    assert all(p.planned in (date(2026, 1, 10), date(2026, 2, 10),
+                             date(2026, 3, 10), date(2026, 4, 15))
+               for p in first.payments)
+    assert [(p.date, p.amount) for p in roll.months[1].payments] == [
+        (date(2026, 5, 15), D("5000"))]
+
+
+def test_the_version_schedule_passes_the_same_rule_form():
+    """График версии проверяет та же валидация формы, что и график сделки."""
+    with pytest.raises(ValueError, match="пустое"):
+        validate(_instalment_book(
+            restructures=[Restructure(date(2026, 4, 1), "заём",
+                                      schedule=ScheduleRule())]))
+    with pytest.raises(ValueError, match="не сосчитать платежи"):
+        validate(_instalment_book(
+            restructures=[Restructure(date(2026, 4, 1), "заём",
+                                      schedule=ScheduleRule(days=(15,),
+                                                            payment=D("5000"),
+                                                            count=6))]))
+
+
+def test_a_percent_occurrence_keeps_the_percent_of_its_epoch():
+    """Вхождение процентом платит процент своей эпохи (02: прокат видит график эпохи).
+
+    До реструктуризации минималка — 5 % остатка, после — фиксированные 2 000:
+    старые вхождения в прокате апреля считают 5 % правилом своей эпохи,
+    а не фиксированную сумму нового правила.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        wallets=[Wallet("карта", "Карта", "карта", D(0))],
+        deals=[_deal(uid="заём", amount=D("100000"), start=date(2026, 1, 1),
+                     wallet="карта", rate_per_year=D("0"),
+                     schedule=ScheduleRule(days=(20,), percent=D("0.05"),
+                                           start=date(2026, 1, 20)))],
+        restructures=[Restructure(date(2026, 4, 1), "заём",
+                                  schedule=ScheduleRule(days=(20,),
+                                                        payment=D("2000"),
+                                                        count=3,
+                                                        start=date(2026, 4, 20)))],
+    )
+    validate(book)
+    roll = roll_deals(book, date(2026, 4, 1), D(0), max_months=12)
+    assert [(p.amount, p.planned) for p in roll.months[0].payments] == [
+        (D("5000"), date(2026, 1, 20)), (D("5000"), date(2026, 2, 20)),
+        (D("5000"), date(2026, 3, 20)), (D("2000"), date(2026, 4, 20))]
+
+
+def test_triggers_do_not_fire_on_annulled_dates():
+    """Триггеры проката видят эпохи: аннулированные даты случаев не рождают (ревью 02).
+
+    Вхождения прежнего графика после версии не рождаются, и штраф «просрочка»
+    на них не начисляется: augmented-книга проката несёт реструктуризации,
+    как канон. Старые непогашенные вхождения дают случаи на своих сроках —
+    до окна, новые платятся в свой день.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        wallets=[Wallet("карта", "Карта", "карта", D(0))],
+        deals=[_deal(uid="заём", amount=D("60000"), start=date(2026, 1, 10),
+                     wallet="карта", rate_per_year=D("0"),
+                     allocations=(AllocationRule(PARTS),),
+                     triggers=(TriggerRule("штраф-1", TRIGGER_OVERDUE, PENALTY,
+                                           "просрочка", charge_amount=D("100")),),
+                     schedule=ScheduleRule(days=(10,), shift_weekend=False,
+                                           start=date(2026, 1, 10),
+                                           payment=D("10000"), count=6))],
+        restructures=[Restructure(date(2026, 4, 1), "заём",
+                                  schedule=ScheduleRule(days=(15,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 4, 1),
+                                                        payment=D("5000"),
+                                                        count=3))],
+    )
+    validate(book)
+    roll = roll_deals(book, date(2026, 4, 1), D(0), max_months=12)
+    for month in roll.months:
+        assert month.interest_parts.get(PENALTY, D(0)) == 0, month.month
+
+
+def test_answers_before_the_version_do_not_look_into_the_future_record():
+    """Ответы до версии те же, что без записи вовсе (Done 1, ревью 02).
+
+    Ряд прежнего графика без меток (без `start` и `first`): окно поиска
+    открывает начало долга. Будущая версия несёт свою раннюю метку (ряд с
+    5 января) — видимая, она отодвинула бы окно назад, и в просрочку попало
+    бы январское вхождение прежнего графика. Запись датой позже вопроса
+    прошлые ответы не меняет: расчёт на дату до реструктуризации тот же,
+    каким был без записи вовсе.
+    """
+    def versioned_book(**kw) -> Settlements:
+        base = dict(
+            counterparties=[_counterparty()],
+            wallets=[Wallet("карта", "Карта", "карта", D(0))],
+            deals=[_deal(uid="заём", amount=D("60000"), start=date(2026, 2, 1),
+                         wallet="карта", rate_per_year=D("0"),
+                         schedule=ScheduleRule(days=(10,), shift_weekend=False,
+                                               payment=D("10000")))],
+        )
+        base.update(kw)
+        return Settlements(**base)                  # type: ignore[arg-type]
+
+    versioned = versioned_book(restructures=[Restructure(
+        date(2026, 5, 1), "заём",
+        schedule=ScheduleRule(days=(5,), shift_weekend=False,
+                              start=date(2026, 1, 5),
+                              payment=D("1000"), count=3))])
+    validate(versioned)
+    validate(versioned_book())
+    on = date(2026, 4, 15)
+    due = {due for due, _original, _remaining in
+           overdue_amounts(versioned, "заём", on)}
+    assert due == {date(2026, 2, 10), date(2026, 3, 10), date(2026, 4, 10)}
+    assert due == {due for due, _original, _remaining in
+                   overdue_amounts(versioned_book(), "заём", on)}
+
+
+def test_a_weekend_shift_across_the_version_is_measured_by_the_planned_date():
+    """Перескок выходным через дату версии меряет плановая дата (02-Т1, 02-Т3).
+
+    11 апреля 2026 — суббота: сдвиг на понедельник 13-е попадает на дату
+    версии — вхождение не рождается. Январская суббота 11-го сдвигается
+    на 12-е и рождается — версии ещё не было.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(uid="заём", amount=D("100"),
+                     schedule=ScheduleRule(days=(11,), shift_weekend=True,
+                                           start=date(2026, 1, 11),
+                                           payment=D("10"), count=12))],
+        restructures=[Restructure(date(2026, 4, 13), "заём",
+                                  schedule=ScheduleRule(days=(25,),
+                                                        shift_weekend=True,
+                                                        start=date(2026, 4, 13),
+                                                        payment=D("5")))],
+    )
+    validate(book)
+    found = {o.planned for o in
+             occurrences(book, "заём", date(2026, 1, 1), date(2026, 12, 31))}
+    assert date(2026, 1, 12) in found        # сдвиг до версии — рождается
+    assert date(2026, 4, 13) not in found    # плановая на дате версии — не родится
+    assert date(2026, 4, 27) in found        # новое правило: 25-е — суббота → 27-е
+
+
+def test_a_moved_occurrence_pays_at_its_moved_date_after_the_version():
+    """Перенесённое за версию платится перенесённой датой в прокате (02-Т3).
+
+    Мартовское вхождение перенесено на 20 апреля: в прокате от 1 апреля оно
+    платится 20-го числа с суммой своей (старой) эпохи — аннулирование меряет
+    плановая дата, а не перенесённый срок.
+    """
+    book = _instalment_book(
+        edits=[OccurrenceEdit("заём", date(2026, 3, 10), postponed=True,
+                              moved_to=date(2026, 4, 20))])
+    validate(book)
+    roll = roll_deals(book, date(2026, 4, 1), D(0), max_months=12)
+    assert [(p.date, p.amount, p.planned) for p in roll.months[0].payments] == [
+        (date(2026, 4, 10), D("10000"), date(2026, 1, 10)),
+        (date(2026, 4, 10), D("10000"), date(2026, 2, 10)),
+        (date(2026, 4, 15), D("5000"), date(2026, 4, 15)),
+        (date(2026, 4, 20), D("10000"), date(2026, 3, 10))]
+
+
+def test_three_epochs_and_inheritance_between_versions():
+    """Три эпохи графика; запись без графика график не меняет (02-Т1, Q6).
+
+    Ряд 10-го до 1 марта, ряд 15-го с 1 марта; запись 1 апреля (только ставка)
+    наследует график; с 1 мая — ряд 20-го. `deal_schedule_at` отвечает
+    правилом действующей эпохи.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        deals=[_deal(uid="заём", amount=D("100"),
+                     schedule=ScheduleRule(days=(10,), shift_weekend=False,
+                                           start=date(2026, 1, 10),
+                                           payment=D("10"), count=12))],
+        restructures=[Restructure(date(2026, 3, 1), "заём",
+                                  schedule=ScheduleRule(days=(15,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 3, 1),
+                                                        payment=D("20"))),
+                      Restructure(date(2026, 4, 1), "заём", rate_per_year=D("0")),
+                      Restructure(date(2026, 5, 1), "заём",
+                                  schedule=ScheduleRule(days=(20,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 5, 1),
+                                                        payment=D("30")))],
+    )
+    validate(book)
+    assert deal_schedule_at(book, "заём", date(2026, 4, 15)) \
+        is book.restructures[0].schedule
+    assert deal_schedule_at(book, "заём", date(2026, 5, 1)) \
+        is book.restructures[2].schedule
+    found = occurrences(book, "заём", date(2026, 1, 1), date(2026, 6, 30))
+    assert [(o.planned, o.amount) for o in found] == [
+        (date(2026, 1, 10), D("10")), (date(2026, 2, 10), D("10")),
+        (date(2026, 3, 15), D("20")), (date(2026, 4, 15), D("20")),
+        (date(2026, 5, 20), D("30")), (date(2026, 6, 20), D("30"))]
+
+
+def test_a_deal_whose_schedule_comes_only_from_the_version_is_not_a_gap():
+    """График, принесённый реструктуризацией, — полноценный график (ревью 02).
+
+    У сделки своего графика не было: мировое соглашение с 1 апреля несёт ряд.
+    Прокат не объявляет сделку пробелом, платит по новому ряду, и окно строится
+    этим рядом.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        wallets=[Wallet("карта", "Карта", "карта", D(0))],
+        deals=[_deal(uid="заём", amount=D("30000"), start=date(2026, 1, 1),
+                     wallet="карта", rate_per_year=D("0"))],
+        restructures=[Restructure(date(2026, 4, 1), "заём",
+                                  schedule=ScheduleRule(days=(15,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 4, 1),
+                                                        payment=D("5000"),
+                                                        count=6))],
+    )
+    validate(book)
+    roll = roll_deals(book, date(2026, 4, 1), D(0), max_months=12)
+    assert roll.gaps == []
+    assert [(p.date, p.amount) for p in roll.months[0].payments] == [
+        (date(2026, 4, 15), D("5000"))]
+    assert roll.window.until == date(2026, 9, 30)
+
+
+def test_a_last_epoch_that_gives_birth_to_nothing_gives_no_end():
+    """Последняя эпоха, не родившая ничего, конца ряда не даёт (ревью 02).
+
+    Реструктуризация 15 июня несёт правило, чей ряд кончился до её версии:
+    за версией ряд пуст, и граница честно «нет конца» — окно не объявляет
+    «долги закрыты» на выдуманном месяце.
+    """
+    book = Settlements(
+        counterparties=[_counterparty()],
+        wallets=[Wallet("карта", "Карта", "карта", D(0))],
+        deals=[_deal(uid="заём", amount=D("60000"), start=date(2026, 1, 1),
+                     wallet="карта", rate_per_year=D("0"),
+                     schedule=ScheduleRule(days=(20,), shift_weekend=False,
+                                           start=date(2026, 1, 20),
+                                           payment=D("5000")))],
+        restructures=[Restructure(date(2026, 6, 15), "заём",
+                                  schedule=ScheduleRule(days=(10,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 2, 10),
+                                                        payment=D("1000"),
+                                                        count=2))],
+    )
+    validate(book)
+    roll = roll_deals(book, date(2026, 1, 1), D(0), max_months=12)
+    assert roll.window.reason == WINDOW_MONTH_CAP
+    assert len(roll.months) == 12
+    assert roll.payoff_by_graph is None       # срока по графику не выдумано
