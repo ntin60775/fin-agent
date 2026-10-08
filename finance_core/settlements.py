@@ -3,8 +3,8 @@
 Сторона, отвечающая на вопрос «сколько я должен и сколько должны мне». Сделка
 несёт условия — сумму, ставку, правило графика — и направление; записи условий
 меняют их со дня: передача долга (`Assignment`) — держателя и тело по датам,
-реструктуризация (`Restructure`) — сумму и ставку со дня; прежние условия
-остаются историей — эпохами, как у правил зоны. Движения —
+реструктуризация (`Restructure`) — сумму, ставку и график со дня; прежние
+условия остаются историей — эпохами, как у правил зоны. Движения —
 факты: когда, сколько, куда и кому уплачено; начисления (`Charge`) — факты
 роста долга: решение, штраф, пошлина, издержки растут со своей даты. Ни
 расчётный остаток по сделке, ни сальдо по контрагенту не хранятся: и то и
@@ -14,8 +14,11 @@
 
 Правило графика порождает **вхождения** — плановые платежи с тремя датами и
 статусом (`occurrences`). Вхождения тоже считаются: правило плюс правки журнала
-(`OccurrenceEdit`) плюс движения, ссылающиеся на вхождение. Правки приходят
-снаружи — переносом, пропуском, сменой суммы, — а не правят само правило.
+(`OccurrenceEdit`) плюс движения, ссылающиеся на вхождение. Правила графика —
+эпохами, как и остальные условия: запись-реструктуризация со своим правилом
+действует со своего дня, будущие даты прежнего правила не родятся, прошлые
+остаются историей. Правки приходят снаружи — переносом, пропуском, сменой
+суммы, — а не правят само правило.
 
 Личных чисел и имён здесь нет — всё приходит снаружи.
 """
@@ -535,7 +538,7 @@ class Assignment:
 
 @dataclass
 class Restructure:
-    """Реструктуризация — версия условий со дня: сумма и (или) ставка сделки.
+    """Реструктуризация — версия условий со дня: сумма, ставка и (или) график.
 
     Мировое соглашение, прощение части и присуждение суммы иска меняют
     договорённость со дня, а не с начала: запись несёт новые значения, прежние
@@ -558,6 +561,14 @@ class Restructure:
     `Decimal(0)` означает «ставки этой больше нет», а не наследуется. Начисление
     идёт ставкой своей эпохи: отрезок делится по датам версий (`accrued_interest`).
 
+    `schedule` — новое правило графика со дня версии; `None` — график
+    наследуется. Правило действует от даты записи до правила следующей
+    записи-версии (последняя — до бесконечности), и вхождения порождает оно:
+    будущие даты прежнего графика просто не родятся — аннулирование следует из
+    порождения эпох, а прошлые вхождения остаются историей со статусами
+    (`occurrences`). Форма правила — тот же закрытый набор (`ScheduleRule`), и
+    проверяет её та же валидация.
+
     Запись меняет только условия. Контрагента меняет передача, направление и
     единица закрытия не меняются вовсе — полей здесь нет; `Assignment` не
     расширяется: у него своя семантика и своя валидация, смешение — два смысла
@@ -568,6 +579,7 @@ class Restructure:
     amount: Decimal | None = None        # новая сумма целиком; None — наследуется
     rate_per_year: Decimal | None = None  # новая годовая; None — наследуется
     rate_per_day: Decimal | None = None   # новая дневная; None — наследуется
+    schedule: ScheduleRule | None = None  # новый график со дня; None — наследуется
 
 
 @dataclass
@@ -585,6 +597,14 @@ class OccurrenceEdit:
     Перенесённая дата берётся как назначено: сдвиг по выходным — дело правила
     графика, а не договорённости. `skipped` — пропущено: платить не будут,
     остаток от этого не уменьшается.
+
+    Предмет правки определяется порождением, а не проверкой книги: правка
+    применяется к вхождению, рождённому на её плановую дату правилом своей
+    эпохи. Даты нет — вхождение аннулировано реструктуризацией (прежнее
+    правило больше не рождает) или его и не было — правка не применяется
+    и ошибкой не является: у неё нет предмета (02-Т2). Поэтому валидация
+    существование вхождения не проверяет: строить вхождения ради проверки —
+    дублирование порождения.
     """
     deal: str
     planned: date
@@ -649,7 +669,7 @@ class Settlements:
     остаток и сальдо посчитались бы неверно. `charges` — начисления: факты роста
     долга от события, опознаваемые уидом события. `assignments` и `restructures`
     — записи условий: передача меняет держателя и тело, реструктуризация —
-    сумму и ставку со дня. `edits` — правки вхождений из
+    сумму, ставку и график со дня. `edits` — правки вхождений из
     журнала зоны: они меняют график, а не условия сделки. `observed` —
     наблюдения извне: фактический остаток с датой, с которым сверяется расчётный.
     """
@@ -1096,7 +1116,7 @@ def _validate_restructures(book: Settlements) -> None:
                              f"не может быть отрицательной — прощение не делает "
                              f"долг отрицательным")
         if (r.amount is None and r.rate_per_year is None
-                and r.rate_per_day is None):
+                and r.rate_per_day is None and r.schedule is None):
             raise ValueError(f"сделка {r.deal!r} от {r.date}: "
                              f"реструктуризация ничего не меняет — все поля "
                              f"наследуются")
@@ -1105,6 +1125,8 @@ def _validate_restructures(book: Settlements) -> None:
             raise ValueError(f"реструктуризация по сделке {r.deal!r} от {r.date}: "
                              f"заданы и годовая, и дневная — ставка либо годовая, "
                              f"либо дневная")
+        if r.schedule is not None:
+            _validate_rule(r.deal, r.schedule)
         if r.deal in deals and r.deal in dates and r.date in dates[r.deal]:
             raise ValueError(f"сделка {r.deal!r}: две записи условий в одну дату "
                              f"{r.date}: какая из них последняя — не определить")
@@ -1151,6 +1173,14 @@ def _validate_restructures(book: Settlements) -> None:
 
 
 def _validate_edits(book: Settlements) -> None:
+    """Правки вхождений: форма записи и согласованность слитой правки с фактами.
+
+    Существование вхождения здесь не проверяется: предмет правки определяется
+    порождением (`occurrences`), а не валидацией — даты может не стать после
+    реструктуризации (аннулирована эпохой графика), и такая правка просто не
+    применяется, ошибкой не являясь (02-Т2). Проверять её предмет значило бы
+    строить вхождения ради проверки — дублирование порождения.
+    """
     deals = {d.uid for d in book.deals}
     for e in book.edits:
         _declared(e.deal, deals, "правка вхождения: сделка")
@@ -1163,9 +1193,6 @@ def _validate_edits(book: Settlements) -> None:
 
     # Правки одного вхождения сливаются по порядку — судим по тому, что вышло.
     for (uid, planned), e in _merged_edits(book).items():
-        if uid in deals and not occurrences(book, uid, planned, planned):
-            raise ValueError(f"вхождение {uid!r} от {planned}: такого вхождения по "
-                             f"графику нет — правьте данные")
         if e.postponed and e.skipped:
             raise ValueError(f"вхождение {uid!r} от {planned}: и перенесено, и "
                              f"пропущено — правьте данные")
@@ -1342,6 +1369,45 @@ def _rate_epochs(book: Settlements,
     return epochs
 
 
+def _schedule_epochs(book: Settlements,
+                     deal: Deal) -> list[tuple[date | None, ScheduleRule]]:
+    """Эпохи графика сделки: «дата версии — правило» по порядку.
+
+    Нулевая эпоха — правило самой сделки, действует с начала и даты не имеет;
+    запись-реструктуризация со своим правилом начинает новую эпоху со своего
+    дня. Запись без правила график не меняет — эпохи не рождает, прежнее
+    действует дальше (пустые поля наследуются, Q6). Эпоха графика живёт от
+    своей версии до следующей эпохи; у последней конца нет. Стык эпох
+    держит `_in_epoch` при порождении вхождений.
+    """
+    epochs: list[tuple[date | None, ScheduleRule]] = []
+    if deal.schedule is not None:
+        epochs.append((None, deal.schedule))
+    for r in _restructures(book, deal.uid):
+        if r.schedule is not None:
+            epochs.append((r.date, r.schedule))
+    return epochs
+
+
+def deal_schedule_at(book: Settlements, deal_uid: str,
+                     on: date) -> ScheduleRule | None:
+    """Правило графика, действующее на сделке на дату, — версия из записей.
+
+    Дата входит включительно, как у всех версий условий: со дня
+    записи-реструктуризации действует её график, до неё — прежняя эпоха.
+    До первой записи условий — правило самой сделки; графика нет вовсе —
+    `None` («не задано», а не ноль). Дата `date.max` отвечает правилом
+    последней эпохи — тем, по которому график кончается. Носитель для тех,
+    кто спрашивает правило вхождения (прокат: процент от остатка и сдвиг
+    с выходного — правила своей эпохи), а не сделки целиком.
+    """
+    acting: ScheduleRule | None = None
+    for effective, rule in _schedule_epochs(book, _deal(book, deal_uid)):
+        if effective is None or effective <= on:
+            acting = rule
+    return acting
+
+
 def _along(deal: Deal, movement: Movement) -> bool:
     """Движение по сделке (в зачёт остатка), а не против неё (возврат)."""
     return ((deal.direction == I_OWE and movement.direction == OUT)
@@ -1465,7 +1531,7 @@ def _parts_at(book: Settlements, deal_uid: str, on: date) -> dict[str, Decimal] 
                          *(c for c in book.charges if c.deal == deal_uid
                            and c.date <= on),
                          *trigger_charges(book, deal_uid,
-                                          _plan_since(deal, on), on)],
+                                          _plan_since(book, deal, on), on)],
                         key=lambda e: e.date):
         if isinstance(event, (Charge, TriggeredCharge)):
             charged[event.part] += event.amount
@@ -1898,11 +1964,27 @@ def _sans_penalty(book: Settlements, deal_uid: str, on: date) -> Decimal:
                  + _charged(book, deal_uid, on))
 
 
-def _plan_since(deal: Deal, on: date) -> date:
-    """С какого времени искать вхождения сделки: начала долга и ряда, иначе прошлость."""
-    rule = deal.schedule
-    marks = [d for d in (deal.start, rule.start if rule else None,
-                         rule.first.date if rule and rule.first else None) if d]
+def _plan_since(book: Settlements, deal: Deal, on: date) -> date:
+    """С какого времени искать вхождения сделки: начала долга, рядов и эпох.
+
+    Самое раннее, откуда правило какой-нибудь эпохи графика могло родить
+    вхождение: начало долга, даты самих эпох, начала рядов и первые платежи
+    их правил. Эпохи, ещё не действовавшие на дату вопроса (`effective > on`),
+    меток не дают: их правило на окно ответа родить ничего не может, а их
+    даты уводили бы расчёт до версии в будущее. Правки здесь ни при чём: кто
+    ищет вхождения под правки, тот добавляет их даты сам. Меток нет вовсе —
+    прошлость: движок «сегодня» не спрашивает.
+    """
+    marks = [d for d in (deal.start,) if d]
+    for effective, rule in _schedule_epochs(book, deal):
+        if effective is not None and effective > on:
+            continue
+        if effective is not None:
+            marks.append(effective)
+        if rule.start is not None:
+            marks.append(rule.start)
+        if rule.first is not None:
+            marks.append(rule.first.date)
     return min(marks) if marks else date(on.year - 20, on.month, 1)
 
 
@@ -1916,7 +1998,7 @@ def _penalty_bounds(book: Settlements, deal: Deal, until: date) -> list[date]:
     долга без движения). Сюда входит и сам `until`.
     """
     days = {until}
-    for occ in occurrences(book, deal.uid, _plan_since(deal, until), until):
+    for occ in occurrences(book, deal.uid, _plan_since(book, deal, until), until):
         if occ.due is not None and occ.due < until:
             days.add(occ.due + timedelta(days=1))
     for m in book.movements:
@@ -2220,34 +2302,42 @@ def _occurrence(book: Settlements, deal: Deal, planned: date,
     return Occurrence(deal.uid, planned, amount, moved, actual, paid, status)
 
 
-def occurrences(book: Settlements, deal_uid: str, since: date,
-                until: date) -> list[Occurrence]:
-    """Вхождения сделки в окне плановых дат.
+def _in_epoch(when: date, effective: date | None,
+              following: date | None) -> bool:
+    """Плановая дата принадлежит эпохе, действующей на неё.
 
-    Порождаются правилом графика и правятся правками из журнала; статус — от
-    движений, ссылающихся на вхождение. Окно задаётся **плановыми** датами:
-    перенесённая дата может увести вхождение за его пределы — это дело проката,
-    он раскладывает вхождения по месяцам, когда платить.
-
-    Вхождения считаются, а не лежат: движок их не хранит, а получает правило,
-    правки и движения — и возвращает список. Связанные движения (`occurrence`)
-    закрывают своё вхождение; несвязанный расход гасит самые старые просроченные
-    — FIFO по сроку (`_loose_closings`), наступившие и будущие не трогает.
+    Эпоха живёт от даты своей версии включительно до следующей версии
+    (последняя — до бесконечности). Границу меряет сама плановая дата — уже
+    со сдвигом по выходному: дата, перескочившая выходным через версию,
+    прежнему правилу больше не принадлежит; родит её то правило, чьё
+    порождение такую плановую дату даёт, — иначе вхождения на эту дату просто
+    нет (аннулирование — следствие порождения, 02-Т1, 02-Т3).
     """
-    deal = _deal(book, deal_uid)
-    rule = deal.schedule
-    if rule is None:
-        return []
-    edits = _merged_edits(book)
+    if effective is not None and when < effective:
+        return False
+    return following is None or when < following
+
+
+def _epoch_entries(deal: Deal, rule: ScheduleRule, effective: date | None,
+                   following: date | None, since: date, until: date,
+                   backward: bool) -> list[tuple[date, Decimal | None]]:
+    """Вхождения одной эпохи: правило действует от своей версии до следующей.
+
+    Порождение то же, что у правила без версий, — с одной надбавкой: плановая
+    дата обязана попасть в окно эпохи (`_in_epoch`). Будущие даты прежнего
+    правила поэтому просто не родятся — аннулирование следствие порождения,
+    а не отдельная операция (02-Т1).
+    """
     entries: list[tuple[date, Decimal | None]] = []
-    # Доход сдвигается назад, платёж вперёд: выходной переезжает по стороне денег.
-    backward = deal.direction == OWED_TO_ME
+
+    def born(when: date) -> bool:
+        return since <= when <= until and _in_epoch(when, effective, following)
 
     if rule.first is not None:
         first = rule.first.date
-        when = planned_date(first.year, first.month, first.day, rule.shift_weekend,
-                            backward=backward)
-        if since <= when <= until:
+        when = planned_date(first.year, first.month, first.day,
+                            rule.shift_weekend, backward=backward)
+        if born(when):
             entries.append((when, rule.first.amount))
 
     if rule.days:
@@ -2264,7 +2354,7 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
             for position, day in enumerate(days):
                 when = planned_date(year, month, day, rule.shift_weekend,
                                     backward=backward)
-                if not since <= when <= until:
+                if not born(when):
                     continue
                 if rule.count is not None and rule.start is not None:
                     index = (((year - rule.start.year) * 12 + month - rule.start.month)
@@ -2272,6 +2362,45 @@ def occurrences(book: Settlements, deal_uid: str, since: date,
                     if index > rule.count:
                         continue
                 entries.append((when, rule.payment))
+    return entries
+
+
+def occurrences(book: Settlements, deal_uid: str, since: date,
+                until: date) -> list[Occurrence]:
+    """Вхождения сделки в окне плановых дат — по эпохам её графика.
+
+    График версии действует с даты включительно: вхождения после даты версии
+    порождает новое правило, вхождения прежнего графика с плановой датой не
+    раньше даты версии аннулируются — не родятся из новой книги (02-Т1), а
+    просроченные и исполненные до версии остаются историей со статусами.
+    Плановая дата принадлежит эпохе, чьё правило её породило; эпохи собирает
+    `_schedule_epochs`, стык меряет `_in_epoch`.
+
+    Правками правятся вхождения той эпохи, на чью плановую дату они указывают:
+    правка аннулированной даты не применяется и ошибкой не является — предмет
+    определяется порождением (02-Т2).
+
+    Окно задаётся **плановыми** датами: перенесённая дата может увести вхождение
+    за его пределы — это дело проката, он раскладывает вхождения по месяцам,
+    когда платить.
+
+    Вхождения считаются, а не лежат: движок их не хранит, а получает правило,
+    правки и движения — и возвращает список. Связанные движения (`occurrence`)
+    закрывают своё вхождение; несвязанный расход гасит самые старые просроченные
+    — FIFO по сроку (`_loose_closings`), наступившие и будущие не трогает.
+    """
+    deal = _deal(book, deal_uid)
+    epochs = _schedule_epochs(book, deal)
+    if not epochs:
+        return []
+    edits = _merged_edits(book)
+    entries: list[tuple[date, Decimal | None]] = []
+    # Доход сдвигается назад, платёж вперёд: выходной переезжает по стороне денег.
+    backward = deal.direction == OWED_TO_ME
+    for index, (effective, rule) in enumerate(epochs):
+        following = epochs[index + 1][0] if index + 1 < len(epochs) else None
+        entries += _epoch_entries(deal, rule, effective, following,
+                                  since, until, backward)
 
     entries.sort(key=lambda entry: entry[0])
     for left, right in zip(entries, entries[1:]):
@@ -2294,15 +2423,18 @@ def _facts_to(book: Settlements, deal_uid: str, on: date) -> Settlements:
     """Книга на фактах сделки до конца дня `on`: состояние на дату — пересчёт.
 
     Производная не помнит прошлого — она считается заново на фактах до даты
-    вопроса (derived-balances); правки, начисления, передачи и реструктуризации
-    передаются как есть: их даты сами решают, входят ли они.
+    вопроса (derived-balances); правки, начисления и передачи передаются как
+    есть: их даты сами решают, входят ли они. Записи-реструктуризации датой
+    позже `on` в книгу не попадают: ответы до версии не оглядываются в будущее
+    — расчёт на дату до реструктуризации тот же, каким был без записи вовсе.
     """
     return Settlements(counterparties=book.counterparties, wallets=book.wallets,
                        deals=book.deals,
                        movements=[m for m in book.movements
                                   if m.deal == deal_uid and m.date <= on],
                        charges=book.charges, assignments=book.assignments,
-                       restructures=book.restructures,
+                       restructures=[r for r in book.restructures
+                                     if r.date <= on],
                        edits=book.edits, observed=book.observed)
 
 
@@ -2318,8 +2450,8 @@ def _overdue_map(book: Settlements, deal_uid: str,
     deal = _deal(book, deal_uid)
     if deal.amount is None or deal.direction == OWED_TO_ME:
         return {}
-    since = _plan_since(deal, on)
     past = _facts_to(book, deal_uid, on)
+    since = _plan_since(past, deal, on)
     rows: list[tuple[date, Decimal, Decimal, date]] = []
     for occ in occurrences(past, deal_uid, since, on):
         if occ.status not in (EXPECTED, POSTPONED) or occ.amount is None:
@@ -2453,7 +2585,7 @@ def _fires(book: Settlements, deal: Deal, occ: Occurrence, rule: TriggerRule,
         # погашено (связанно или FIFO) до порога — условия не было.
         past = _facts_to(book, deal_uid, firing)
         states = {o.planned: o for o in occurrences(
-            past, deal_uid, _plan_since(deal, firing), firing)}
+            past, deal_uid, _plan_since(past, deal, firing), firing)}
         state = states.get(occ.planned)
         if state is None or (state.remaining or Decimal(0)) <= 0:
             return None
@@ -2493,7 +2625,7 @@ def trigger_charges(book: Settlements, deal_uid: str, since: date,
                 if c.deal == deal_uid and c.trigger is not None}
     cases: list[TriggeredCharge] = []
     derived: set[tuple[str, date]] = set()
-    for occ in occurrences(book, deal_uid, _plan_since(deal, until), until):
+    for occ in occurrences(book, deal_uid, _plan_since(book, deal, until), until):
         if occ.amount is None or occ.status == SKIPPED:
             continue                  # сумма не определена или платить не будут
         for rule in deal.triggers:

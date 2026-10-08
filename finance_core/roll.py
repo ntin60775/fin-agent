@@ -51,10 +51,12 @@ from .model import Account, Income, Payment, Scenario, Transfer, kopek
 from .settlements import (BODY, COSTS, INTEREST, I_OWE, OWED_TO_ME,
                           PARTS, PENALTY, Deal, Movement, Occurrence,
                           Settlements, Wallet,
-                          _along, _overdue_map, _penalty_of, _principal_left,
-                          _signed, accrued_interest, accrued_penalty,
+                          _along, _merged_edits, _overdue_map, _penalty_of,
+                          _principal_left, _schedule_epochs, _signed,
+                          accrued_interest, accrued_penalty,
                           allocate_payment, deal_amount_at, deal_balance,
-                          deal_holder_at, deal_parts, funding_wallet,
+                          deal_holder_at, deal_parts, deal_schedule_at,
+                          funding_wallet,
                           occurrences, planned_date, rule_at, trigger_charges)
 from .solver import _CashMonth, _CashRoll
 
@@ -307,16 +309,18 @@ def horizon(start: date, max_months: int) -> date:
     return _month_end(_month_start(start, max_months - 1))
 
 
-def _service_date(deal: Deal, when: date, start: date) -> date:
+def _service_date(rule: ScheduleRule | None, when: date, start: date) -> date:
     """Когда платёж случится: просроченное вхождение — в первый месяц проката.
 
     Дат в прошлом в расписании быть не может: платёж уходит в тот месяц, когда
     его заплатят, — в свой день месяца, но не раньше начала проката. Сам долг от
-    этого не меняется: он и так в остатке, а платёж его уменьшает.
+    этого не меняется: он и так в остатке, а платёж его уменьшает. Сдвиг с
+    выходного берётся у правила эпохи вхождения, а не сделки целиком: правило
+    действует своим `shift_weekend`, у которого вхождение родилось
+    (`deal_schedule_at` по плановой дате).
     """
     if when >= start:
         return when
-    rule = deal.schedule
     shift = rule.shift_weekend if rule is not None else True
     return max(planned_date(start.year, start.month, when.day, shift), start)
 
@@ -328,16 +332,20 @@ def _rate(deal: Deal) -> Decimal:
     return deal.rate_per_year or Decimal(0)
 
 
-def _payment_amount(deal: Deal, occ: Occurrence, balance: Decimal) -> Decimal:
+def _payment_amount(rule: ScheduleRule | None, occ: Occurrence,
+                    balance: Decimal) -> Decimal:
     """Сколько платить по вхождению: сумма правила или процент от остатка.
 
     У обязательного платежа процентом от остатка сумма вхождения становится
     известна только здесь: в бюджете она считается от остатка на начало проката
     (бюджет фиксируют заранее), а в платеже — от остатка на начало месяца.
+    Процент берётся у правила эпохи вхождения (`deal_schedule_at` по плановой
+    дате): правило, реструктурировавшее график, не отменяет процент прежней
+    эпохи у её же вхождений.
     """
     if occ.remaining is not None:
         return occ.remaining
-    percent = deal.schedule.percent if deal.schedule is not None else None
+    percent = rule.percent if rule is not None else None
     if percent is None:
         return Decimal(0)
     return kopek(balance * percent)
@@ -351,15 +359,20 @@ def _order(targets: Sequence[_Target], strategy: str) -> list[_Target]:
 
 # --- что в прокат не входит ------------------------------------------------
 
-def _gap_reason(deal: Deal) -> str | None:
+def _gap_reason(book: Settlements, deal: Deal) -> str | None:
     """Почему сделка не годится для проката; None — годится.
 
     Неизвестное в прокат не подставляется нулём: без ставки не понять, растёт ли
     долг, без правила графика — сколько и когда платить. Требованию правило
     нужно по той же причине: без него не сказать, когда придут деньги. Второму
     приоритету правило и не нужно: он платится не по графику, а из свободных.
+    Правило спрашивается по эпохам (`deal_schedule_at` за краем дат): график,
+    принесённый реструктуризацией, — полноценный график, даже если у самой
+    сделки его не было. За краем дат виден и будущий график: сделка с версией
+    впереди годна уже сегодня — до версии вхождения просто не родятся, а окно
+    продлевает последнее правило (`_last_payment`).
     """
-    rule = deal.schedule
+    rule = deal_schedule_at(book, deal.uid, date.max)
     if deal.direction == OWED_TO_ME:
         if rule is None:
             return "правило графика не задано: когда придут деньги — неизвестно"
@@ -453,7 +466,7 @@ class Window:
     reason: str
 
 
-def _last_payment(deal: Deal, book: Settlements) -> date | None:
+def _last_payment(book: Settlements, deal: Deal) -> date | None:
     """Последнее вхождение сделки по графику; None — последнего платежа нет.
 
     График, а не прокат: прокат зависит от свободных денег, и окно стало бы
@@ -462,13 +475,19 @@ def _last_payment(deal: Deal, book: Settlements) -> date | None:
 
     Конец есть только у ряда с числом платежей (`count` и `start`); у процента
     от остатка и у платежа без числа раз последнего вхождения нет. Отдельный
-    первый платёж — единственное вхождение такой сделки. Перенесённое вхождение
-    платится по назначенной дате, поэтому правка, уводящая платёж позже, окно
-    удлиняет.
+    первый платёж — единственное вхождение такой сделки. Ряд считает правило
+    последней эпохи графика: предыдущие эпохи кончаются там, где начинается
+    следующая, — позже всех дат рождает последнее правило. Если последняя эпоха
+    не родила ничего (её ряд кончился до её версии — самопротиворечивые данные),
+    даты за ней нет, и честный ответ — None: ряд без конца, а не выдуманный
+    месяц. Перенесённое вхождение платится по назначенной дате, поэтому правка,
+    уводящая платёж позже, окно удлиняет; правка без предмета — дата не родилась
+    (аннулирована эпохой) — окно не двигает.
     """
-    rule = deal.schedule
-    if rule is None:
+    epochs = _schedule_epochs(book, deal)
+    if not epochs:
         return None
+    effective, rule = epochs[-1]
     if rule.days:
         if rule.count is None or rule.start is None:
             return None
@@ -482,14 +501,17 @@ def _last_payment(deal: Deal, book: Settlements) -> date | None:
                             rule.first.date.day, rule.shift_weekend)
     else:
         return None
-    # Поздняя правка побеждает: перенесённый платёж уходит назначенной датой.
-    moved: dict[date, date | None] = {}
-    for edit in book.edits:
-        if edit.deal == deal.uid:
-            moved[edit.planned] = edit.moved_to
-    for assigned in moved.values():
-        if assigned is not None and assigned > when:
-            when = assigned
+    if effective is not None and when < effective:
+        return None               # последнее правило не родило: за версией пусто
+    # Поздняя правка побеждает (слияние `_merged_edits`, как при порождении).
+    # Предмет правки — порождение: правка аннулированной даты не применяется.
+    for (uid, planned), edit in _merged_edits(book).items():
+        if uid != deal.uid or edit.moved_to is None:
+            continue
+        if not occurrences(book, deal.uid, planned, planned):
+            continue
+        if edit.moved_to > when:
+            when = edit.moved_to
     return when
 
 
@@ -513,7 +535,8 @@ def _rollable(book: Settlements,
               and (_principal_left(book, d.uid, _facts_at(book, d.uid, start))
                    or Decimal(0)) <= 0}
     reasons: dict[str, str | None] = {
-        d.uid: (None if d.uid in closed else _gap_reason(d)) for d in book.deals}
+        d.uid: (None if d.uid in closed else _gap_reason(book, d))
+        for d in book.deals}
     broken = _broken_units(book, reasons)
     for deal in book.deals:
         if reasons[deal.uid] is None and deal.closure_unit is not None:
@@ -543,10 +566,11 @@ def _debts_end(book: Settlements, start: date, closed: set[str],
             continue                       # закрыта или пробел: в прокат не входит
         if deal.second_priority and not consent_to_second:
             continue                       # без согласия он не платится
-        found = _last_payment(deal, book)
+        found = _last_payment(book, deal)
         if found is None:
             return None                    # ряда нет конца — нет и границы
-        when = _service_date(deal, found, start)
+        when = _service_date(deal_schedule_at(book, deal.uid, found),
+                             found, start)
         last = when if last is None else max(last, when)
     return last
 
@@ -843,12 +867,15 @@ class _DealsRoll:
         until = self.window.until
 
         # Вхождения: окно от начала графика и самых ранних правок — правка может
-        # увести вхождение в прокатываемый месяц из-за его начала.
+        # увести вхождение в прокатываемый месяц из-за его начала. Эпохи графика
+        # добавляют свои даты: вхождение новой эпохи может родиться раньше
+        # первого платежа прежнего правила.
         plan: dict[str, list[Occurrence]] = {}
         for uid, opened in self.open_deals.items():
             since = start
-            rule = opened.deal.schedule
-            if rule is not None:
+            for effective, rule in _schedule_epochs(book, opened.deal):
+                if effective is not None:
+                    since = min(since, effective)
                 if rule.start is not None:
                     since = min(since, rule.start)
                 if rule.first is not None:
@@ -870,13 +897,14 @@ class _DealsRoll:
             for occ in found:
                 if not occ.payable:
                     continue
-                when = _service_date(opened.deal, occ.due, start)
+                rule = deal_schedule_at(book, uid, occ.planned)
+                when = _service_date(rule, occ.due, start)
                 index = _month_index(start, when)
                 if index > self.window.months:
                     continue
                 due.setdefault(index, []).append((when, uid, occ))
                 baseline[index] = (baseline.get(index, Decimal(0))
-                                   + _payment_amount(opened.deal, occ, opened.balance))
+                                   + _payment_amount(rule, occ, opened.balance))
         for rows in due.values():
             rows.sort(key=lambda row: (row[0], row[1]))
         self.baseline = baseline
@@ -948,7 +976,8 @@ class _DealsRoll:
             opened = self.open_deals[uid]
             unit = (self.open_units[opened.unit]
                     if opened.unit is not None else None)
-            want = _payment_amount(opened.deal, occ, basis)
+            want = _payment_amount(deal_schedule_at(self.book, uid, occ.planned),
+                                   occ, basis)
             # Единица закрыта разом — её участники больше не должны ничего,
             # и их вхождения не копят нехватку: след графика, а не урезанный
             # платёж. Сумма урезанного так и остаётся у сделки, чей остаток
@@ -1103,7 +1132,9 @@ class _DealsRoll:
                 # Платежи месяца — с суммой вхождения на начало месяца: на них
                 # считается дневная база, а платится по шагу 2 сколько выйдет.
                 month_payments = [
-                    (when, _payment_amount(opened.deal, occ, opened.balance))
+                    (when, _payment_amount(
+                        deal_schedule_at(self.book, uid, occ.planned),
+                        occ, opened.balance))
                     for when, row_uid, occ in rows if row_uid == uid]
                 # Движение месяца — тоже платеж отрезка: день платежа уменьшает
                 # остаток до начисления за этот день, как требует канон.
@@ -1524,6 +1555,7 @@ class _DealsRoll:
                                   occurrence=p.planned)
                          for p in load.payments],
             charges=self.book.charges, assignments=self.book.assignments,
+            restructures=self.book.restructures,
             edits=self.book.edits, observed=self.book.observed)
         trigger_parts: dict[str, Decimal] = {part: Decimal(0) for part in PARTS}
         for uid, opened in open_deals.items():
