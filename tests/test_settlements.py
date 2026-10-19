@@ -2920,3 +2920,196 @@ def test_a_last_epoch_that_gives_birth_to_nothing_gives_no_end():
     assert roll.window.reason == WINDOW_MONTH_CAP
     assert len(roll.months) == 12
     assert roll.payoff_by_graph is None       # срока по графику не выдумано
+
+
+# --- 03: просрочка и неустойка на стыке эпох ---------------------------------
+
+from finance_core.settlements import _penalty_of
+
+def _epochs_book(deal: dict | None = None, restructures: list | None = None,
+                 snapshot: D | None = None, **kw) -> Settlements:
+    """Заём 60 000, 0,1 % в день, ряд 10 000 10-го числа, шесть раз с 10 января.
+
+    Реструктуризация 1 апреля 2026 переустанавливает график: 5 000 15-го числа,
+    шесть раз, — сумму и ставку не трогает (наследуются). Шкала неустойки
+    живёт в сделке (0,1 % с первого дня) — реструктуризация её не меняет:
+    носители у условий и шкалы разные. `deal` — правки сделки (шкала, ставка,
+    сумма); `restructures` — свои записи условий; `snapshot` — снимок суммы передачей
+    «банк → банк» 10 января (без него у версии суммы нет истории «до»). Сдвиг
+    с выходного выключен — даты в тестах календарные.
+    """
+    deal = {**dict(uid="заём", amount=D("60000"), start=date(2026, 1, 10),
+                   wallet="карта", rate_per_day=D("0.001"),
+                   penalties=(_penalty(PenaltyStep(0, D("0.001"))),),
+                   allocations=(AllocationRule(PARTS),),
+                   schedule=ScheduleRule(days=(10,), shift_weekend=False,
+                                         start=date(2026, 1, 10),
+                                         payment=D("10000"), count=6)),
+            **(deal or {})}
+    base = dict(
+        counterparties=[_counterparty()],
+        wallets=[Wallet("карта", "Карта", "карта", D(0))],
+        deals=[_deal(**deal)],
+        assignments=([Assignment(date(2026, 1, 10), "заём", from_holder="банк",
+                                 to_holder="банк", amount=snapshot, delta=D("0"))]
+                     if snapshot is not None else []),
+        restructures=([Restructure(date(2026, 4, 1), "заём",
+                                   schedule=ScheduleRule(days=(15,),
+                                                         shift_weekend=False,
+                                                         start=date(2026, 4, 1),
+                                                         payment=D("5000"),
+                                                         count=6))]
+                      if restructures is None else restructures),
+    )
+    base.update(kw)
+    return Settlements(**base)                      # type: ignore[arg-type]
+
+
+def test_penalty_keeps_dripping_by_its_own_scale_across_the_version():
+    """Неустойка капает шкалой своей эпохи: реструктуризация её не сбрасывает (03-а).
+
+    Просрочки января–марта живут под шкалой 0,1 % и после реструктуризации:
+    22 дня марта (10–31) — по 10,00 с каждой из трёх. Смена шкалы 1 апреля
+    режет апрель посуточно, без сброса потоков и без перезапуска: день версии
+    входит включительно и капает уже новой шкалой.
+    """
+    book = _epochs_book(
+        deal=dict(penalties=(PenaltyRule(steps=(PenaltyStep(0, D("0.001")),),
+                                         cap=PenaltyCap(CAP_NONE),
+                                         effective=date(2026, 3, 1)),
+                            PenaltyRule(steps=(PenaltyStep(0, D("0.0005")),),
+                                        cap=PenaltyCap(CAP_NONE),
+                                        effective=date(2026, 4, 1)))))
+    validate(book)
+    # Мартовский отрезок: одна эпоха, одна формула; три потока старыми первыми.
+    assert overdue_amounts(book, "заём", date(2026, 3, 31)) == (
+        (date(2026, 1, 10), D("10000"), D("10000")),
+        (date(2026, 2, 10), D("10000"), D("10000")),
+        (date(2026, 3, 10), D("10000"), D("10000")))
+    # Шкала первой версии действует с 1 марта: январь и февраль до неё не капают,
+    # 1–10 марта капают два потока (200,00), 11–31 — три (630,00).
+    assert _penalty_of(book, "заём", date(2026, 3, 31))(date(2026, 3, 31)) \
+        == D("830.00")
+    # Стык: до версии +30,00/день (3 × 10,00), с версии включительно +15,00/день
+    # (3 × 5,00) — посуточно; вхождение нового графика (срок 15.04) на 10.04
+    # ещё не просрочено и не капает.
+    by_day = [(day, _penalty_of(book, "заём", date(2026, 4, 16))(day))
+              for day in (date(2026, 3, 31), date(2026, 4, 1),
+                          date(2026, 4, 2), date(2026, 4, 10),
+                          date(2026, 4, 16))]
+    assert [p for _, p in by_day] == [D("830.00"), D("845.00"), D("860.00"),
+                                      D("980.00"), D("1072.50")]
+    # 16 апреля — день после срока нового вхождения: +2,50 к +15,00/день —
+    # старые потоки не «перекормили» долг, новая просрочка капает своей шкалой.
+
+
+def test_linked_payment_of_the_new_schedule_covers_only_its_own_occurrence():
+    """Платёж нового графика закрывает своё вхождение; старые гасит FIFO (03-б).
+
+    Связанное движение по вхождению 15 апреля платит своё: старые просрочки
+    января–марта оно не трогает — связь жёсткая. Несвязанный остаток того же
+    периода гасит старые просрочки FIFO: 11 000 закрывают январь и февраль
+    целиком, март — половиной.
+    """
+    book = _epochs_book(
+        movements=[Movement(date(2026, 4, 15), D("5000"), "заём",
+                            occurrence=date(2026, 4, 15)),
+                   Movement(date(2026, 4, 20), D("11000"), "заём")])
+    validate(book)
+    found = {o.planned: o for o in
+             occurrences(book, "заём", date(2026, 1, 1), date(2026, 6, 30))}
+    assert found[date(2026, 4, 15)].status == PAID
+    assert found[date(2026, 4, 15)].paid == D("5000")
+    assert (found[date(2026, 1, 10)].status, found[date(2026, 1, 10)].paid) \
+        == (PAID_LATE, D("10000"))
+    assert (found[date(2026, 2, 10)].status, found[date(2026, 2, 10)].paid) \
+        == (EXPECTED, D("1000"))           # февраль тронут остатком, не закрыт
+    assert (found[date(2026, 3, 10)].status, found[date(2026, 3, 10)].paid) \
+        == (EXPECTED, D("0"))
+    assert found[date(2026, 5, 15)].status == EXPECTED   # будущее не тронуто
+    # Просрочка на 1 июня: февральский остаток, март целиком и майское
+    # вхождение нового графика; январь закрыт, апрельское — связанным.
+    assert overdue_amounts(book, "заём", date(2026, 6, 1)) == (
+        (date(2026, 2, 10), D("10000"), D("9000")),
+        (date(2026, 3, 10), D("10000"), D("10000")),
+        (date(2026, 5, 15), D("5000"), D("5000")))
+
+
+def test_unlinked_surplus_of_a_linked_payment_does_not_eat_old_overdues():
+    """Излишек связанного платежа не гасит старые просрочки (03-б, край).
+
+    Связанное движение платит сверх своего вхождения: остаток — платёж в
+    частях, а не гашение чужих просрочек — «излишек сверх просрочек — платёж,
+    а не закрытие графика» (план penalties-and-charges, 03-Т4/Q33). FIFO —
+    механика несвязанных движений: смешение связей одалживало бы старым
+    просрочкам чужие деньги.
+    """
+    book = _epochs_book(
+        movements=[Movement(date(2026, 4, 15), D("8000"), "заём",
+                            occurrence=date(2026, 4, 15))])
+    validate(book)
+    found = {o.planned: o for o in
+             occurrences(book, "заём", date(2026, 1, 1), date(2026, 5, 31))}
+    assert found[date(2026, 4, 15)].status == PAID
+    assert (found[date(2026, 1, 10)].status, found[date(2026, 1, 10)].paid) \
+        == (EXPECTED, D("0"))
+    assert (found[date(2026, 2, 10)].status, found[date(2026, 2, 10)].paid) \
+        == (EXPECTED, D("0"))
+    # Старые просрочки целы: их никто не гасил.
+    assert overdue_amounts(book, "заём", date(2026, 5, 1)) == (
+        (date(2026, 1, 10), D("10000"), D("10000")),
+        (date(2026, 2, 10), D("10000"), D("10000")),
+        (date(2026, 3, 10), D("10000"), D("10000")))
+
+
+def test_capitalization_is_a_zone_choice_in_the_new_amount():
+    """Капитализация — выбор зоны: сумма версии вбирает набежавшее (03-в).
+
+    К 31 марта долг 60 000 принёс 4 991,20 процентов и 1 500,00 неустойки —
+    канон 66 491,20. Зона капитализирует: версия суммы 1 апреля — 66 491,20
+    (тело вбирает проценты и неустойку), прежняя сумма живёт в снимке-передаче
+    10 января. До версии книги совпадают; после капитализированная выше —
+    тело поглотило набежавшее, двойного счёта нет: просрочка не сброшена,
+    неустойка капает дальше своей частью, а раскладка сходится с каноном
+    в обеих книгах на датах вокруг версии.
+    """
+    plain = _epochs_book()              # версия графика без суммы — без капитализации
+    cap = _epochs_book(
+        deal=dict(amount=D("66491.20")),
+        snapshot=D("60000"),
+        restructures=[Restructure(date(2026, 4, 1), "заём", amount=D("66491.20"),
+                                  schedule=ScheduleRule(days=(15,),
+                                                        shift_weekend=False,
+                                                        start=date(2026, 4, 1),
+                                                        payment=D("5000"),
+                                                        count=6))])
+    validate(plain)
+    validate(cap)
+    # До версии книги совпадают; контроль базы на 31 марта.
+    assert deal_balance(plain, "заём", date(2026, 3, 31)) == \
+        deal_balance(cap, "заём", date(2026, 3, 31)) == D("66491.20")
+    assert deal_parts(cap, "заём", date(2026, 3, 31)) == {
+        BODY: D("60000"), INTEREST: D("4991.20"),
+        PENALTY: D("1500.00"), COSTS: D("0")}
+    # В обоих смыслах раскладка сходится с каноном.
+    for day in (date(2026, 4, 1), date(2026, 4, 30)):
+        for book in (plain, cap):
+            parts = deal_parts(book, "заём", day)
+            assert sum(parts.values()) == deal_balance(book, "заём", day), day
+    # Канон после версии: капитализированная выше на вобранное и его проценты.
+    assert (deal_balance(plain, "заём", date(2026, 4, 1)),
+            deal_balance(cap, "заём", date(2026, 4, 1))) == \
+        (D("66586.19"), D("73083.88"))
+    assert (deal_balance(plain, "заём", date(2026, 4, 30)),
+            deal_balance(cap, "заём", date(2026, 4, 30))) == \
+        (D("69415.90"), D("76101.80"))
+    # Просрочка не сброшена: потоки живы, включая вхождение нового графика.
+    assert overdue_amounts(cap, "заём", date(2026, 4, 30)) == (
+        (date(2026, 1, 10), D("10000"), D("10000")),
+        (date(2026, 2, 10), D("10000"), D("10000")),
+        (date(2026, 3, 10), D("10000"), D("10000")),
+        (date(2026, 4, 15), D("5000"), D("5000")))
+    # Неустойка капает дальше своей частью — капитализация её не съела.
+    assert deal_parts(cap, "заём", date(2026, 4, 30)) == {
+        BODY: D("66491.20"), INTEREST: D("7135.60"),
+        PENALTY: D("2475.00"), COSTS: D("0")}
