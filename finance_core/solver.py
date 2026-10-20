@@ -2,7 +2,9 @@
 
 События (доходы, платежи, переводы) сортируются по дате; для каждого
 кошелька ведётся бегущий остаток. В один день сначала приходит доход, потом
-уходит перевод, потом платёж: переводят до того, как тратят.
+уходит перевод, потом принудительный платёж, потом добровольный: переводят
+до того, как тратят, а пристав списывает при поступлении дохода, прежде чем
+владелец платит сам.
 
 Считаются три разные вещи:
 
@@ -20,6 +22,10 @@
 только под жизненный расход: долговой платёж (`Payment.debt`) лимитом не
 финансируется, а перевод — не платёж по долгу, и лимит к нему применим. Дыру
 движок не создаёт сам — она приходит снаружи, остатками, которые уже в минусе.
+Единственное событие, которое уводит кошелёк в минус намеренно, — принудительный
+платёж: ёмкость и доступность к нему не применяются, а порог неприкосновенного
+остатка (`Scenario.protected_floor`) ограничивает, сколько доступных денег он
+заберёт.
 
 Неизвестное — `None`, не ноль. Не задан прожиточный минимум (`?`) —
 `floor_gap` равен None: честный ответ «не оценено», а не ноль.
@@ -39,6 +45,10 @@ DAYS_IN_MONTH = Decimal(30)
 KIND_PAYMENT = "payment"
 KIND_PREPAID = "prepaid"
 KIND_TRANSFER = "transfer"
+KIND_FORCED = "forced"
+# Принудительное в `UNSECURED_KINDS` не входит: оно не бывает необеспеченным —
+# проходит всегда, а порог неприкосновенного остатка режет его молча (это
+# прогноз, а не обещание).
 UNSECURED_KINDS = (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER)
 
 #: Вид события в кассе: доход приходит, перевод и платёж уходят.
@@ -269,10 +279,18 @@ def _hint(scenario: Scenario, bal: dict[str, Decimal], account: str,
 
 
 def _day_order(kind: str) -> int:
-    """Порядок событий внутри дня: доход → перевод → платёж."""
+    """Порядок событий внутри дня: доход → перевод → принудительный → прочие.
+
+    Пристав списывает при поступлении дохода, прежде чем владелец платит сам;
+    переводы остаются до принудительных — деньги уже разложены зоной до
+    списания. Добровольные платежи идут последними: иначе они видели бы
+    деньги, которых уже нет.
+    """
     if kind == KIND_INCOME:
         return 0
-    return 1 if kind == KIND_TRANSFER else 2
+    if kind == KIND_TRANSFER:
+        return 1
+    return 2 if kind == KIND_FORCED else 3
 
 
 @dataclass
@@ -301,6 +319,22 @@ def _apply_event(scenario: Scenario, bal: dict[str, Decimal], event: _Event,
     if event.kind == KIND_INCOME:
         bal[event.account] += event.amount
         return [Step(event.date, event.account, event.amount, bal[event.account])]
+
+    if event.kind == KIND_FORCED:
+        # Принудительное — прогноз, а не намерение: порог неприкосновенного
+        # остатка ограничивает, сколько доступных денег оно заберёт. Ёмкость
+        # кошелька и его доступность не спрашиваются: арестованная карта тоже
+        # отдаёт, а ушедшее в минус — честная дыра, а не необеспеченность.
+        # Факт (уже списанное) сюда не попадает и порогом не проверяется.
+        amount = event.amount
+        if scenario.protected_floor is not None:
+            room = max(_money_total(scenario, bal) - scenario.protected_floor,
+                       Decimal(0))
+            amount = min(amount, room)
+        if amount == 0:
+            return []      # порог защитил всё: обещания не было
+        bal[event.account] -= amount
+        return [Step(event.date, event.account, -amount, bal[event.account])]
 
     room = _room(scenario, bal, event.account, debt=event.debt)
     amount, short = event.amount, Decimal(0)
@@ -352,6 +386,10 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
             raise ValueError(
                 f"платёж {p.counterparty!r}: сумма должна быть "
                 f"положительной, а направление несут сами данные")
+        if p.forced and p.prepaid:
+            raise ValueError(
+                f"платёж {p.counterparty!r}: принудительный не бывает досрочкой — "
+                f"досрочка назначается волей владельца, а принуждение её снимает")
     for t in scenario.transfers:
         if t.amount <= 0:
             raise ValueError(
@@ -379,9 +417,11 @@ def _validate(scenario: Scenario, main: str | None = None) -> None:
                 f"досрочка {p.counterparty!r}: досрочка всегда "
                 f"долговая — её движок направляет на долг, а долг лимитом "
                 f"не платится")
-        if p.account is not None and not by_name[p.account].available:
+        if p.account is not None and not by_name[p.account].available \
+                and not p.forced:
             raise ValueError(
-                f"платёж {p.counterparty!r}: кошелёк {p.account!r} недоступен")
+                f"платёж {p.counterparty!r}: кошелёк {p.account!r} недоступен; "
+                f"списывать с арестованного может только принудительный платёж")
     for t in scenario.transfers:
         if not by_name[t.from_account].available:
             raise ValueError(
@@ -418,6 +458,12 @@ def run(scenario: Scenario, main: str) -> Result:
         events.append(_Event(t.date, KIND_TRANSFER, t.from_account, t.amount,
                              t.to_account, debt=False))   # перевод — не долг
     for p in scenario.payments:
+        if p.forced:
+            # Принуждение сильнее классификации: досрочка — воля владельца,
+            # принуждение её снимает, и порядок дня у принудительного свой.
+            events.append(_Event(p.date, KIND_FORCED, p.account, p.amount,
+                                 debt=p.debt))
+            continue
         kind = KIND_PREPAID if p.prepaid else KIND_PAYMENT
         events.append(_Event(p.date, kind, p.account, p.amount, debt=p.debt))
 
@@ -718,6 +764,13 @@ class _CashMonth:
         for source in (roll.payments, payments):
             for p in source:
                 if not self.window_start <= p.date <= self.end:
+                    continue
+                if p.forced:
+                    # Принудительное — обязательное событие дня: уходит до
+                    # кассового круга, пулом и котлом не урезается, а порог
+                    # неприкосновенного остатка применяет `_apply_event`.
+                    regular.append(_Event(p.date, KIND_FORCED, p.account,
+                                          p.amount, debt=p.debt))
                     continue
                 kind = KIND_PREPAID if p.prepaid else KIND_PAYMENT
                 (prepaid if p.prepaid else regular).append(

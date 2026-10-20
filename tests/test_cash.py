@@ -855,3 +855,176 @@ def test_a_return_through_a_wallet_is_income_plus_a_movement():
     # Книга видит возврат движением против сделки: остаток вырос на 3000.
     assert deal_balance(book, "заём", date(2026, 1, 31)) == D("13000")
     assert deal_balance(plain, "заём", date(2026, 1, 31)) == D("10000")
+
+
+# --- принудительный платёж: факт помимо воли (тикет 04) ----------------------
+
+def test_forced_payment_runs_after_income_and_transfer_before_voluntary():
+    """Удержание из дохода: приход целиком, принудительное — первым (04-Т5а).
+
+    Пристав списывает при поступлении дохода, прежде чем владелец платит сам;
+    переводы остаются до принудительных — деньги уже разложены зоной.
+    Порядок дня виден в линии: доход → перевод → принудительное → платёж.
+    Остаток честен: 5 000 + 30 000 − 1 000 − 7 500 − 20 000 = 6 500.
+    """
+    s = Scenario(
+        accounts=[Account("карта", D("5000")), Account("копилка", D("0"))],
+        income=[Income(date(2026, 1, 10), D("30000"), "карта")],
+        transfers=[Transfer(date(2026, 1, 10), D("1000"),
+                            from_account="карта", to_account="копилка")],
+        payments=[Payment(date(2026, 1, 10), D("20000"), account="карта",
+                          counterparty="кредитор"),
+                  Payment(date(2026, 1, 10), D("7500"), account="карта",
+                          counterparty="пристав", forced=True)],
+    )
+    r = run(s, main="карта")
+    assert r.unsecured == []
+    assert [(step.account, step.delta) for step in r.timeline] == [
+        ("карта", D("30000")), ("карта", D("-1000")), ("копилка", D("1000")),
+        ("карта", D("-7500")), ("карта", D("-20000"))]
+    assert r.balances == {"карта": D("6500"), "копилка": D("1000")}
+    assert r.hole == D("0")
+
+
+def test_forced_payment_passes_from_blocked_wallet_and_beyond_balance():
+    """Списание с арестованного сверх остатка проходит целиком (04-Т5б).
+
+    С арестованной карты добровольно не заплатить, а пристав списывает:
+    ёмкость и доступность к принудительному не применяются — ушедший в минус
+    кошелёк даёт честную дыру, а необеспеченности нет: обещание исполнено.
+    Добровольному платежу тот же кошелёк по-прежнему запрещён.
+    """
+    s = Scenario(
+        accounts=[Account("арест", D("10000"), available=False)],
+        payments=[Payment(date(2026, 1, 15), D("25000"), account="арест",
+                          counterparty="взыскатель", forced=True)],
+    )
+    r = run(s, main="арест")
+    assert r.balances["арест"] == D("-15000")       # списали сверх остатка
+    assert r.unsecured == []                        # принудительное не «не прошло»
+    # Дыра меряется доступными деньгами: минус на арестованной карте —
+    # нехватка на самом кошельке (видна в min_balance), а не «денег нет нигде».
+    assert r.hole == D("0")
+    assert r.min_balance == D("-15000")
+
+    voluntary = Scenario(
+        accounts=[Account("арест", D("10000"), available=False)],
+        payments=[Payment(date(2026, 1, 15), D("1000"), account="арест",
+                          counterparty="кредитор")],
+    )
+    with pytest.raises(ValueError, match="недоступен"):
+        run(voluntary, main="арест")                # добровольно — нельзя
+
+
+def test_protected_floor_limits_forced_payment_in_forecast():
+    """Порог неприкосновенного остатка режет прогноз принудительного (04-Т5в).
+
+    Порог — число зоны: списывается лишь то, что сверх него, и меряется по
+    доступным деньгам на момент списания — доход того же дня уже в них.
+    Порог не задан — ограничителя нет («не задано» не ноль); порог выше
+    денег — списания нет вовсе, и это не необеспеченность: обещания порог
+    не создал.
+    """
+    def scenario(floor: D | None) -> Scenario:
+        return Scenario(
+            accounts=[Account("карта", D("30000"))],
+            payments=[Payment(date(2026, 1, 15), D("25000"), account="карта",
+                              counterparty="пристав", forced=True)],
+            protected_floor=floor)
+
+    r = run(scenario(D("15000")), main="карта")
+    assert r.balances["карта"] == D("15000")        # 30 000 − 15 000
+    assert r.unsecured == []
+
+    r = run(scenario(None), main="карта")
+    assert r.balances["карта"] == D("5000")         # без порога уходит всё
+
+    r = run(scenario(D("50000")), main="карта")
+    assert r.balances["карта"] == D("30000")        # порог защитил целиком
+    assert r.unsecured == []
+
+    # Доход того же дня считается: порог меряется после прихода.
+    with_income = Scenario(
+        accounts=[Account("карта", D("0"))],
+        income=[Income(date(2026, 1, 15), D("30000"), "карта")],
+        payments=[Payment(date(2026, 1, 15), D("25000"), account="карта",
+                          counterparty="пристав", forced=True)],
+        protected_floor=D("15000"),
+    )
+    r = run(with_income, main="карта")
+    assert r.balances["карта"] == D("15000")        # 30 000 − 15 000
+
+    # Порог — ограничитель принудительного: добровольный платёж владельца
+    # он не режет — это его воля и его деньги.
+    voluntary = Scenario(
+        accounts=[Account("карта", D("30000"))],
+        payments=[Payment(date(2026, 1, 15), D("25000"), account="карта",
+                          counterparty="кредитор")],
+        protected_floor=D("15000"),
+    )
+    r = run(voluntary, main="карта")
+    assert r.balances["карта"] == D("5000")         # платёж прошёл целиком
+
+
+def test_forced_payment_is_never_prepaid():
+    """Принуждение снимает волю — досрочка несовместима с принуждением.
+
+    Досрочку движок назначает сам по воле владельца, у принудительного воли
+    нет: пересечение смыслов ловится валидацией, а не тихим поведением.
+    """
+    s = Scenario(
+        accounts=[Account("карта", D("30000"))],
+        payments=[Payment(date(2026, 1, 15), D("25000"), account="карта",
+                          counterparty="пристав", forced=True, prepaid=True)],
+    )
+    with pytest.raises(ValueError, match="принудительный не бывает досрочкой"):
+        run(s, main="карта")
+
+
+def test_forced_payment_runs_in_the_month_step():
+    """Прокат кассы ведёт принудительное как обязательное месяца.
+
+    Месячный шаг собирает принудительные в обязательные события — не в корзину
+    досрочек: они уходят до кассового круга, ёмкость не спрашивают, и свободные
+    деньги месяца считаются после них.
+    """
+    s = Scenario(
+        accounts=[Account("арест", D("10000"), available=False)],
+        payments=[Payment(date(2026, 1, 15), D("25000"), account="арест",
+                          counterparty="пристав", forced=True)],
+    )
+    months = roll_cash(s, date(2026, 1, 1), max_months=1)
+    assert len(months) == 1
+    assert months[0].balances["арест"] == D("-15000")
+    assert months[0].unsecured == []
+
+
+def test_forced_payment_flows_through_roll_months():
+    """Связка касса-прокат видит принудительное: свободные деньги после него.
+
+    Удержание 7 500 с арестованной карты в январе уходит обязательным событием
+    месяца: касса января свободна меньше на удержание, остаток честен, а февраль
+    начинается с уже уменьшенного кошелька — money уходит один раз.
+    """
+    wallet = Wallet("арест", "Арест", "карта", D("10000"), available=False)
+    s = Scenario(
+        accounts=[Account("арест", D("10000"), available=False)],
+        payments=[Payment(date(2026, 1, 15), D("7500"), account="арест",
+                          counterparty="пристав", forced=True)],
+    )
+    direct = roll_cash(s, date(2026, 1, 1), max_months=1)[0]
+    book = Settlements(
+        counterparties=[Counterparty(uid="пристав", name="Пристав", kind=LEGAL,
+                                     subtype="банк", groups=("долги",))],
+        wallets=[wallet])
+    linked = roll_months(book, date(2026, 1, 1), [wallet],
+                         incomes=[], one_offs=[Payment(date(2026, 1, 15),
+                                                       D("7500"),
+                                                       account="арест",
+                                                       counterparty="пристав",
+                                                       forced=True)],
+                         living_floor=D("0"), max_months=1)
+    # Связка считает кассу теми же событиями: удержание в остатке первого месяца.
+    assert linked.cash_months[0].balances["арест"] == direct.balances["арест"] \
+        == D("2500")
+    assert linked.cash_months[0].unsecured == []

@@ -54,7 +54,7 @@ from .settlements import (BODY, BOTH, CAPS, CAP_NONE, CAP_SHARE, CAP_SUM,
                           occurrences, overdue_amount, overdue_amounts,
                           payment_channel, planned_date, rule_at,
                           trigger_charges, validate)
-from .solver import (KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER,
+from .solver import (KIND_FORCED, KIND_PAYMENT, KIND_PREPAID, KIND_TRANSFER,
                      UNSECURED_KINDS, Outcome, Result, Step, TransferHint,
                      Unsecured, compare, cover_cost, outcome, run)
 
@@ -100,7 +100,7 @@ __all__ = [
     "CAP_NONE", "CAP_SUM", "CAP_SHARE", "CAPS",
     "TRIGGER_OVERDUE", "TRIGGER_FULL_UNPAID", "TRIGGER_OVERDUE_DAYS",
     "TRIGGER_OVERDUE_SUM", "TRIGGERS",
-    "KIND_PAYMENT", "KIND_PREPAID", "KIND_TRANSFER", "UNSECURED_KINDS",
+    "KIND_FORCED", "KIND_PAYMENT", "KIND_PREPAID", "KIND_TRANSFER", "UNSECURED_KINDS",
     "AVALANCHE", "SNOWBALL", "STRATEGIES",
     "WINDOW_DEBTS_CLOSED", "WINDOW_INCOME_ENDS", "WINDOW_MONTH_CAP",
     "WINDOW_REASONS",
