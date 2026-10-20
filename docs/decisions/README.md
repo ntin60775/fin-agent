@@ -3,7 +3,7 @@ node_type: index
 title: Решения
 service: _platform
 status: active
-updated: 2026-10-02
+updated: 2026-10-20
 links:
   part_of: [../README.md]
 ---
@@ -33,3 +33,5 @@ links:
 - [penalty-and-overdue.md](penalty-and-overdue.md) — неустойка капает по дням просрочки от обрезанного потока, без компаунда и с явным потолком
 - [charged-vs-paid.md](charged-vs-paid.md) — начислено и уплачено — разные регистры: один факт — один носитель, избыток платежа несёт тело
 - [zone-rules-and-forms.md](zone-rules-and-forms.md) — правила зоны — данные закрытых форм с версиями по дате; исполнение и счёт — в движке
+- [condition-versions.md](condition-versions.md) — условия сделки меняются со дня записью-версией; история остаётся эпохами, реструктуризация — вариант
+- [enforcement.md](enforcement.md) — принуждение: факт помимо воли на обоих носителях, статус сделки, порог зоны в прогнозе
