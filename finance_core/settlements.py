@@ -351,6 +351,7 @@ class Deal:
     allocations: tuple[AllocationRule, ...] = ()  # порядки распределения, версии
     triggers: tuple[TriggerRule, ...] = ()      # правила триггеров — по уиду правила
     second_priority: bool = False
+    forced: bool = False                # взыскание: платится помимо воли владельца
     wallet: str | None = None
     channel: str | None = None
     benefit_for: str | None = None

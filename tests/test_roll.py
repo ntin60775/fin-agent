@@ -2948,3 +2948,183 @@ def test_an_interest_charge_compounds_the_daily_base():
         deal, D("9310.00"), date(2026, 1, 1), date(2026, 1, 31),
         [(date(2026, 1, 28), D("1000"))], [(date(2026, 1, 15), D("300"))])
     _canon_agrees(book, roll)
+
+
+# --- взыскание в прокате: статус и приоритет (тикет 05) ----------------------
+
+def _enforced_book(**claim) -> Settlements:
+    """Долг по графику 1 000 в месяц и взыскание 5 000 без согласия — синтетика.
+
+    Взыскание несёт статус принуждения (`forced`) и обычно второй приоритет:
+    оно вне обязательного графика владельца, но платится без согласия.
+    """
+    base = dict(uid="взыскание", amount=D("5000"), second_priority=True,
+                forced=True,
+                schedule=ScheduleRule(days=(20,), payment=D("1000"),
+                                      count=5, shift_weekend=False,
+                                      start=START))
+    base.update(claim)
+    return _book(_deal(uid="график", amount=D("3000"),
+                       schedule=_rule(payment=D("1000"), count=3,
+                                      start=START, shift_weekend=False)),
+                 _deal(**base))
+
+
+def test_enforcement_is_paid_first_without_consent():
+    """Взыскание платится графиком без согласия — раньше добровольных (05-а).
+
+    Без согласия второй приоритет сам не платится, а взыскание — платится:
+    статус принуждения снимает согласие. Оно приписано первому приоритету и
+    идёт в месяце первым: пул, остаток и котёл его не урезают.
+    """
+    book = _enforced_book()
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=12)
+    assert roll.months[0].balances["взыскание"] == D("4000")   # 1 000 ушло
+    assert [(p.deal, p.amount) for p in roll.months[0].payments] == [
+        ("взыскание", D("1000")), ("график", D("1000"))]
+    assert roll.months[0].payments[0].forced is True
+    assert roll.months[0].offer == D("0")
+    # Взыскание приписано первому приоритету: стартовый остаток — оба долга.
+    assert roll.start_total == D("8000")
+    # Окно продлевается графиком взыскания без согласия.
+    assert roll.window.reason == WINDOW_DEBTS_CLOSED
+
+
+def test_enforcement_is_not_cut_by_the_pool_and_makes_the_month_deficit():
+    """Урезание пулом взыскание не берёт: касса видит дефицит, а не «не прошло» (05-в).
+
+    Обязательный платёж владельца урезан бюджетом, а взыскание уходит целиком:
+    бюджет не спрашивается. Деньги месяца реально ушли — свободные деньги
+    кассы после удержания меньше на удержание, дыры нет (деньги были), а
+    необеспеченности нет: урезание взыскания пулом — выдумка, её не бывает.
+    """
+    from finance_core import Account, Income, Payment, Scenario, roll_months
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  forced=True, wallet="карта",
+                  schedule=ScheduleRule(days=(10,), payment=D("5000"),
+                                        shift_weekend=False, start=START))
+    own = _deal(uid="график", amount=D("12000"), wallet="карта",
+                schedule=ScheduleRule(days=(10,), payment=D("10000"),
+                                      shift_weekend=False, start=START))
+    book = _book(own, claim)
+    validate(book)
+    linked = roll_months(
+        book, START, [Wallet("карта", "Карта", "карта", D("12000"))],
+        incomes=[Income(date(2026, 1, 5), D("2000"), "карта")],
+        one_offs=[], living_floor=D("0"), max_months=1)
+    [month] = linked.cash_months
+    # 2 000 пришло, 5 000 ушло принудительно, 10 000 обязательного — из денег
+    # карты (10 000 остатка): добровольный платёж прошёл, кошелёк опустел.
+    assert month.balances["карта"] == D("9000")
+    # Списание прошло с арестованного кошелька не спрося ёмкости — но там были
+    # деньги; касса видит честный минус в подсказке для непрошедшего остатка.
+    assert linked.deal_roll.months[0].balances["взыскание"] == D("0")
+    assert linked.deal_roll.months[0].balances["график"] == D("2000.00")
+    assert [(p.deal, p.amount) for p in linked.deal_roll.months[0].payments] == [
+        ("взыскание", D("5000")), ("график", D("10000"))]
+
+
+def test_protected_floor_cuts_the_enforcement_projection():
+    """Порог зоны режет проекцию удержания в прогнозе (05-г).
+
+    Принудительный платёж кассы не отдаёт доступные деньги ниже порога:
+    списывается только то, что сверх него. Сумма удержания в кассе месяца
+    меньше плановой — это не ошибка книги: взыскание видит остаток, а
+    неприкосновенное остаётся владельцу.
+    """
+    from finance_core import Income, roll_months
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  forced=True, wallet="карта",
+                  schedule=ScheduleRule(days=(10,), payment=D("5000"),
+                                        shift_weekend=False, start=START))
+    book = _book(claim)
+    validate(book)
+    linked = roll_months(
+        book, START, [Wallet("карта", "Карта", "карта", D("3000"))],
+        incomes=[], one_offs=[], living_floor=D("0"), max_months=1,
+        protected_floor=D("1000"))
+    [month] = linked.cash_months
+    assert month.balances["карта"] == D("1000")     # 3 000 − 2 000 сверх порога
+    assert month.unsecured == []
+
+
+def test_enforcement_extends_the_window_without_consent():
+    """Окно продлевается графиком взыскания безусловно (05-б).
+
+    Без согласия добровольный второй приоритет окна не продлевает, а
+    взыскание — продлевает: его дата закрытия видна без согласия. Иначе
+    окно закрыло бы вопрос при живом взыскании.
+    """
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  forced=True,
+                  schedule=ScheduleRule(days=(20,), payment=D("1000"),
+                                        count=5, shift_weekend=False,
+                                        start=START))
+    book = _book(claim)
+    validate(book)
+    without = roll_window(book, START, max_months=24, consent_to_second=False)
+    assert without.until == date(2026, 5, 31)        # 20 мая — последний платёж
+    assert without.reason == WINDOW_DEBTS_CLOSED
+
+    voluntary = _book(_deal(uid="взыскание", amount=D("5000"),
+                            second_priority=True,
+                            schedule=ScheduleRule(days=(20,), payment=D("1000"),
+                                                  shift_weekend=False,
+                                                  start=START)))
+    validate(voluntary)
+    assert roll_window(voluntary, START, max_months=12,
+                       consent_to_second=False).reason == WINDOW_MONTH_CAP
+
+
+def test_enforcement_without_a_schedule_is_a_gap():
+    """Взыскание без правила графика — пробел, как у любой сделки (05-д)."""
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  forced=True, schedule=None)
+    book = _book(claim)
+    validate(book)
+    roll = roll_deals(book, START, D("0"), max_months=6)
+    [gap] = [g for g in roll.gaps if g.deal == "взыскание"]
+    assert "графика" in gap.reason
+
+
+def test_enforcement_is_not_cut_by_the_pool_percent_case():
+    """Проценты месяца раздули want сверх пула: взыскание платится целиком (05-а).
+
+    Минималка процентом считается от остатка на начало месяца и на проценты
+    месяца превышает зафиксированную нагрузку: добровольное урезается пулом
+    (short назван), взыскание — не урезается никогда. Его недоплата была бы
+    выдумкой: приставу платят, что взыскали.
+    """
+    claim = _deal(uid="взыскание", amount=D("10000"), rate_per_year=D("0.36"),
+                  second_priority=True, forced=True,
+                  schedule=_rule(percent=D("0.1")))
+    book = _book(claim)
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=1)
+    jan = roll.months[0]
+    assert jan.interest == D("300.00")
+    assert jan.paid == D("1030.00")          # want 1 030 целиком, пул был 1 000
+    assert jan.short == D(0)
+    assert jan.balances["взыскание"] == D("9270.00")
+
+
+def test_forecast_carries_protected_floor_to_the_cash_side():
+    """Прогноз несёт порог в кассу: удержание ограничено, неприкосновенное цело (05-г).
+
+    Порог живёт во входе прогноза и провожается в кассу прокатом: без
+    прокидки порт pessimistично списал бы всё, и «сколько останется
+    неприкосновенным» стало бы выдумкой.
+    """
+    from finance_core import ForecastInput, forecast
+    claim = _deal(uid="взыскание", amount=D("5000"), second_priority=True,
+                  forced=True, wallet="карта",
+                  schedule=_rule(days=(10,), payment=D("5000"), count=2,
+                                 start=START, shift_weekend=False))
+    book = _book(claim)
+    validate(book)
+    out = forecast(ForecastInput(
+        book=book, start=START, wallets=[Wallet("карта", "Карта", "карта",
+                                                D("3000"))],
+        living_floor=D("0"), protected_floor=D("1000"), max_months=1))
+    assert out.months[0].balances["карта"] == D("1000")   # 3 000 − 2 000
