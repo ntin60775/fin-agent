@@ -3113,3 +3113,44 @@ def test_capitalization_is_a_zone_choice_in_the_new_amount():
     assert deal_parts(cap, "заём", date(2026, 4, 30)) == {
         BODY: D("66491.20"), INTEREST: D("7135.60"),
         PENALTY: D("2475.00"), COSTS: D("0")}
+
+
+# --- принудительное движение: факт помимо воли (тикет 04) ---------------------
+
+def test_forced_flag_lives_on_both_carriers_and_keeps_default_false():
+    """Признак принуждения у факта: движение и платёж несут его (04-Т1).
+
+    Идиома «одна правка, два носителя»: у обоих полей умолчание False —
+    обычные факты принуждение не декларируют, а принудительные несут True.
+    Синтетическая касса — контроль пары: у Payment признак тоже живёт.
+    """
+    forced = Movement(date(2026, 1, 20), D("7500"), "заём", forced=True)
+    assert forced.forced is True
+    assert Movement(date(2026, 1, 20), D("7500"), "заём").forced is False
+
+    from finance_core import Payment
+    assert Payment(date(2026, 1, 20), D("7500"),
+                   counterparty="пристав", forced=True).forced is True
+    assert Payment(date(2026, 1, 20), D("7500"),
+                   counterparty="кредитор").forced is False
+
+
+def test_a_forced_movement_settles_the_oldest_overdue_fifo():
+    """Принудительное несвязанное движение гасит просрочки FIFO (04-Т5г).
+
+    Списание пристава — платёж по сделке «без ссылки на вхождение»: гасит
+    самые старые исполняемые вхождения в пределах суммы тем же правилом, что
+    добровольный платёж; остаток сверх просрочек идёт в части. Природа платежа
+    механику гашения не меняет: деньги ушли — и всё.
+    """
+    book = _scheduled_book([Movement(date(2026, 2, 25), D("1500"), "заём",
+                                     forced=True)])
+    validate(book)
+    jan, feb, mar = occurrences(book, "заём", START, date(2026, 3, 31))
+    assert jan.status == PAID_LATE and jan.paid == D("1000")  # самая старая — вся
+    assert feb.status == EXPECTED and feb.paid == D("500")    # вторая — остатком
+    assert mar.status == EXPECTED and mar.paid == D("0")      # будущее не тронуто
+    assert feb.remaining == D("500")
+    # Остаток сверх просрочек — платёж по сделке: канон упал на 1 500.
+    # Раскладки у книги хелпера нет (Q34 — пробел, а не ноль), канон отвечает всегда.
+    assert deal_balance(book, "заём", date(2026, 3, 31)) == D("8500.00")
