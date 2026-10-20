@@ -3128,3 +3128,145 @@ def test_forecast_carries_protected_floor_to_the_cash_side():
                                                 D("3000"))],
         living_floor=D("0"), protected_floor=D("1000"), max_months=1))
     assert out.months[0].balances["карта"] == D("1000")   # 3 000 − 2 000
+
+
+# --- одно решение суда — обязательства разом (тикет 06) -----------------------
+
+def _court_book(**kw) -> Settlements:
+    """Одно дело из трёх обязательств: услуги, пошлина суду, пошлина приставам.
+
+    Каждое — своя сделка со своим получателем, свои записи-начисления с частью
+    и общей свободной меткой основания (basis="дело 2026-01"), уиды записей
+    разные. «Взыскивают разом» — единица закрытия `дело`: платежи копятся в
+    котёл, остатки участников обнуляются разом. Ставки нулевые — синтетика
+    без личных чисел.
+    """
+    services = _deal(uid="услуги", amount=D("10000"), counterparty="юрист",
+                     closure_unit="дело", rate_per_year=D("0"),
+                     allocations=(AllocationRule(PARTS),),
+                     schedule=_rule(days=(20,), payment=D("1000"),
+                                    count=12, start=START, shift_weekend=False))
+    court_fee = _deal(uid="пошлина-суд", amount=D("2000"), counterparty="суд",
+                      closure_unit="дело", rate_per_year=D("0"),
+                      allocations=(AllocationRule(PARTS),),
+                      schedule=_rule(days=(20,), payment=D("1000"),
+                                     count=2, start=START, shift_weekend=False))
+    bailiff_fee = _deal(uid="пошлина-приставы", amount=D("1000"),
+                        counterparty="приставы", closure_unit="дело",
+                        rate_per_year=D("0"),
+                        allocations=(AllocationRule(PARTS),),
+                        schedule=_rule(days=(20,), payment=D("1000"),
+                                       count=1, start=START, shift_weekend=False))
+    base = dict(
+        counterparties=[_counterparty("юрист", name="Юрист"),
+                        _counterparty("суд", name="Суд"),
+                        _counterparty("приставы", name="Приставы")],
+        charges=[Charge("решение-услуги", date(2026, 1, 5), D("500"), "услуги",
+                        PENALTY, basis="дело 2026-01"),
+                 Charge("решение-суд", date(2026, 1, 5), D("100"), "пошлина-суд",
+                        COSTS, basis="дело 2026-01"),
+                 Charge("решение-приставы", date(2026, 1, 5), D("50"),
+                        "пошлина-приставы", COSTS, basis="дело 2026-01")],
+    )
+    base.update(kw)
+    return _book(services, court_fee, bailiff_fee, **base)
+
+
+def test_one_court_case_holds_charges_of_different_recipients():
+    """Несколько записей одного дела: свои сделки и части, одно основание (06-а).
+
+    Решение суда заводится не сущностью, а записями-начислениями: у каждой
+    свой уид (одно событие — одна запись), своя сделка и своя часть, а «одно
+    дело» несёт свободная метка основания. Канон каждого обязательства растёт
+    ровно своей записью.
+    """
+    book = _court_book()
+    validate(book)
+    bases = {c.uid: (c.deal, c.part, c.basis) for c in book.charges}
+    assert bases == {
+        "решение-услуги": ("услуги", PENALTY, "дело 2026-01"),
+        "решение-суд": ("пошлина-суд", COSTS, "дело 2026-01"),
+        "решение-приставы": ("пошлина-приставы", COSTS, "дело 2026-01")}
+    assert deal_balance(book, "услуги", date(2026, 1, 10)) == D("10500")
+    assert deal_balance(book, "пошлина-суд", date(2026, 1, 10)) == D("2100")
+    assert deal_balance(book, "пошлина-приставы", date(2026, 1, 10)) == D("1050")
+
+
+def test_one_event_one_record_stays_the_rule():
+    """Дубль уида падает валидацией — «одно событие — одна запись» (06-а).
+
+    Общий уид у нескольких записей — не способ связать дело: связывает
+    основание-метка. Одно событие записывается одной записью, иначе у одного
+    события два носителя.
+    """
+    book = _court_book(
+        charges=[Charge("решение", date(2026, 1, 5), D("500"), "услуги",
+                        PENALTY, basis="дело 2026-01"),
+                 Charge("решение", date(2026, 1, 5), D("100"), "пошлина-суд",
+                        COSTS, basis="дело 2026-01")])
+    with pytest.raises(ValueError, match="одно событие, одна запись"):
+        validate(book)
+
+
+def test_the_case_unit_clears_all_participants_at_once():
+    """Единица закрытия гасит обязательства дела разом (06-б).
+
+    Цель — от тел участников (13 000), котёл — платежи; начисления живут в
+    частях участников и цель не растят. Когда котёл достигает цели, остатки
+    всех трёх обнуляются разом, хотя услуги платились бы ещё год.
+    """
+    book = _court_book()
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=24)
+    first = roll.months[0]
+    assert first.units["дело"].target == D("13000")
+    assert first.units["дело"].pot == D("3000")      # три платежа по 1 000
+    # Начисления участников — в их частях, цель и котёл не тронуты.
+    assert first.parts["услуги"] == {BODY: D("9000"), INTEREST: D("0"),
+                                     PENALTY: D("500"), COSTS: D("0")}
+    assert first.parts["пошлина-суд"] == {BODY: D("1000"), INTEREST: D("0"),
+                                          PENALTY: D("0"), COSTS: D("100")}
+    assert first.parts["пошлина-приставы"] == {BODY: D("0"), INTEREST: D("0"),
+                                               PENALTY: D("0"), COSTS: D("50")}
+    # Разом: цель набрана — все обнулены, дело закрыто. Котёл растёт по тысяче
+    # в месяц (судьба выходит из графика на 3-м месяце, пристав — на 1-м):
+    # 3 000 в январе → 13 000 в октябре; до того единица жива.
+    assert [m.units["дело"].pot for m in roll.months[:9]] == [
+        D("3000"), D("5000"), D("6000"), D("7000"), D("8000"), D("9000"),
+        D("10000"), D("11000"), D("12000")]
+    assert not roll.months[8].units["дело"].closed
+    assert roll.months[9].units["дело"].closed
+    assert roll.months[9].month == date(2026, 10, 1)
+    assert roll.months[9].balances == {"услуги": D("0"),
+                                       "пошлина-суд": D("0"),
+                                       "пошлина-приставы": D("0")}
+    assert all(u.units["дело"].target == D("13000") for u in roll.months)
+
+
+def test_enforcement_inside_a_case_unit_keeps_first_priority():
+    """Взыскание в единице гасится первым приоритетом без согласия (06-в).
+
+    Участник дела со статусом принуждения платится графиком без согласия и
+    приписан первому приоритету: незакрытое дело не даёт объявить свободу
+    раньше времени, а согласие на добровольный второй приоритет ему не нужно.
+    """
+    services = _deal(uid="услуги", amount=D("10000"), counterparty="юрист",
+                     closure_unit="дело", rate_per_year=D("0"),
+                     schedule=_rule(days=(20,), payment=D("1000"), count=12,
+                                    start=START, shift_weekend=False))
+    enforced = _deal(uid="долг-взыскание", amount=D("3000"),
+                     counterparty="приставы", closure_unit="дело",
+                     forced=True, second_priority=True, rate_per_year=D("0"),
+                     schedule=_rule(days=(20,), payment=D("1000"), count=3,
+                                    start=START, shift_weekend=False))
+    book = _book(services, enforced,
+                 counterparties=[_counterparty("юрист", name="Юрист"),
+                                 _counterparty("приставы", name="Приставы")])
+    validate(book)
+    roll = roll_deals(book, START, D(0), max_months=24,
+                      consent_to_second=False)
+    # Взыскание платится без согласия — своим графиком, с первого месяца.
+    assert roll.months[0].balances["долг-взыскание"] == D("2000")
+    # Оно приписано первому приоритету: окно и стартовый итог знают о нём.
+    assert roll.start_total == D("13000")
+    assert roll.window.reason == WINDOW_DEBTS_CLOSED
