@@ -98,6 +98,10 @@ class ScheduledPayment:
     `debt` — платёж долговой: у сделки с остатком платёж гасит долг, у
     регулярного расхода — нет, а досрочка долговая всегда. Признак нужен кассе:
     долговой платёж кредитным лимитом не финансируется (`Payment.debt`).
+
+    `forced` — платёж принудительный: касса не спрашивает его ёмкости и
+    доступности, порядок дня у него свой — после переводов до добровольных
+    (`Payment.forced`).
     """
     date: date
     amount: Decimal
@@ -107,6 +111,7 @@ class ScheduledPayment:
     planned: date | None = None
     unit: str | None = None
     debt: bool = True
+    forced: bool = False
 
 
 @dataclass
@@ -242,6 +247,7 @@ class _Open:
     balance: Decimal
     unit: str | None = None
     second: bool = False
+    forced: bool = False
     streams: list = field(default_factory=list)
     penalty: Decimal = Decimal(0)
     parts: dict[str, Decimal] | None = None
@@ -384,7 +390,7 @@ def _gap_reason(book: Settlements, deal: Deal) -> str | None:
         return "ставка не задана: неизвестно, растёт ли долг"
     if deal.wallet is None:
         return "финансирующий кошелёк не задан: платить не с чего"
-    if deal.second_priority:
+    if deal.second_priority and not deal.forced:
         return None
     if rule is None:
         return "правило графика не задано: платить нечем"
@@ -564,8 +570,9 @@ def _debts_end(book: Settlements, start: date, closed: set[str],
             continue                       # регулярный расход: закрывать нечего
         if deal.uid in closed or reasons.get(deal.uid) is not None:
             continue                       # закрыта или пробел: в прокат не входит
-        if deal.second_priority and not consent_to_second:
-            continue                       # без согласия он не платится
+        if deal.second_priority and not consent_to_second \
+                and not deal.forced:
+            continue                       # без согласия он не платится — кроме взыскания
         found = _last_payment(book, deal)
         if found is None:
             return None                    # ряда нет конца — нет и границы
@@ -690,15 +697,17 @@ def _accrual_since(deal: Deal, month: date) -> date:
 def mandatory_gaps(gaps: list[Gap], book: Settlements) -> list[Gap]:
     """Чей пробел — пробел обязательного графика: его и спрашиваем.
 
-    Пробел требования (в прокат входит отдельным списком) и пробел второго
-    приоритета (платится из свободных, а не по графику) обязательного графика
-    не смоделировывают: книга, где такой пробел один, — не книга без
-    посчитанного графика.
+    Пробел требования (в прокат входит отдельным списком) и пробел добровольного
+    второго приоритета (платится из свободных, а не по графику) обязательного
+    графика не смоделировывают: книга, где такой пробел один, — не книга без
+    посчитанного графика. Взыскание платится по графику всегда, поэтому его
+    пробел — пробел обязательного: в фильтр проходит по принуждению.
     """
     deals = {d.uid: d for d in book.deals}
     return [g for g in gaps
             if (deal := deals.get(g.deal)) is not None
-            and deal.direction == I_OWE and not deal.second_priority]
+            and deal.direction == I_OWE
+            and (not deal.second_priority or deal.forced)]
 
 
 def _payoff_pair(graph: DealRoll, start: date,
@@ -803,7 +812,7 @@ class _DealsRoll:
                 continue
             self.open_deals[deal.uid] = _Open(
                 deal, _opened_balance(book, deal.uid, start),
-                deal.closure_unit, deal.second_priority)
+                deal.closure_unit, deal.second_priority, deal.forced)
 
         for uid, opened in self.open_deals.items():
             unit = opened.unit
@@ -892,7 +901,7 @@ class _DealsRoll:
         due: dict[int, list[tuple[date, str, Occurrence]]] = {}
         for uid, found in plan.items():
             opened = self.open_deals[uid]
-            if opened.second:
+            if opened.second and not opened.forced:
                 continue            # второй приоритет платится не по графику, а из свободных
             for occ in found:
                 if not occ.payable:
@@ -916,7 +925,7 @@ class _DealsRoll:
         self.second_freedom: date | None = None
         self.done = False
         self.start_total = sum((o.balance for o in self.open_deals.values()
-                                if not o.second), Decimal(0))
+                                if not (o.second and not o.forced)), Decimal(0))
         # Второй приоритет был открыт на начало проката: закрытие пустого
         # приоритета датой не объявляется.
         self.second_start = _second_open(self.open_deals, self.open_units)
@@ -994,6 +1003,18 @@ class _DealsRoll:
             else:
                 room = opened.balance
             amount = min(want, room, pool)
+            if opened.forced and not done:
+                # Принуждение не урезается пулом: приставу платят, что взыскали,
+                # — в границах остатка сделки (или котла участника), 05-Т2.
+                # Пул уменьшается на ту же сумму: деньги месяца ушли помимо
+                # воли, и касса этого месяца их уже не видит. Уйти в минус
+                # пулу при этом можно — принуждение платят и в дефицит; для
+                # последующих рядов пул — только гейт минимума, отрицательные
+                # досрочки он не рождает.
+                take = min(want, room) - amount
+                if take > 0:
+                    pool -= take
+                    amount += take
             # Урезание видно всегда, даже когда не прошло ничего: недоплата
             # месяца — сумма want − max(amount, 0) (в отрицательном пуле не
             # заплачено ровно want); в нагрузку она не переносится — живёт
@@ -1041,7 +1062,8 @@ class _DealsRoll:
                 wallet=funding_wallet(opened.deal), planned=occ.planned,
                 unit=opened.unit,
                 # Сделка с остатком — долг, регулярный расход — жизнь.
-                debt=opened.deal.amount is not None))
+                debt=opened.deal.amount is not None,
+                forced=opened.forced))
             return shares
 
         # 1. Вхождения раньше начала долга — до процентов месяца. Дата такого
@@ -1595,8 +1617,8 @@ class _DealsRoll:
             index=load.index, month=month,
             balances={uid: o.balance for uid, o in open_deals.items()},
             units={uid: UnitMonth(u.target, u.pot) for uid, u in open_units.items()},
-            total=sum((o.balance for o in open_deals.values() if not o.second),
-                      Decimal(0)),
+            total=sum((o.balance for o in open_deals.values()
+                       if not (o.second and not o.forced)), Decimal(0)),
             interest=month_interest, paid=paid, prepaid=prepaid,
             short=load.short, offer=offer,
             payments=load.payments,
@@ -1611,6 +1633,8 @@ class _DealsRoll:
             self.freedom = month
         if self.second_start and second_done and self.second_freedom is None:
             self.second_freedom = month
+        # Принуждение приписано к первому приоритету: оно платится без согласия,
+        # и его закрытие не обязано ждать решения о добровольном срезе.
         self.done = first_done and (second_done or not consent)
         return prepayments
 
@@ -1882,13 +1906,18 @@ def _targets(open_deals: dict[str, _Open], open_units: dict[str, _Unit],
 
 
 def _all_closed(open_deals: dict[str, _Open], open_units: dict[str, _Unit]) -> bool:
-    """Закрыто ли всё, что закрывается: регулярные расходы и второй приоритет — нет."""
+    """Закрыто ли всё, что закрывается: регулярные расходы и добровольный второй приоритет — нет.
+
+    Взыскание (принуждение) приписано первому приоритету: оно платится всегда,
+    и его незакрытость не даёт прокату объявлять свободу раньше времени.
+    """
     for opened in open_deals.values():
-        if opened.second or opened.deal.amount is None:
+        if (opened.second and not opened.forced) or opened.deal.amount is None:
             continue
         if opened.balance > 0:
             return False
-    return all(u.closed for u in open_units.values() if not u.second)
+    return all(u.closed or u.second and not open_deals[u.members[0]].deal.forced
+               for u in open_units.values())
 
 
 def _second_open(open_deals: dict[str, _Open],
@@ -1988,6 +2017,7 @@ def _as_payment(sp: ScheduledPayment) -> Payment:
         counterparty=sp.counterparty,
         prepaid=sp.planned is None,
         debt=sp.debt,
+        forced=sp.forced,
     )
 
 
@@ -2042,7 +2072,8 @@ def roll_months(book: Settlements, start: date,
                 max_months: int = 600,
                 consent_to_second: bool = False,
                 main: str | None = None,
-                window: Window | None = None) -> MonthsRoll:
+                window: Window | None = None,
+                protected_floor: Decimal | None = None) -> MonthsRoll:
     """Прокатить месяцы: драйвер идёт месяц за месяцем, обе стороны — шагами.
 
     Порядок внутри месяца строг: обязательные вхождения сделок → касса месяца
@@ -2098,6 +2129,7 @@ def roll_months(book: Settlements, start: date,
         living_floor_monthly=living_floor,
         obligation_reserve=obligation_reserve,
         income_horizon=income_horizon,
+        protected_floor=protected_floor,
     )
 
     # Срок по графику — отдельный проход без бюджета досрочек и без кассы; он

@@ -198,6 +198,9 @@ class ForecastInput:
     income_horizon: date | None = None
     cushion: Decimal | None = None
     consent_to_second: bool = False
+    #: Неприкосновенный остаток: порог зоны для принудительных платежей прогноза
+    #: (`Scenario.protected_floor`); None = не задан — ограничителя нет.
+    protected_floor: Decimal | None = None
     strategy: str = AVALANCHE
     max_months: int = 600
     main: str | None = None
@@ -290,7 +293,7 @@ def _roll_of(inp: ForecastInput) -> MonthsRoll:
         transfers=inp.transfers, income_horizon=inp.income_horizon,
         strategy=inp.strategy, max_months=inp.max_months,
         consent_to_second=inp.consent_to_second, main=inp.main,
-        window=inp.window)
+        window=inp.window, protected_floor=inp.protected_floor)
 
 
 def forecast(inp: ForecastInput) -> Forecast:
