@@ -18,8 +18,9 @@
 `Decimal`; зависимостей нет, только стандартная библиотека.
 """
 from .actions import (Action, Base, Bridge, Direct, ImpossibleAction, Move,
-                      Prepay, Price, Variant, applied, baseline, facts,
-                      impossible, price, prices, variants)
+                      Prepay, Price, Restructure as RestructureAction, Variant,
+                      applied, baseline, facts, impossible, price, prices,
+                      variants)
 from .forecast import (Deficit, Discrepancy, FamilyTransfer, Forecast,
                        ForecastInput, Milestone, Shift, ALLOCATION_NOT_SET,
                        SCALE_NOT_SET, forecast, forecast_shifts, widest)
@@ -87,7 +88,8 @@ __all__ = [
     "Milestone", "Deficit", "FamilyTransfer", "Discrepancy", "Shift",
     "SCALE_NOT_SET", "ALLOCATION_NOT_SET",
     # действия и цена варианта
-    "Move", "Bridge", "Prepay", "Direct", "Action", "Variant", "Base", "Price",
+    "Move", "Bridge", "Prepay", "Direct", "RestructureAction", "Action",
+    "Variant", "Base", "Price",
     "ImpossibleAction", "baseline", "impossible", "applied", "price", "prices",
     "facts", "variants",
     # объявленные наборы

@@ -33,9 +33,11 @@ from decimal import ROUND_CEILING, Decimal
 
 from .forecast import Forecast, ForecastInput, forecast
 from .model import Income, KOPEK, Payment
-from .settlements import (OUT, Deal, Movement, OccurrenceEdit, ScheduleRule,
+from .settlements import (OUT, Deal, Movement, OccurrenceEdit,
+                          Restructure as RestructureRecord, ScheduleRule,
                           Settlements, deal_balance, deal_holder_at,
-                          funding_wallet, occurrences)
+                          deal_schedule_at, funding_wallet, occurrences,
+                          _validate_rule)
 
 
 # --- действия --------------------------------------------------------------
@@ -95,7 +97,26 @@ class Direct:
     """
 
 
-Action = Move | Bridge | Prepay | Direct
+@dataclass(frozen=True)
+class Restructure:
+    """Реструктуризация как вариант: версия условий со дня (07-Т1).
+
+    Поля — те же, что у записи-реструктуризации: новая сумма к закрытию,
+    ставки и (или) правило графика; пустое поле — «не меняется, наследуется».
+    Вариант не переписывает сценарий и не трогает базу: применённое действие
+    становится записью-реструктуризацией в книге (`facts`) — как перенос
+    становится правкой вхождения, а досрочка движением. Бюджетом действие не
+    меряется: реструктуризация не платит деньги, её цена — в измерениях.
+    """
+    deal: str
+    date: date
+    amount: Decimal | None = None
+    rate_per_year: Decimal | None = None
+    rate_per_day: Decimal | None = None
+    schedule: ScheduleRule | None = None
+
+
+Action = Move | Bridge | Prepay | Direct | Restructure
 
 
 @dataclass(frozen=True)
@@ -248,6 +269,8 @@ def _target(action: Action) -> tuple | None:
         return ("досрочка", action.deal, action.date)
     if isinstance(action, Bridge):
         return ("мост", action.wallet, action.date)
+    if isinstance(action, Restructure):
+        return ("реструктуризация", action.deal, action.date)
     return None
 
 
@@ -258,6 +281,8 @@ def _reason(base: Base, action: Action) -> str | None:
         return _bridge_reason(base, action)
     if isinstance(action, Prepay):
         return _prepay_reason(base, action)
+    if isinstance(action, Restructure):
+        return _restructure_reason(base, action)
     return None                      # согласие владельца невозможным не бывает
 
 
@@ -353,6 +378,50 @@ def _prepay_budget_reason(action: Prepay, entry: Forecast | None) -> str | None:
     return None
 
 
+def _restructure_reason(base: Base, action: Restructure) -> str | None:
+    """Реструктуризация: сделка объявлена, дата в окне, версия непуста (07-Т2).
+
+    Валидация версии — та же, что у записи: каждое поле `None` — «не меняется»,
+    запись, не меняющая ничего, версией не является. Смена типа ставки — по
+    правилам записи: прежняя снимается нулём, двух ненулевых в эпохе не бывает.
+    Дата за горизонтом окна невозможна: вариант катается в окне базы.
+    Невыгодное здесь не отсекается: цену показывает измерениями `price`.
+    """
+    book = base.inp.book
+    deal = _deal(book, action.deal)
+    if deal is None:
+        return f"реструктуризация: неизвестная сделка {action.deal!r}"
+    if action.date > base.horizon:
+        return (f"реструктуризация {action.deal!r}: дата {action.date} за "
+                f"горизонтом проката ({base.horizon})")
+    if (action.amount is None and action.rate_per_year is None
+            and action.rate_per_day is None and action.schedule is None):
+        return (f"реструктуризация {action.deal!r}: версия пуста — все поля "
+                f"наследуются, менять нечего")
+    if (action.rate_per_year not in (None, Decimal(0))
+            and action.rate_per_day not in (None, Decimal(0))):
+        return (f"реструктуризация {action.deal!r}: заданы и годовая, и дневная "
+                f"— ставка либо годовая, либо дневная")
+    if action.amount is not None:
+        if not deal.closing:
+            return (f"реструктуризация {action.deal!r}: у регулярного расхода "
+                    f"нет суммы — переустанавливать нечего")
+        if action.amount < 0:
+            return (f"реструктуризация {action.deal!r}: сумма версии не может "
+                    f"быть отрицательной — прощение не делает долг отрицательным")
+    if action.schedule is not None:
+        try:
+            _validate_rule(action.deal, action.schedule)
+        except ValueError as error:
+            return f"реструктуризация {action.deal!r}: {error}"
+    taken = {r.date for r in book.restructures if r.deal == action.deal}
+    taken |= {a.date for a in book.assignments if a.deal == action.deal}
+    if action.date in taken:
+        return (f"реструктуризация {action.deal!r}: две записи условий в одну "
+                f"дату {action.date} — какая последняя, не определить")
+    return None
+
+
 # --- применение ------------------------------------------------------------
 
 def applied(base: Base, variant: Variant) -> ForecastInput:
@@ -386,30 +455,38 @@ def _variant_input(base: Base, actions: tuple[Action, ...]) -> ForecastInput:
             deal, income = _bridge_facts(action)
             book = replace(book, deals=[*book.deals, deal])
             incomes.append(income)
+        elif isinstance(action, Restructure):
+            book = replace(book,
+                           restructures=[*book.restructures,
+                                         _restructure_record(action)])
         else:
             consent = True
     # Окно базы передаётся, только если вариант не меняет входов окна: согласие
     # владельца продлевает окно до закрытия второго приоритета, и вариант с ним
-    # обязан посчитать своё окно, а не кататься в базовом. Остальные действия
-    # горизонтом отсечены: сдвиг и мост за окном невозможны (`impossible`),
-    # а досрочка окно только укорачивает.
+    # обязан посчитать своё окно, а не кататься в базовом. У остальных действий
+    # за окном невозможна дата действия (`impossible`): сдвиг, мост, досрочка и
+    # реструктуризация — все в окне; их эффект (например, график версии) окно
+    # честно обрезает на той же линии, по которой сравнивается цена.
     window = base.forecast.window if consent == base.inp.consent_to_second else None
     return replace(base.inp, book=book, one_offs=one_offs, incomes=incomes,
                    consent_to_second=consent, window=window)
 
 
-def facts(base: Base, variant: Variant) -> list[OccurrenceEdit | Movement | Deal]:
-    """Записи журнала для принятого варианта: правка, движение, сделка.
+def facts(base: Base, variant: Variant) -> list[OccurrenceEdit | Movement | Deal | RestructureRecord]:
+    """Записи журнала для принятого варианта: правка, движение, сделка, версия.
 
     Объект-действие в данных не хранится: принятое действие становится фактом —
-    правкой вхождения (перенос), движением по сделке (досрочка) или новой сделкой
-    с движением денег (мост). Согласие владельца фактом не становится: это
-    решение о расчёте, а не запись о деньгах.
+    правкой вхождения (перенос), движением по сделке (досрочка), новой сделкой
+    с движением денег (мост) или записью-реструктуризацией (версия условий со
+    дня). Согласие владельца фактом не становится: это решение о расчёте, а не
+    запись о деньгах. Версия с суммой обязана сойтись с суммой сделки: чтобы
+    смена тела оставила историю «до», зона снимает прежнюю сумму передачей —
+    обязанность зоны, движок её не берёт на себя (докстринг записи).
     """
     reason = impossible(base, variant)
     if reason is not None:
         raise ImpossibleAction(f"{variant.label}: {reason}")
-    rows: list[OccurrenceEdit | Movement | Deal] = []
+    rows: list[OccurrenceEdit | Movement | Deal | RestructureRecord] = []
     book = base.inp.book
     for action in variant.actions:
         if isinstance(action, Move):
@@ -420,6 +497,8 @@ def facts(base: Base, variant: Variant) -> list[OccurrenceEdit | Movement | Deal
         elif isinstance(action, Bridge):
             deal, _ = _bridge_facts(action)
             rows.append(deal)
+        elif isinstance(action, Restructure):
+            rows.append(_restructure_record(action))
     return rows
 
 
@@ -427,6 +506,19 @@ def _move_edit(action: Move) -> OccurrenceEdit:
     """Перенос как правка вхождения: дата — назначенная, `None` — отложение."""
     return OccurrenceEdit(deal=action.deal, planned=action.planned,
                           postponed=True, moved_to=action.to)
+
+
+def _restructure_record(action: Restructure) -> RestructureRecord:
+    """Принятая реструктуризация — записью-версией условий: те же поля.
+
+    Действие и запись носят одно имя в своих модулях: форма одна, носители
+    разные — действие живёт в варианте, запись в книге.
+    """
+    return RestructureRecord(date=action.date, deal=action.deal,
+                             amount=action.amount,
+                             rate_per_year=action.rate_per_year,
+                             rate_per_day=action.rate_per_day,
+                             schedule=action.schedule)
 
 
 def _prepay_facts(book: Settlements, action: Prepay) -> tuple[Movement, Payment]:

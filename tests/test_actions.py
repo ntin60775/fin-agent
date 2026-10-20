@@ -2,18 +2,22 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal as D
 
 import pytest
 
-from finance_core import (LEGAL, AllocationRule, BODY, Bridge, Charge,
-                          Counterparty, Deal, Direct,
+from finance_core import (LEGAL, AllocationRule, BODY, Bridge, CAP_NONE,
+                          Charge, Counterparty, Deal, Direct, DebtGrowth,
                           ForecastInput, ImpossibleAction, INTEREST, Income,
                           Movement,
-                          OccurrenceEdit, PARTS, PENALTY, Prepay, ScheduleRule,
+                          OccurrenceEdit, PARTS, PENALTY, PenaltyCap,
+                          PenaltyRule, PenaltyStep, Prepay,
+                          Restructure, RestructureAction, ScheduleRule,
                           Settlements, Move, Variant, Wallet, applied, baseline,
-                          deal_balance, deal_parts, facts, forecast, horizon,
+                          deal_balance, deal_growth, deal_parts, facts,
+                          forecast, horizon,
                           impossible, occurrences, price, prices, roll_deals,
                           roll_months, validate, variants)
 
@@ -747,3 +751,154 @@ def test_consent_extends_the_variants_window_and_closes_the_second_priority():
     assert agreed.second_priority.month is not None
     assert by_variant.second_priority.month == agreed.second_priority.month
     assert by_variant.window == agreed.window
+
+
+# --- реструктуризация как вариант (тикет 07) ---------------------------------
+
+def _restructure_base() -> tuple[Base, Deal]:
+    """Заём 24 000 под 0,1 % в день с неустойкой 0,2 % — график 4 000 × 6.
+
+    Синтетика без личных данных: суммы круглые, ставка передана снаружи.
+    """
+    deal = _deal(uid="заём", amount=D("24000"), rate_per_day=D("0.001"),
+                 rate_per_year=None,
+                 penalties=(PenaltyRule(steps=(PenaltyStep(0, D("0.002")),),
+                                        cap=PenaltyCap(CAP_NONE)),),
+                 allocations=(AllocationRule(PARTS),),
+                 schedule=ScheduleRule(days=(20,), payment=D("4000"), count=6,
+                                       shift_weekend=False, start=START))
+    book = _book(deal)
+    return baseline(_inp(book, max_months=6)), deal
+
+
+def _installment(date_: date = START, **kw) -> "RestructureAction":
+    """Рассрочка со дня: ставка вдвое ниже, платёж 2 000 × 12."""
+    base = dict(deal="заём", date=date_, rate_per_day=D("0.0005"),
+                schedule=ScheduleRule(days=(20,), payment=D("2000"), count=12,
+                                      shift_weekend=False, start=date_))
+    base.update(kw)
+    return RestructureAction(**base)
+
+
+def test_restructure_variant_applies_the_conditions_version_without_touching_base():
+    """Действие — та же версия условий, что у записи; база не тронута (07-а).
+
+    Поля действия повторяют запись (сумма, ставки, график; пустое — наследуется),
+    применённый вариант собирает новую книгу, а сценарий базы остаётся прежним.
+    """
+    base, _ = _restructure_base()
+    before = copy.deepcopy(base.inp.book)
+    variant = Variant("рассрочка", (_installment(),))
+    moved = applied(base, variant)
+    validate(moved.book)
+    assert moved.book.restructures == [
+        Restructure(date=START, deal="заём", rate_per_day=D("0.0005"),
+                    schedule=ScheduleRule(days=(20,), payment=D("2000"),
+                                          count=12, shift_weekend=False,
+                                          start=START))]
+    assert base.inp.book == before          # база не переписана
+    # Вариант считается в том же окне, что и база.
+    assert forecast(moved).window == base.forecast.window
+
+
+def test_restructure_variant_beats_dragging_on_the_measure():
+    """Замер «рассрочка против тянуть»: проценты и неустойка ниже (07-б).
+
+    «Тянуть» — существующий what-if роста долга: с января не платить. На 10 марта
+    он набирает проценты 1 667,12 и неустойку 536,00; рассрочка со ставкой вдвое
+    ниже и платежом 2 000 даёт 836,92 и 268,00 — оба измерения ниже, и это числа
+    одной линии, а не оценки.
+    """
+    base, deal = _restructure_base()
+    dragging = deal_growth(base.inp.book, "заём", START, date(2026, 3, 10))
+    moved = applied(base, Variant("рассрочка", (_installment(),)))
+    plan = deal_parts(moved.book, "заём", date(2026, 3, 10))
+    assert dragging.parts[INTEREST] == D("1691.12")
+    assert dragging.parts[PENALTY] == D("536.00")
+    assert plan[INTEREST] == D("836.92")
+    assert plan[PENALTY] == D("268.00")
+    assert plan[INTEREST] < dragging.parts[INTEREST]
+    assert plan[PENALTY] < dragging.parts[PENALTY]
+
+
+def test_restructure_variant_is_priced_by_the_same_measurements():
+    """Цена варианта — те же измерения, что у прочих действий (07-в).
+
+    Сумма процентов по прокату, дыра, необеспеченность, свободные деньги
+    последнего месяца окна: набор, а не одно число. Невыгодное не отклоняется —
+    считается и показывается.
+    """
+    base, _ = _restructure_base()
+    row = price(base, Variant("рассрочка", (_installment(),)))
+    assert row.interest == D("1089.62")
+    assert row.delay_days == 0
+    assert (row.hole_before, row.hole_after) == (D("0"), D("0"))
+    assert row.unsecured_before == D("24000")
+    assert row.unsecured_after == D("12000")
+    assert row.free_before == D("-4000.00")
+    assert row.free_after == D("-2000.00")
+
+    # Невыгодная рассрочка (платёж вдвое меньше, платить дольше) — возможна:
+    # считается и показывается ценой, решение за человеком.
+    worse = Variant("дольше", (_installment(
+        schedule=ScheduleRule(days=(20,), payment=D("1000"), count=24,
+                              shift_weekend=False, start=START)),))
+    assert impossible(base, worse) is None
+    assert price(base, worse).interest > row.interest
+
+
+def test_impossible_restructure_variants_name_the_reason():
+    """Невозможное отклоняется причиной, а не ценой (07-г).
+
+    Неизвестная сделка, дата за горизонтом, пустая версия, две ставки сразу,
+    отрицательная сумма — с теми же правилами, что у записи версии.
+    """
+    base, _ = _restructure_base()
+    assert "неизвестная сделка" in impossible(
+        base, Variant("чужая", (_installment(deal="нет-такой"),)))
+    assert "за горизонтом" in impossible(
+        base, Variant("позже", (_installment(date_=date(2026, 12, 1)),)))
+    assert "версия пуста" in impossible(
+        base, Variant("пустая", (RestructureAction(deal="заём", date=START),)))
+    assert "либо годовая, либо дневная" in impossible(
+        base, Variant("две ставки", (_installment(rate_per_year=D("0.24")),)))
+    assert "не может быть отрицательной" in impossible(
+        base, Variant("минус", (_installment(amount=D("-1000")),)))
+
+
+def test_an_accepted_restructure_becomes_a_book_record():
+    """Принятая реструктуризация — запись-версия в facts, не действие (07-д).
+
+    Объект-действие в данных не хранится: `facts` возвращает запись
+    `settlements.Restructure` с теми же условиями — как перенос становится
+    правкой, а досрочка движением.
+    """
+    base, _ = _restructure_base()
+    variant = Variant("рассрочка", (_installment(),))
+    rows = facts(base, variant)
+    assert [type(row).__name__ for row in rows] == ["Restructure"]
+    [record] = rows
+    assert type(record) is Restructure          # запись книги, не действие
+    assert (record.date, record.deal) == (START, "заём")
+    assert record.rate_per_day == D("0.0005")
+    assert record.schedule.payment == D("2000")
+
+
+def test_restructure_variant_rejects_bad_schedule_and_taken_date():
+    """Форма графика версии и коллизия дат — невозможное с причиной (ревью 07).
+
+    График версии проверяет та же валидация формы, что и график сделки, а дата
+    действия, совпавшая с датой записи условий в базе, оставила бы «какая
+    последняя» неопределённым — оба отсекаются до расчёта.
+    """
+    base, _ = _restructure_base()
+    assert "сумма платежа должна быть положительной" in impossible(
+        base, Variant("график", (_installment(
+            schedule=ScheduleRule(days=(20,), payment=D("0"), count=3,
+                                  shift_weekend=False, start=START)),)))
+    taken = Variant("коллизия", (_installment(),))
+    book = replace(base.inp.book,
+                   restructures=(Restructure(date=START, deal="заём",
+                                             rate_per_day=D("0.0005")),))
+    rebuilt = baseline(replace(base.inp, book=book))
+    assert "две записи условий" in impossible(rebuilt, taken)
