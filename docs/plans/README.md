@@ -29,9 +29,9 @@ links:
 **Порядок.** Считается по блокирующим связям, а не по дате: план или тикет берётся,
 когда все его `depends_on` закрыты.
 
-- `restructuring-and-enforcement` — грилл пройден (3 раунда, Q1–Q14), разбит на
-  тикеты, все `draft` — ждёт `/ship` по одному тикету за запуск (см.
-  `restructuring-and-enforcement/README.md`);
+- все планы закрыты: 7 папочных и 2 файловых — `archived`, draft-тикетов нет;
+  последний закрытый — `restructuring-and-enforcement` (01–08, 2026-10-20);
+  новые планы заводит заявка из `inbox/` — сейчас вход пуст.
 - `penalties-and-charges`, `obligations`, `long-debts-single-values`, `zone-split`,
   `engine-wording`, `engine-messages` и `model-audit-fixes` — архивные, порядок
   не задают.
